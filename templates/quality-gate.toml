@@ -1,11 +1,9 @@
+# Keep this list empty when the repository has no Python component.
+python = []
+
 [quality]
 schema = 1
 policy = "quality-gate-v1"
 
-# Add one [[python]] table for each Python component in the repository.
+# Add one [[python]] table for each Python component when needed.
 # Paths describe component layout; they do not override quality rules.
-[[python]]
-path = "app"
-tests = "tests"
-requirements = "requirements-dev.txt"
-typecheck = true

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import locale
 import os
 import subprocess
 import sys
@@ -20,6 +21,21 @@ class QualityGateError(RuntimeError):
 
 def emit(message: str) -> None:
 	sys.stdout.write(f"{message}\n")
+
+
+def decode_subprocess_output(output: bytes | str | None) -> str:
+	"""Decode subprocess output across UTF-8 and Windows console encodings."""
+	if output is None:
+		return ""
+	if isinstance(output, str):
+		return output
+	encodings = ["utf-8", locale.getpreferredencoding(False)]
+	for encoding in dict.fromkeys(encodings):
+		try:
+			return output.decode(encoding)
+		except UnicodeDecodeError:
+			continue
+	return output.decode("utf-8", errors="replace")
 
 
 @dataclass(frozen=True)
@@ -67,7 +83,7 @@ def load_components(root: Path) -> list[PythonComponent]:
 		raise QualityGateError(f"{MANIFEST_NAME} must declare [quality] schema = 1.")
 	components_data = data.get("python")
 	if not isinstance(components_data, list):
-		raise QualityGateError(f"{MANIFEST_NAME} must declare [[python]] entries, even when empty.")
+		raise QualityGateError(f"{MANIFEST_NAME} must declare python = [] or [[python]] entries.")
 	components: list[PythonComponent] = []
 	for index, item in enumerate(components_data, start=1):
 		if not isinstance(item, dict):
@@ -104,12 +120,12 @@ def run(command: list[str], root: Path, environment: dict[str, str]) -> None:
 		cwd=root,
 		env=environment,
 		capture_output=True,
-		text=True,
-		encoding="utf-8",
 		check=False,
 	)
 	if result.returncode:
-		detail = (result.stdout + result.stderr).strip()
+		detail = (
+			decode_subprocess_output(result.stdout) + decode_subprocess_output(result.stderr)
+		).strip()
 		if not detail:
 			detail = f"Command exited with {result.returncode}."
 		raise QualityGateError(f"{' '.join(command)}\n\n{detail}")
@@ -224,8 +240,11 @@ def install_dependencies(root: Path | None = None) -> None:
 			raise QualityGateError(
 				f"Development requirements file does not exist: {component.requirements}"
 			)
+		environment = dict(os.environ)
+		environment["PYTHONIOENCODING"] = "utf-8"
+		environment["PYTHONUTF8"] = "1"
 		run(
 			[sys.executable, "-m", "pip", "install", "-r", str(component.requirements)],
 			actual_root,
-			dict(os.environ),
+			environment,
 		)
