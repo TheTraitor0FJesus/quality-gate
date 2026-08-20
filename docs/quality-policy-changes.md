@@ -10,7 +10,7 @@ This repository is the source of truth for shared Python quality checks.
 - `.github/workflows/quality.yml` is the reusable GitHub CI workflow.
 - `quality-gate.toml` in each consumer repository contains component metadata only.
 
-The global Git hook uses this local checkout. Consumer CI workflows invoke this repository from `main`. A commit pushed to `main` therefore rolls out to every connected repository.
+The global Git hook uses this local checkout and its untracked `.venv` runtime. Consumer CI workflows invoke this repository from `main`. A commit pushed to `main` therefore rolls out to every connected repository.
 
 ## Change procedure
 
