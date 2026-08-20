@@ -23,7 +23,7 @@ quality-gate = "quality_gate.cli:main"
 packages = ["quality_gate"]
 
 [tool.setuptools.package-data]
-quality_gate = ["policy/*.toml"]
+quality_gate = ["policy/*.ini", "policy/*.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
