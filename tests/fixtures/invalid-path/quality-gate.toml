@@ -1,0 +1,5 @@
+[quality]
+schema = 1
+
+[[python]]
+path = "../outside"

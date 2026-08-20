@@ -1,0 +1,15 @@
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "UP", "N", "ANN", "T20", "E722", "C901", "PLR0915", "PLR2004", "ERA"]
+ignore = ["W191"]
+unfixable = ["F401"]
+
+[lint.isort]
+known-first-party = ["quality_gate"]
+
+[format]
+indent-style = "tab"
+quote-style = "double"
+skip-magic-trailing-comma = false

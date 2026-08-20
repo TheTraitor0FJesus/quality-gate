@@ -1,0 +1,6 @@
+[quality]
+schema = 1
+
+[[python]]
+path = "app"
+typecheck = false

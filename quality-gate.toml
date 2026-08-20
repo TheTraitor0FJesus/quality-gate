@@ -1,0 +1,8 @@
+[quality]
+schema = 1
+policy = "quality-gate-v1"
+
+[[python]]
+path = "."
+tests = "tests"
+typecheck = true
