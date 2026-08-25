@@ -21,7 +21,10 @@ from quality_gate.contracts import (
 	load_manifest,
 	redact,
 )
+from quality_gate.distribution import DistributionError
+from quality_gate.launcher import PreparedEnvironment, prepare
 from quality_gate.reporting import render
+from quality_gate.runtime import RuntimeUnavailable
 from quality_gate.snapshot import SnapshotError, candidate_snapshot
 
 MANIFEST_NAME = "quality-gate.toml"
@@ -311,8 +314,35 @@ def _safe_environment(temporary_path: str) -> dict[str, str]:
 	return environment
 
 
+def _runtime_python(prepared: PreparedEnvironment, component_index: int) -> Path:
+	inspection = prepared.runtimes[component_index - 1]
+	if not inspection.current or inspection.python is None:
+		raise QualityGateError(
+			f"runtime is unavailable for Python component {component_index}: "
+			f"{inspection.reason or 'runtime is stale'}",
+			check_id=f"python.component_{component_index}.runtime",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="run setup and retry the quality gate",
+		)
+	return inspection.python
+
+
+def _tool_command(prepared: PreparedEnvironment, python: Path, name: str) -> list[str]:
+	release_manifest = getattr(prepared, "release_manifest", None)
+	if release_manifest is not None:
+		for tool in release_manifest.tools:
+			if tool.name == name:
+				if tool.path.lower().endswith(".whl"):
+					return [str(python), "-m", name]
+				return [str(prepared.policy_root / tool.path)]
+	return [str(python), "-m", name]
+
+
 def _run_python_checks(
-	actual_root: Path, manifest: Manifest, components: list[PythonComponent]
+	actual_root: Path,
+	manifest: Manifest,
+	components: list[PythonComponent],
+	prepared: PreparedEnvironment,
 ) -> list[CheckResult]:
 	deadline = time.monotonic() + manifest.repository.gate_timeout_seconds
 	with temporary_directory(actual_root) as temporary_path:
@@ -320,18 +350,17 @@ def _run_python_checks(
 		run_errors: list[QualityGateError] = []
 		executed: list[str] = []
 		for component_index, component in enumerate(components, start=1):
+			python_executable = _runtime_python(prepared, component_index)
 			arguments = [str(component.path.relative_to(actual_root))]
 			prefix = f"python.component_{component_index}"
 			commands: list[tuple[str, list[str], int]] = [
 				(
 					f"{prefix}.ruff",
 					[
-						sys.executable,
-						"-m",
-						"ruff",
+						*_tool_command(prepared, python_executable, "ruff"),
 						"check",
 						"--config",
-						str(POLICY_DIR / "ruff.toml"),
+						str(prepared.policy_root / "quality_gate" / "policy" / "ruff.toml"),
 						*arguments,
 					],
 					manifest.repository.command_timeout_seconds,
@@ -339,13 +368,11 @@ def _run_python_checks(
 				(
 					f"{prefix}.format",
 					[
-						sys.executable,
-						"-m",
-						"ruff",
+						*_tool_command(prepared, python_executable, "ruff"),
 						"format",
 						"--check",
 						"--config",
-						str(POLICY_DIR / "ruff.toml"),
+						str(prepared.policy_root / "quality_gate" / "policy" / "ruff.toml"),
 						*arguments,
 					],
 					manifest.repository.command_timeout_seconds,
@@ -356,11 +383,9 @@ def _run_python_checks(
 					(
 						f"{prefix}.mypy",
 						[
-							sys.executable,
-							"-m",
-							"mypy",
+							*_tool_command(prepared, python_executable, "mypy"),
 							"--config-file",
-							str(POLICY_DIR / "mypy.ini"),
+							str(prepared.policy_root / "quality_gate" / "policy" / "mypy.ini"),
 							*arguments,
 						],
 						manifest.repository.command_timeout_seconds,
@@ -371,9 +396,7 @@ def _run_python_checks(
 					(
 						f"{prefix}.pytest",
 						[
-							sys.executable,
-							"-m",
-							"pytest",
+							*_tool_command(prepared, python_executable, "pytest"),
 							str(test_path.relative_to(actual_root)),
 							"-q",
 							"-p",
@@ -430,7 +453,12 @@ def _run_python_checks(
 	return results
 
 
-def _check_snapshot(actual_root: Path, *, verbose: bool = False) -> Verdict:
+def _check_snapshot(
+	actual_root: Path,
+	*,
+	verbose: bool = False,
+	repository_root: Path | None = None,
+) -> Verdict:
 	actual_root = actual_root.resolve()
 	try:
 		manifest = load_manifest(actual_root)
@@ -440,11 +468,6 @@ def _check_snapshot(actual_root: Path, *, verbose: bool = False) -> Verdict:
 	contract_result = required_documents_result(actual_root, manifest)
 	try:
 		components = load_components(actual_root)
-	except QualityGateError as error:
-		verdict = Verdict((contract_result, _error_result(error)))
-		return verdict
-	try:
-		run_results = _run_python_checks(actual_root, manifest, components)
 	except QualityGateError as error:
 		verdict = Verdict((contract_result, _error_result(error)))
 		return verdict
@@ -459,6 +482,30 @@ def _check_snapshot(actual_root: Path, *, verbose: bool = False) -> Verdict:
 			)
 		)
 	else:
+		try:
+			prepared = prepare(
+				actual_root,
+				repository_root=repository_root or actual_root,
+			)
+			policy_path = prepared.policy_root / "quality_gate" / "policy"
+			if not policy_path.is_dir():
+				raise QualityGateError(
+					"cached policy release has no policy directory",
+					check_id="runtime.policy",
+					exit_code=EXIT_UNCHECKED,
+					recovery_action="sync a complete policy release and retry the quality gate",
+				)
+			run_results = _run_python_checks(actual_root, manifest, components, prepared)
+		except QualityGateError as error:
+			return Verdict((contract_result, _error_result(error)))
+		except (DistributionError, RuntimeUnavailable) as error:
+			quality_error = QualityGateError(
+				str(error),
+				check_id="runtime.policy",
+				exit_code=EXIT_UNCHECKED,
+				recovery_action="run sync and setup, then retry the quality gate",
+			)
+			return Verdict((contract_result, _error_result(quality_error)))
 		results.extend(run_results)
 	verdict = Verdict(tuple(results))
 	return verdict
@@ -470,7 +517,11 @@ def check(root: Path | None = None, *, verbose: bool = False) -> Verdict:
 	actual_root = repository_root(root)
 	try:
 		with candidate_snapshot(actual_root) as snapshot:
-			verdict = _check_snapshot(snapshot.root, verbose=verbose)
+			verdict = _check_snapshot(
+				snapshot.root,
+				verbose=verbose,
+				repository_root=actual_root,
+			)
 	except SnapshotError as error:
 		quality_error = QualityGateError(
 			error.message,

@@ -89,8 +89,13 @@ def test_candidate_snapshot_reports_git_timeout_as_unchecked(
 	created: list[Path] = []
 	real_mkdtemp = snapshot_module.tempfile.mkdtemp
 
-	def capture_mkdtemp(**kwargs: object) -> str:
-		path = Path(real_mkdtemp(**kwargs))
+	def capture_mkdtemp(
+		*,
+		suffix: str | None = None,
+		prefix: str | None = None,
+		dir: str | os.PathLike[str] | None = None,
+	) -> str:
+		path = Path(real_mkdtemp(suffix=suffix, prefix=prefix, dir=dir))
 		created.append(path)
 		return str(path)
 

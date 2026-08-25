@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from quality_gate import runner
+from quality_gate.distribution import ExternalTool, ReleaseFile, ReleaseManifest
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -29,6 +31,20 @@ def test_decode_subprocess_output_handles_windows_encoding(
 	monkeypatch.setattr(runner.locale, "getpreferredencoding", lambda _do_setlocale: "cp1251")
 
 	assert runner.decode_subprocess_output("ошибка pip".encode("cp1251")) == "ошибка pip"
+
+
+def test_wheel_tool_runs_from_the_prepared_runtime() -> None:
+	python = Path("runtime") / "Scripts" / "python.exe"
+	prepared = SimpleNamespace(
+		policy_root=Path("release"),
+		release_manifest=ReleaseManifest(
+			"v2.0.0",
+			(ReleaseFile("quality_gate.whl", "a" * 64),),
+			(ExternalTool("mypy", "1.19.1", "mypy.whl", "b" * 64),),
+		),
+	)
+
+	assert runner._tool_command(prepared, python, "mypy") == [str(python), "-m", "mypy"]
 
 
 def test_run_reports_non_utf8_subprocess_output(
@@ -101,6 +117,14 @@ def test_check_sets_a_writable_temporary_directory(monkeypatch: pytest.MonkeyPat
 	monkeypatch.setattr(runner, "run", fake_run)
 	monkeypatch.setattr(runner, "temporary_directory", fake_temporary_directory)
 	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
+	monkeypatch.setattr(
+		runner,
+		"prepare",
+		lambda *args, **kwargs: SimpleNamespace(
+			policy_root=runner.POLICY_DIR.parent.parent,
+			runtimes=(SimpleNamespace(python=Path(sys.executable), current=True),),
+		),
+	)
 
 	runner.check(root)
 
