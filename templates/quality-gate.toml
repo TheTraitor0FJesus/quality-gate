@@ -1,9 +1,21 @@
-# Keep this list empty when the repository has no Python component.
-python = []
+waivers = []
 
 [quality]
-schema = 1
-policy = "quality-gate-v1"
+schema = 2
+policy_release = "v2.0.0"
+
+[repository]
+name = "REVIEW_REQUIRED"
+domains = ["repository"]
+required_documents = ["AGENTS.md"]
+
+[repository.limits]
+max_blob_size_mib = 5
+
+[repository.defaults]
+command_timeout_seconds = 120
+test_timeout_seconds = 300
+gate_timeout_seconds = 600
 
 # Add one [[python]] table for each Python component when needed.
-# Paths describe component layout; they do not override quality rules.
+# Paths describe component layout; they do not override shared quality rules.

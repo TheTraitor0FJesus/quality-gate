@@ -6,7 +6,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from quality_gate.runner import QualityGateError, check, install_dependencies, validate
+from quality_gate.contracts import ValidationError, Verdict
+from quality_gate.migration import migration_proposal
+from quality_gate.reporting import render
+from quality_gate.runner import QualityGateError, _error_result, check, validate
 
 
 def parser() -> argparse.ArgumentParser:
@@ -14,16 +17,9 @@ def parser() -> argparse.ArgumentParser:
 	result.add_argument("--root", type=Path, help="Repository root. Defaults to the Git root.")
 	subcommands = result.add_subparsers(dest="command", required=True)
 	check_parser = subcommands.add_parser("check", help="Run quality checks.")
-	check_parser.add_argument(
-		"--changed",
-		action="store_true",
-		help="Check staged Python files.",
-	)
+	check_parser.add_argument("--verbose", action="store_true", help="Show all redacted findings.")
 	subcommands.add_parser("validate", help="Validate the repository quality manifest.")
-	subcommands.add_parser(
-		"install-dependencies",
-		help="Install development dependencies declared by the manifest.",
-	)
+	subcommands.add_parser("migrate", help="Print a read-only schema 1 migration proposal.")
 	return result
 
 
@@ -32,18 +28,26 @@ def main() -> int:
 	try:
 		if arguments.command == "validate":
 			validate(arguments.root)
-		elif arguments.command == "install-dependencies":
-			install_dependencies(arguments.root)
+		elif arguments.command == "migrate":
+			sys.stdout.write(migration_proposal(arguments.root))
 		else:
-			check(arguments.root, changed=arguments.changed)
-	except QualityGateError as error:
-		report = (
-			"QUALITY GATE FAILED\nCause:\n"
-			f"{error}\nAction:\n"
-			"Fix the reported configuration or check failure, then retry.\n"
+			verdict = check(arguments.root, verbose=arguments.verbose)
+			if verdict.exit_code:
+				return verdict.exit_code
+	except ValidationError as error:
+		action = (
+			"review the schema 1 manifest and run migrate"
+			if error.path == "quality.schema"
+			else f"correct {error.path} and run validate"
 		)
-		sys.stdout.write(report)
-		return 1
+		sys.stdout.write(f"manifest: unchecked - {error.message}; action: {action}\n")
+		return 2
+	except QualityGateError as error:
+		sys.stdout.write(
+			render(Verdict((_error_result(error),)), verbose=getattr(arguments, "verbose", False))
+		)
+		sys.stdout.write("\n")
+		return error.exit_code
 	return 0
 
 

@@ -11,12 +11,16 @@ from quality_gate import runner
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def _fake_candidate_snapshot(root: Path) -> AbstractContextManager[SimpleNamespace]:
+	return nullcontext(SimpleNamespace(root=root))
+
+
 def test_load_components_accepts_python_component() -> None:
 	root = FIXTURES / "valid"
 
 	components = runner.load_components(root)
 
-	assert components == [runner.PythonComponent(root / "app", None, None, False)]
+	assert components == [runner.PythonComponent(root / "app", None, None, True, (), 300)]
 
 
 def test_decode_subprocess_output_handles_windows_encoding(
@@ -57,7 +61,9 @@ def test_check_skips_python_tools_without_components(
 	root = FIXTURES / "no-python"
 	calls: list[tuple[list[str], dict[str, str]]] = []
 
-	def fake_run(command: list[str], root: Path, environment: dict[str, str]) -> None:
+	def fake_run(
+		command: list[str], root: Path, environment: dict[str, str], *, timeout: float
+	) -> None:
 		calls.append((command, environment))
 
 	def fake_temporary_directory(root: Path) -> AbstractContextManager[str]:
@@ -65,6 +71,7 @@ def test_check_skips_python_tools_without_components(
 
 	monkeypatch.setattr(runner, "run", fake_run)
 	monkeypatch.setattr(runner, "temporary_directory", fake_temporary_directory)
+	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
 
 	runner.check(root)
 
@@ -74,16 +81,18 @@ def test_check_skips_python_tools_without_components(
 def test_load_components_rejects_path_outside_repository() -> None:
 	root = FIXTURES / "invalid-path"
 
-	with pytest.raises(runner.QualityGateError, match="inside the repository"):
+	with pytest.raises(runner.QualityGateError, match="repository-relative"):
 		runner.load_components(root)
 
 
 def test_check_sets_a_writable_temporary_directory(monkeypatch: pytest.MonkeyPatch) -> None:
 	root = FIXTURES / "valid"
 	calls: list[tuple[list[str], dict[str, str]]] = []
-	expected_call_count = 2
+	expected_call_count = 3
 
-	def fake_run(command: list[str], root: Path, environment: dict[str, str]) -> None:
+	def fake_run(
+		command: list[str], root: Path, environment: dict[str, str], *, timeout: float
+	) -> None:
 		calls.append((command, environment))
 
 	def fake_temporary_directory(root: Path) -> AbstractContextManager[str]:
@@ -91,6 +100,7 @@ def test_check_sets_a_writable_temporary_directory(monkeypatch: pytest.MonkeyPat
 
 	monkeypatch.setattr(runner, "run", fake_run)
 	monkeypatch.setattr(runner, "temporary_directory", fake_temporary_directory)
+	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
 
 	runner.check(root)
 

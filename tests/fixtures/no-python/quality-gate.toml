@@ -1,5 +1,18 @@
-python = []
+waivers = []
 
 [quality]
-schema = 1
-policy = "quality-gate-v1"
+schema = 2
+policy_release = "v2.0.0"
+
+[repository]
+name = "no-python"
+domains = ["repository"]
+required_documents = ["quality-gate.toml"]
+
+[repository.limits]
+max_blob_size_mib = 5
+
+[repository.defaults]
+command_timeout_seconds = 120
+test_timeout_seconds = 300
+gate_timeout_seconds = 600

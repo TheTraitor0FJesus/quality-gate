@@ -7,13 +7,16 @@ This repository is the source of truth for shared Python quality checks.
 - `quality_gate/policy/ruff.toml` defines shared Ruff policy.
 - `quality_gate/policy/mypy.ini` defines shared mypy policy.
 - `quality_gate/runner.py` defines which checks run and how project manifests apply them.
+- `quality_gate/contracts.py`, `quality_gate/reporting.py`, and `quality_gate/migration.py` define the schema 2 manifest, verdict/reporting, waiver, and schema 1 migration contracts.
 - `.github/workflows/quality.yml` is the reusable GitHub CI workflow.
-- `quality-gate.toml` in each consumer repository contains component metadata only.
+- `quality-gate.toml` in each consumer repository is the schema 2 contract: repository obligations,
+  component metadata, limits, defaults, policy release identity, and typed waivers.
 
-The reusable workflow installs this public repository directly from `main`; consumer
-repositories do not need a repository secret for the shared package.
+The reusable workflow and local launcher must consume an immutable policy release. A later
+release/sync change owns artifact retrieval, checksums, and exact workflow references.
 
-The global Git hook uses this local checkout and its untracked `.venv` runtime. Consumer CI workflows invoke this repository from `main`. A commit pushed to `main` therefore rolls out to every connected repository.
+The global Git hook currently uses this local checkout and its untracked `.venv` runtime. Release
+and sync work must replace mutable branch coupling with an explicit cached release selection.
 
 ## Change procedure
 

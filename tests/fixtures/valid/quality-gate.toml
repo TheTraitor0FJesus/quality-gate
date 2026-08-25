@@ -1,6 +1,28 @@
+waivers = []
+
 [quality]
-schema = 1
+schema = 2
+policy_release = "v2.0.0"
+
+[repository]
+name = "valid"
+domains = ["repository", "python"]
+required_documents = ["quality-gate.toml"]
+
+[repository.limits]
+max_blob_size_mib = 5
+
+[repository.defaults]
+command_timeout_seconds = 120
+test_timeout_seconds = 300
+gate_timeout_seconds = 600
 
 [[python]]
+name = "app"
 path = "app"
-typecheck = false
+python_version = "3.12"
+dependency_inputs = []
+test_paths = []
+tests_applicable = false
+tests_reason = "Fixture validates manifest loading without running tests."
+timeout_seconds = 300

@@ -19,5 +19,4 @@ jobs:
           python-version: ${{ inputs.python-version }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install "quality-gate[tools] @ git+https://github.com/TheTraitor0FJesus/quality-gate.git@main"
-      - run: quality-gate install-dependencies
       - run: quality-gate check

@@ -2,11 +2,16 @@
 
 Shared, versioned quality checks for local Git hooks and GitHub CI.
 
-`quality-gate.toml` describes project components. The runner owns the Ruff, mypy, pytest, temporary-directory, and failure-reporting policy.
+`quality-gate.toml` is a schema 2 repository contract. It declares repository obligations,
+Python components, immutable policy release identity, limits, and typed waivers. The runner
+owns the Ruff, mypy, pytest, isolated-environment, timeout, and structured-reporting policy.
 
 ## Commands
 
 - `quality-gate validate` validates a repository manifest.
-- `quality-gate install-dependencies` installs development dependencies declared by a manifest.
-- `quality-gate check --changed` checks staged Python changes for a local commit.
-- `quality-gate check` checks every declared component for CI.
+- `quality-gate migrate` prints a read-only schema 1 migration proposal.
+- `quality-gate check` checks the complete declared contract and returns a structured verdict.
+- `quality-gate check --verbose` prints complete redacted diagnostics.
+
+Schema 2 does not expose changed-only checking or generic dependency installation. Verification
+is read-only and uses the exact repository root supplied by `--root` or discovered from Git.
