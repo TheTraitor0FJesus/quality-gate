@@ -1,0 +1,1 @@
+"""Second Python component fixture."""

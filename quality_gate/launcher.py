@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .contracts import Manifest, load_manifest
 from .distribution import PolicyCache, ReleaseManifest, load_release_manifest
-from .runtime import RuntimeInspection, RuntimeManager, runtime_identity
+from .runtime import RuntimeInspection, RuntimeManager, RuntimeUnavailable, runtime_identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,12 +38,25 @@ def prepare(
 	manager = RuntimeManager(cache)
 	runtimes: list[RuntimeInspection] = []
 	for component in manifest.python:
-		identity = runtime_identity(
-			actual_root,
-			manifest,
-			component,
-			repository=str(identity_root),
-		)
+		try:
+			identity = runtime_identity(
+				actual_root,
+				manifest,
+				component,
+				repository=str(identity_root),
+			)
+		except RuntimeUnavailable as error:
+			if create_runtimes:
+				raise
+			runtimes.append(
+				RuntimeInspection(
+					manager.root / "unavailable" / component.name,
+					None,
+					False,
+					str(error),
+				)
+			)
+			continue
 		if create_runtimes:
 			runtimes.append(
 				manager.ensure(

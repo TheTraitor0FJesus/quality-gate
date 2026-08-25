@@ -11,7 +11,7 @@ from quality_gate.distribution import DistributionError, PolicyCache
 from quality_gate.launcher import prepare
 from quality_gate.migration import migration_proposal
 from quality_gate.reporting import render
-from quality_gate.runner import QualityGateError, _error_result, check, validate
+from quality_gate.runner import QualityGateError, _error_result, check, format_paths, validate
 from quality_gate.runtime import RuntimeManager, RuntimeUnavailable, runtime_identity
 
 
@@ -21,6 +21,10 @@ def parser() -> argparse.ArgumentParser:
 	subcommands = result.add_subparsers(dest="command", required=True)
 	check_parser = subcommands.add_parser("check", help="Run quality checks.")
 	check_parser.add_argument("--verbose", action="store_true", help="Show all redacted findings.")
+	format_parser = subcommands.add_parser(
+		"format", help="Format only explicit Python paths with the pinned Ruff release."
+	)
+	format_parser.add_argument("paths", nargs="+", help="Repository-relative paths to format.")
 	subcommands.add_parser("validate", help="Validate the repository quality manifest.")
 	subcommands.add_parser("migrate", help="Print a read-only schema 1 migration proposal.")
 	sync_parser = subcommands.add_parser(
@@ -103,23 +107,31 @@ def _setup(root: Path | None, cache_dir: Path | None) -> None:
 	sys.stdout.write(f"setup: ready - {environment.manifest.policy_release}\n")
 
 
+def _migrate(root: Path | None) -> None:
+	sys.stdout.write(migration_proposal(root or Path(".")))
+
+
+def _dispatch(arguments: argparse.Namespace) -> int:
+	handlers = {
+		"validate": lambda: validate(arguments.root),
+		"migrate": lambda: _migrate(arguments.root),
+		"sync": lambda: _sync(arguments),
+		"doctor": lambda: _doctor(arguments.root, arguments.cache_dir),
+		"setup": lambda: _setup(arguments.root, arguments.cache_dir),
+		"format": lambda: format_paths(arguments.root, tuple(arguments.paths)),
+	}
+	handler = handlers.get(arguments.command)
+	if handler is not None:
+		result = handler()
+		return result if isinstance(result, int) else 0
+	verdict = check(arguments.root, verbose=arguments.verbose)
+	return verdict.exit_code
+
+
 def main() -> int:
 	arguments = parser().parse_args()
 	try:
-		if arguments.command == "validate":
-			validate(arguments.root)
-		elif arguments.command == "migrate":
-			sys.stdout.write(migration_proposal(arguments.root))
-		elif arguments.command == "sync":
-			_sync(arguments)
-		elif arguments.command == "doctor":
-			return _doctor(arguments.root, arguments.cache_dir)
-		elif arguments.command == "setup":
-			_setup(arguments.root, arguments.cache_dir)
-		else:
-			verdict = check(arguments.root, verbose=arguments.verbose)
-			if verdict.exit_code:
-				return verdict.exit_code
+		return _dispatch(arguments)
 	except ValidationError as error:
 		action = (
 			"review the schema 1 manifest and run migrate"

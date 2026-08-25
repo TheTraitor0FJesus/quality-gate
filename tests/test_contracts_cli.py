@@ -113,6 +113,14 @@ def test_validate_accepts_python_manifest(tmp_path: Path) -> None:
 	assert result.returncode == 0
 
 
+def test_format_cli_requires_explicit_paths(tmp_path: Path) -> None:
+	(tmp_path / "quality-gate.toml").write_text(_manifest(python=True), encoding="utf-8")
+	result = _run(tmp_path, "format")
+
+	assert result.returncode == EXIT_UNCHECKED
+	assert "the following arguments are required: paths" in result.stderr
+
+
 def test_validate_rejects_schema_one_and_migrate_is_read_only(tmp_path: Path) -> None:
 	manifest = 'python = []\n\n[quality]\nschema = 1\npolicy = "quality-gate-v1"\n'
 	path = tmp_path / "quality-gate.toml"
@@ -152,6 +160,19 @@ def test_check_reports_quality_failure_with_exit_one(tmp_path: Path) -> None:
 	assert result.returncode == EXIT_QUALITY_FAILURE
 	assert "manifest.documents: failed" in result.stdout
 	assert "restore docs/missing.md" in result.stdout
+
+
+def test_check_cli_blocks_when_python_runtime_is_unavailable(tmp_path: Path) -> None:
+	(tmp_path / "quality-gate.toml").write_text(_manifest(python=True), encoding="utf-8")
+	(tmp_path / "AGENTS.md").write_text("contract\n", encoding="utf-8")
+	(tmp_path / "quality_gate").mkdir()
+	(tmp_path / "tests").mkdir()
+	_init_and_stage(tmp_path, "quality-gate.toml", "AGENTS.md")
+
+	result = _run(tmp_path, "check")
+
+	assert result.returncode == EXIT_UNCHECKED
+	assert "unchecked" in result.stdout
 
 
 def test_check_redacts_credential_shaped_required_document(tmp_path: Path) -> None:

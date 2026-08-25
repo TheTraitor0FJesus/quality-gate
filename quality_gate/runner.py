@@ -78,6 +78,8 @@ class PythonComponent:
 	typecheck: bool
 	test_paths: tuple[Path, ...] = ()
 	timeout_seconds: int = 300
+	missing_test_paths: tuple[Path, ...] = ()
+	path_exists: bool = True
 
 
 def _manifest_error(error: ValidationError) -> QualityGateError:
@@ -137,35 +139,22 @@ def load_components(root: Path) -> list[PythonComponent]:
 	components: list[PythonComponent] = []
 	for index, item in enumerate(manifest.python, start=1):
 		path = relative_path(root, item.path, f"python entry {index}.path")
-		if not path.is_dir():
-			raise QualityGateError(
-				f"Python component path does not exist: {item.path}",
-				check_id="python.contract",
-				exit_code=2,
-				recovery_action=f"restore {item.path} and run validate",
-			)
 		test_paths = tuple(
 			relative_path(root, test_path, f"python entry {index}.test_paths[{test_index}]")
 			for test_index, test_path in enumerate(item.test_paths)
 		)
-		missing_tests = [
-			str(test_path.relative_to(root)) for test_path in test_paths if not test_path.is_dir()
-		]
-		if missing_tests:
-			raise QualityGateError(
-				f"declared test path does not exist: {missing_tests[0]}",
-				check_id="python.tests",
-				exit_code=2,
-				recovery_action=f"restore {missing_tests[0]} and run validate",
-			)
+		missing_tests = [test_path for test_path in test_paths if not test_path.exists()]
+		existing_tests = tuple(test_path for test_path in test_paths if test_path.exists())
 		components.append(
 			PythonComponent(
 				path,
 				test_paths[0] if test_paths else None,
 				None,
 				True,
-				test_paths,
+				existing_tests,
 				item.timeout_seconds,
+				tuple(missing_tests),
+				path.is_dir(),
 			)
 		)
 	return components
@@ -239,6 +228,13 @@ def run(
 			check=False,
 			timeout=timeout,
 		)
+	except OSError as error:
+		raise QualityGateError(
+			f"{' '.join(command)} could not be executed: {error}",
+			check_id="runtime.command",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="restore the required tool or runtime and retry the quality gate",
+		) from error
 	except subprocess.TimeoutExpired as error:
 		raise QualityGateError(
 			f"{' '.join(command)} timed out after {timeout:g} seconds",
@@ -252,11 +248,29 @@ def run(
 		).strip()
 		if not detail:
 			detail = f"Command exited with {result.returncode}."
+		lower_detail = detail.casefold()
+		missing_tool = any(
+			f"no module named {tool_name}" in lower_detail
+			for tool_name in ("ruff", "mypy", "pytest")
+		)
+		pytest_collection_error = "pytest" in " ".join(command).casefold() and any(
+			marker in lower_detail
+			for marker in ("error collecting", "no tests collected", "no tests ran")
+		)
 		raise QualityGateError(
 			f"{' '.join(command)}\n\n{redact(detail)}",
 			check_id="runtime.command",
-			exit_code=1,
-			recovery_action="fix the reported quality finding and retry the quality gate",
+			exit_code=EXIT_UNCHECKED if missing_tool or pytest_collection_error else 1,
+			recovery_action=(
+				(
+					"restore the required tool in the verification runtime "
+					"and retry the quality gate"
+					if missing_tool
+					else "restore a collectable pytest suite and retry the quality gate"
+				)
+				if missing_tool or pytest_collection_error
+				else "fix the reported quality finding and retry the quality gate"
+			),
 		)
 
 
@@ -293,15 +307,13 @@ def _safe_environment(temporary_path: str) -> dict[str, str]:
 		"LC_ALL",
 		"PATHEXT",
 		"PATH",
-		"PYTHONHOME",
-		"PYTHONPATH",
 		"SYSTEMROOT",
-		"VIRTUAL_ENV",
 		"WINDIR",
 	}
 	environment = {key: value for key, value in os.environ.items() if key in allowed}
 	environment.update(
 		{
+			"HOME": temporary_path,
 			"TMP": temporary_path,
 			"TEMP": temporary_path,
 			"PYTHONIOENCODING": "utf-8",
@@ -315,7 +327,15 @@ def _safe_environment(temporary_path: str) -> dict[str, str]:
 
 
 def _runtime_python(prepared: PreparedEnvironment, component_index: int) -> Path:
-	inspection = prepared.runtimes[component_index - 1]
+	try:
+		inspection = prepared.runtimes[component_index - 1]
+	except IndexError as error:
+		raise QualityGateError(
+			f"runtime is unavailable for Python component {component_index}",
+			check_id=f"python.component_{component_index}.runtime",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="run setup and retry the quality gate",
+		) from error
 	if not inspection.current or inspection.python is None:
 		raise QualityGateError(
 			f"runtime is unavailable for Python component {component_index}: "
@@ -338,6 +358,98 @@ def _tool_command(prepared: PreparedEnvironment, python: Path, name: str) -> lis
 	return [str(python), "-m", name]
 
 
+def _component_commands(
+	actual_root: Path,
+	manifest: Manifest,
+	component: PythonComponent,
+	prepared: PreparedEnvironment,
+	component_index: int,
+	python_executable: Path,
+) -> list[tuple[str, list[str], int]]:
+	prefix = f"python.component_{component_index}"
+	arguments = [str(component.path.relative_to(actual_root))]
+	commands: list[tuple[str, list[str], int]] = [
+		(
+			f"{prefix}.ruff",
+			[
+				*_tool_command(prepared, python_executable, "ruff"),
+				"check",
+				"--config",
+				str(prepared.policy_root / "quality_gate" / "policy" / "ruff.toml"),
+				*arguments,
+			],
+			manifest.repository.command_timeout_seconds,
+		),
+		(
+			f"{prefix}.format",
+			[
+				*_tool_command(prepared, python_executable, "ruff"),
+				"format",
+				"--check",
+				"--config",
+				str(prepared.policy_root / "quality_gate" / "policy" / "ruff.toml"),
+				*arguments,
+			],
+			manifest.repository.command_timeout_seconds,
+		),
+	]
+	if component.typecheck:
+		commands.append(
+			(
+				f"{prefix}.mypy",
+				[
+					*_tool_command(prepared, python_executable, "mypy"),
+					"--config-file",
+					str(prepared.policy_root / "quality_gate" / "policy" / "mypy.ini"),
+					*arguments,
+				],
+				manifest.repository.command_timeout_seconds,
+			)
+		)
+	if component.test_paths:
+		commands.append(
+			(
+				f"{prefix}.pytest",
+				[
+					*_tool_command(prepared, python_executable, "pytest"),
+					*(
+						str(test_path.relative_to(actual_root))
+						for test_path in component.test_paths
+					),
+					"-q",
+					"-p",
+					"no:cacheprovider",
+				],
+				manifest.repository.test_timeout_seconds,
+			)
+		)
+	return commands
+
+
+def _execute_commands(
+	actual_root: Path,
+	environment: dict[str, str],
+	commands: list[tuple[str, list[str], int]],
+	component_timeout: int,
+	deadline: float,
+) -> tuple[list[str], list[QualityGateError]]:
+	executed: list[str] = []
+	run_errors: list[QualityGateError] = []
+	for check_id, command, timeout in commands:
+		executed.append(check_id)
+		try:
+			run(
+				command,
+				actual_root,
+				environment,
+				timeout=_remaining(deadline, max(timeout, component_timeout)),
+			)
+		except QualityGateError as error:
+			error.check_id = check_id
+			run_errors.append(error)
+	return executed, run_errors
+
+
 def _run_python_checks(
 	actual_root: Path,
 	manifest: Manifest,
@@ -345,79 +457,65 @@ def _run_python_checks(
 	prepared: PreparedEnvironment,
 ) -> list[CheckResult]:
 	deadline = time.monotonic() + manifest.repository.gate_timeout_seconds
+	results: list[CheckResult] = []
 	with temporary_directory(actual_root) as temporary_path:
 		environment = _safe_environment(temporary_path)
 		run_errors: list[QualityGateError] = []
 		executed: list[str] = []
 		for component_index, component in enumerate(components, start=1):
-			python_executable = _runtime_python(prepared, component_index)
-			arguments = [str(component.path.relative_to(actual_root))]
-			prefix = f"python.component_{component_index}"
-			commands: list[tuple[str, list[str], int]] = [
-				(
-					f"{prefix}.ruff",
-					[
-						*_tool_command(prepared, python_executable, "ruff"),
-						"check",
-						"--config",
-						str(prepared.policy_root / "quality_gate" / "policy" / "ruff.toml"),
-						*arguments,
-					],
-					manifest.repository.command_timeout_seconds,
-				),
-				(
-					f"{prefix}.format",
-					[
-						*_tool_command(prepared, python_executable, "ruff"),
-						"format",
-						"--check",
-						"--config",
-						str(prepared.policy_root / "quality_gate" / "policy" / "ruff.toml"),
-						*arguments,
-					],
-					manifest.repository.command_timeout_seconds,
-				),
-			]
-			if component.typecheck:
-				commands.append(
-					(
-						f"{prefix}.mypy",
-						[
-							*_tool_command(prepared, python_executable, "mypy"),
-							"--config-file",
-							str(prepared.policy_root / "quality_gate" / "policy" / "mypy.ini"),
-							*arguments,
-						],
-						manifest.repository.command_timeout_seconds,
+			if not component.path_exists:
+				results.append(
+					CheckResult(
+						check_id=f"python.component_{component_index}.path",
+						status=Status.UNCHECKED,
+						summary="Python component path is unavailable",
+						findings=(
+							Finding(
+								path=str(component.path.relative_to(actual_root)),
+								message="declared component path does not exist",
+								action="restore the declared component path",
+							),
+						),
+						recovery_action=(
+							"restore the declared component path and retry the quality gate"
+						),
 					)
 				)
-			for test_path in component.test_paths:
-				commands.append(
-					(
-						f"{prefix}.pytest",
-						[
-							*_tool_command(prepared, python_executable, "pytest"),
-							str(test_path.relative_to(actual_root)),
-							"-q",
-							"-p",
-							"no:cacheprovider",
-						],
-						manifest.repository.test_timeout_seconds,
+				continue
+			for missing_path_index, missing_path in enumerate(
+				component.missing_test_paths, start=1
+			):
+				results.append(
+					CheckResult(
+						check_id=f"python.component_{component_index}.test_path_{missing_path_index}",
+						status=Status.UNCHECKED,
+						summary="declared test path is unavailable",
+						findings=(
+							Finding(
+								path=str(missing_path.relative_to(actual_root)),
+								message="declared test path does not exist",
+								action="restore the declared test path",
+							),
+						),
+						recovery_action="restore the declared test path and retry the quality gate",
 					)
 				)
-			for check_id, command, timeout in commands:
-				executed.append(check_id)
-				try:
-					run(
-						command,
-						actual_root,
-						environment,
-						timeout=_remaining(deadline, max(timeout, component.timeout_seconds)),
-					)
-				except QualityGateError as error:
-					error.check_id = check_id
-					run_errors.append(error)
-	results: list[CheckResult] = []
+			try:
+				python_executable = _runtime_python(prepared, component_index)
+			except QualityGateError as error:
+				results.append(_error_result(error))
+				continue
+			component_executed, component_errors = _execute_commands(
+				actual_root,
+				environment,
+				_component_commands(
+					actual_root, manifest, component, prepared, component_index, python_executable
+				),
+				component.timeout_seconds,
+				deadline,
+			)
+			executed.extend(component_executed)
+			run_errors.extend(component_errors)
 	for check_id in executed:
 		errors = [error for error in run_errors if error.check_id == check_id]
 		status = Status.PASSED
@@ -441,7 +539,7 @@ def _run_python_checks(
 			)
 		)
 	for component_index, component in enumerate(components, start=1):
-		if not component.test_paths:
+		if component.tests is None:
 			results.append(
 				CheckResult(
 					check_id=f"python.component_{component_index}.pytest",
@@ -451,6 +549,79 @@ def _run_python_checks(
 				)
 			)
 	return results
+
+
+def format_paths(root: Path | None, paths: tuple[str, ...]) -> None:
+	"""Format only the explicit Python paths with the pinned Ruff release."""
+	actual_root = repository_root(root)
+	try:
+		manifest = load_manifest(actual_root)
+		components = load_components(actual_root)
+	except ValidationError as error:
+		raise _manifest_error(error) from error
+	if not components:
+		raise QualityGateError(
+			"no Python component is declared",
+			check_id="python.components",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="declare a Python component before formatting Python files",
+		)
+	prepared = prepare(actual_root)
+	deadline = time.monotonic() + manifest.repository.gate_timeout_seconds
+	selected: dict[int, list[str]] = {}
+	for raw_path in paths:
+		candidate = relative_path(actual_root, raw_path, "format path")
+		if not candidate.exists():
+			raise QualityGateError(
+				f"format path does not exist: {raw_path}",
+				check_id="python.format",
+				exit_code=EXIT_UNCHECKED,
+				recovery_action=f"restore {raw_path} and retry format",
+			)
+		for index, component in enumerate(components):
+			if candidate == component.path or component.path in candidate.parents:
+				selected.setdefault(index, []).append(str(candidate.relative_to(actual_root)))
+				break
+		else:
+			raise QualityGateError(
+				f"format path is outside every Python component: {raw_path}",
+				check_id="python.format",
+				exit_code=EXIT_UNCHECKED,
+				recovery_action="format only paths declared by a Python component",
+			)
+	with temporary_directory(actual_root) as temporary_path:
+		environment = _safe_environment(temporary_path)
+		format_errors: list[QualityGateError] = []
+		for index, explicit_paths in selected.items():
+			python_executable = _runtime_python(prepared, index + 1)
+			try:
+				run(
+					[
+						*_tool_command(prepared, python_executable, "ruff"),
+						"format",
+						"--config",
+						str(prepared.policy_root / "quality_gate" / "policy" / "ruff.toml"),
+						*explicit_paths,
+					],
+					actual_root,
+					environment,
+					timeout=_remaining(deadline, manifest.repository.command_timeout_seconds),
+				)
+			except QualityGateError as error:
+				format_errors.append(error)
+		if format_errors:
+			raise QualityGateError(
+				"\n".join(str(error) for error in format_errors),
+				check_id="python.format",
+				exit_code=(
+					EXIT_UNCHECKED
+					if any(error.exit_code == EXIT_UNCHECKED for error in format_errors)
+					else 1
+				),
+				recovery_action="restore formatting verification and retry format",
+			)
+
+	emit("format: complete - stage the changes, then run check")
 
 
 def _check_snapshot(
@@ -498,7 +669,7 @@ def _check_snapshot(
 			run_results = _run_python_checks(actual_root, manifest, components, prepared)
 		except QualityGateError as error:
 			return Verdict((contract_result, _error_result(error)))
-		except (DistributionError, RuntimeUnavailable) as error:
+		except (DistributionError, RuntimeUnavailable, OSError) as error:
 			quality_error = QualityGateError(
 				str(error),
 				check_id="runtime.policy",
