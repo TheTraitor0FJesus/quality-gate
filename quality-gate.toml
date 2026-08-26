@@ -1,4 +1,11 @@
-waivers = []
+[[waivers]]
+kind = "standard"
+check_id = "repository.workflow"
+target = ".github/workflows/parity.yml"
+reason = "Parity is intentionally non-gating and runs only by dispatch or weekly schedule."
+approved_by = "TheTraitor0FJesus"
+reviewed_on = "2026-08-26"
+expires_on = "2027-08-26"
 
 [quality]
 schema = 2

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
-import sys
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -17,31 +15,10 @@ from quality_gate import ci_release, runner
 RELEASE = "v2.0.0"
 ASSET = f"quality-gate-{RELEASE}.zip"
 REPOSITORY = "TheTraitor0FJesus/quality-gate"
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _build_wheel(tmp_path: Path) -> tuple[str, bytes]:
-	destination = tmp_path / "wheel"
-	destination.mkdir()
-	result = subprocess.run(
-		[
-			sys.executable,
-			"-m",
-			"pip",
-			"wheel",
-			"--no-deps",
-			"--no-build-isolation",
-			str(PROJECT_ROOT),
-			"--wheel-dir",
-			str(destination),
-		],
-		capture_output=True,
-		text=True,
-		check=False,
-	)
-	assert result.returncode == 0, result.stderr
-	wheel_path = next(destination.glob("quality_gate-*.whl"))
-	return wheel_path.name, wheel_path.read_bytes()
+def _wheel_fixture() -> tuple[str, bytes]:
+	return "quality_gate-2.0.0-py3-none-any.whl", b"policy-wheel-fixture"
 
 
 def _archive(
@@ -108,7 +85,7 @@ def test_ci_release_verifier_extracts_only_a_trusted_immutable_asset(tmp_path: P
 	archive = tmp_path / ASSET
 	metadata = tmp_path / "release.json"
 	target = tmp_path / "verified"
-	wheel_name, wheel_content = _build_wheel(tmp_path)
+	wheel_name, wheel_content = _wheel_fixture()
 	_archive(archive, wheel_name, wheel_content)
 	_write_metadata(metadata, _metadata(archive))
 
@@ -156,7 +133,7 @@ def test_ci_release_verifier_rejects_untrusted_metadata_before_extraction(
 	archive = tmp_path / ASSET
 	metadata = tmp_path / "release.json"
 	target = tmp_path / "untrusted"
-	wheel_name, wheel_content = _build_wheel(tmp_path)
+	wheel_name, wheel_content = _wheel_fixture()
 	_archive(archive, wheel_name, wheel_content)
 	value = _metadata(archive)
 	mutate(value)
@@ -186,7 +163,7 @@ def test_ci_release_verifier_rejects_manifest_version_before_extraction(tmp_path
 	archive = tmp_path / ASSET
 	metadata = tmp_path / "release.json"
 	target = tmp_path / "wrong-version"
-	wheel_name, wheel_content = _build_wheel(tmp_path)
+	wheel_name, wheel_content = _wheel_fixture()
 	_archive(archive, wheel_name, wheel_content, manifest_version="v9.9.9")
 	_write_metadata(metadata, _metadata(archive))
 
@@ -215,7 +192,7 @@ def test_ci_release_verifier_rejects_unsafe_archive_member_before_extraction(
 	archive = tmp_path / ASSET
 	metadata = tmp_path / "release.json"
 	target = tmp_path / "unsafe-member"
-	wheel_name, wheel_content = _build_wheel(tmp_path)
+	wheel_name, wheel_content = _wheel_fixture()
 	_archive(archive, wheel_name, wheel_content, unsafe_member=True)
 	_write_metadata(metadata, _metadata(archive))
 
@@ -247,7 +224,7 @@ def test_ci_release_verifier_rejects_unsafe_tool_path_without_chmod_outside_targ
 	external = tmp_path / "external-tool"
 	external.write_bytes(b"must not be changed")
 	initial_mode = external.stat().st_mode
-	wheel_name, wheel_content = _build_wheel(tmp_path)
+	wheel_name, wheel_content = _wheel_fixture()
 	_archive(archive, wheel_name, wheel_content, tool_path="../external-tool")
 	_write_metadata(metadata, _metadata(archive))
 
@@ -276,7 +253,7 @@ def test_ci_release_verifier_rejects_invalid_manifest_entries_before_extraction(
 	archive = tmp_path / ASSET
 	metadata = tmp_path / "release.json"
 	target = tmp_path / "invalid-manifest"
-	wheel_name, wheel_content = _build_wheel(tmp_path)
+	wheel_name, wheel_content = _wheel_fixture()
 	_archive(archive, wheel_name, wheel_content, invalid_file_entry=True)
 	_write_metadata(metadata, _metadata(archive))
 
