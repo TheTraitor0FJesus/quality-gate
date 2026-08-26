@@ -639,6 +639,7 @@ def _run_python_checks(
 	results: list[CheckResult] = []
 	with temporary_directory(actual_root) as temporary_path:
 		environment = _safe_environment(temporary_path)
+		environment["QUALITY_GATE_POLICY_ROOT"] = str(prepared.policy_root)
 		run_errors: list[QualityGateError] = []
 		executed: list[str] = []
 		run_outputs: dict[str, str] = {}

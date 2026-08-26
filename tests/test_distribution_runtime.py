@@ -85,6 +85,35 @@ def test_consumer_policy_sync_is_independent_of_lessons(tmp_path: Path) -> None:
 	assert cache.status()["active"] == "v2.0.0"
 
 
+def test_release_manifest_selects_the_policy_wheel_after_dependency_wheels(
+	tmp_path: Path,
+) -> None:
+	source = tmp_path / "source"
+	source.mkdir()
+	dependency = source / "dependency-1.0-py3-none-any.whl"
+	dependency.write_bytes(b"dependency")
+	_release(source)
+	manifest_path = source / "release.toml"
+	manifest_path.write_text(
+		manifest_path.read_text(encoding="utf-8").replace(
+			'[[release.files]]\npath = "quality_gate-2.0.0-py3-none-any.whl"',
+			f'''[[release.files]]
+path = "{dependency.name}"
+sha256 = "{hashlib.sha256(dependency.read_bytes()).hexdigest()}"
+kind = "dependency"
+
+[[release.files]]
+path = "quality_gate-2.0.0-py3-none-any.whl"''',
+		),
+		encoding="utf-8",
+	)
+
+	manifest = distribution.load_release_manifest(source)
+
+	assert manifest.wheel is not None
+	assert manifest.wheel.path == "quality_gate-2.0.0-py3-none-any.whl"
+
+
 def test_sync_rejects_corrupt_artifact_without_installing_it(tmp_path: Path) -> None:
 	source = tmp_path / "source"
 	source.mkdir()

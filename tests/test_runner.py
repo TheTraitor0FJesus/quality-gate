@@ -209,6 +209,7 @@ def test_check_sets_a_writable_temporary_directory(monkeypatch: pytest.MonkeyPat
 	assert len(calls) == expected_call_count
 	assert calls[0][1]["TMP"] == calls[0][1]["TEMP"]
 	assert calls[0][1]["TMP"] == "test-temporary-directory"
+	assert calls[0][1]["QUALITY_GATE_POLICY_ROOT"] == str(runner.POLICY_DIR.parent.parent)
 
 
 def test_safe_environment_isolated_from_user_python_state(
@@ -217,6 +218,7 @@ def test_safe_environment_isolated_from_user_python_state(
 	monkeypatch.setenv("HOME", "user-home")
 	monkeypatch.setenv("PYTHONPATH", "user-pythonpath")
 	monkeypatch.setenv("VIRTUAL_ENV", "user-venv")
+	monkeypatch.setenv("QUALITY_GATE_POLICY_ROOT", "user-policy-root")
 
 	environment = runner._safe_environment("quality-gate-temporary")
 
@@ -225,6 +227,7 @@ def test_safe_environment_isolated_from_user_python_state(
 	assert environment["TEMP"] == "quality-gate-temporary"
 	assert "PYTHONPATH" not in environment
 	assert "VIRTUAL_ENV" not in environment
+	assert "QUALITY_GATE_POLICY_ROOT" not in environment
 
 
 def test_missing_external_tool_is_unchecked(monkeypatch: pytest.MonkeyPatch) -> None:

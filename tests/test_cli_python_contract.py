@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -61,6 +62,12 @@ def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
 	)
 
 
+def _make_writable(root: Path) -> None:
+	for path in (root, *root.rglob("*")):
+		if not path.is_symlink():
+			path.chmod(path.stat().st_mode | stat.S_IWUSR)
+
+
 def _disposable_repository(tmp_path: Path, fixture: str) -> Path:
 	root = tmp_path / "repository"
 	shutil.copytree(
@@ -68,6 +75,7 @@ def _disposable_repository(tmp_path: Path, fixture: str) -> Path:
 		root,
 		ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
 	)
+	_make_writable(root)
 	workflow = root / ".github" / "workflows" / "quality.yml"
 	workflow.parent.mkdir(parents=True)
 	workflow.write_text(VALID_WORKFLOW, encoding="utf-8")

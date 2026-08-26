@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
@@ -68,14 +69,38 @@ def _result_surface(output: str) -> dict[str, str]:
 	}
 
 
+def _make_writable(root: Path) -> None:
+	for path in (root, *root.rglob("*")):
+		if not path.is_symlink():
+			path.chmod(path.stat().st_mode | stat.S_IWUSR)
+
+
+def _policy_root() -> Path | None:
+	configured = os.environ.get("QUALITY_GATE_POLICY_ROOT")
+	if configured:
+		root = Path(configured)
+		if (root / "release.toml").is_file():
+			return root
+	return None
+
+
+def _cached_policy_root() -> Path | None:
+	try:
+		return PolicyCache().select("v2.0.0")
+	except (DistributionError, FileNotFoundError, OSError, ValueError):
+		return None
+
+
 def _installed_scanner() -> Path | None:
 	"""Return the installed scanner from PATH or the active policy release."""
 
 	discovered = shutil.which("gitleaks")
 	if discovered is not None:
 		return Path(discovered)
+	policy_root = _policy_root() or _cached_policy_root()
+	if policy_root is None:
+		return None
 	try:
-		policy_root = PolicyCache().select("v2.0.0")
 		release = tomllib.loads((policy_root / "release.toml").read_text(encoding="utf-8"))[
 			"release"
 		]
@@ -87,6 +112,19 @@ def _installed_scanner() -> Path | None:
 
 
 def _build_wheel(tmp_path: Path) -> Path:
+	destination = tmp_path / "wheel"
+	destination.mkdir()
+	policy_root = _policy_root()
+	if policy_root is not None:
+		release = tomllib.loads((policy_root / "release.toml").read_text(encoding="utf-8"))[
+			"release"
+		]
+		wheel_entry = next(
+			item
+			for item in release["files"]
+			if item.get("kind", "artifact") == "artifact" and item["path"].endswith(".whl")
+		)
+		return Path(shutil.copy2(policy_root / wheel_entry["path"], destination))
 	source = tmp_path / "quality-gate-source"
 	shutil.copytree(
 		REPOSITORY,
@@ -95,8 +133,7 @@ def _build_wheel(tmp_path: Path) -> Path:
 			".git", ".venv", ".quality-gate-tmp", "build", "*.egg-info", "__pycache__"
 		),
 	)
-	destination = tmp_path / "wheel"
-	destination.mkdir()
+	_make_writable(source)
 	result = subprocess.run(
 		[
 			sys.executable,
@@ -407,6 +444,7 @@ def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(tmp_path: Pa
 	gate = _install_wheel(tmp_path, wheel)
 	root = tmp_path / "repository"
 	shutil.copytree(REPOSITORY / "tests" / "fixtures" / "no-python", root)
+	_make_writable(root)
 	workflow = root / ".github" / "workflows" / "quality.yml"
 	workflow.parent.mkdir(parents=True)
 	shutil.copy2(WORKFLOW, workflow)
@@ -501,6 +539,7 @@ def test_ci_reports_an_unavailable_release_scanner_as_unchecked(tmp_path: Path) 
 
 	root = tmp_path / "repository"
 	shutil.copytree(REPOSITORY / "tests" / "fixtures" / "no-python", root)
+	_make_writable(root)
 	_git(root, "init")
 	_git(root, "add", ".")
 	_git(

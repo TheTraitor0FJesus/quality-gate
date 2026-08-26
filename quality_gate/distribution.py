@@ -66,7 +66,10 @@ class ReleaseManifest:
 
 	@property
 	def wheel(self) -> ReleaseFile | None:
-		return next((item for item in self.files if item.path.endswith(".whl")), None)
+		return next(
+			(item for item in self.files if item.kind == "artifact" and item.path.endswith(".whl")),
+			None,
+		)
 
 	def as_dict(self) -> dict[str, object]:
 		"""Return a canonical, redaction-safe mapping for immutability checks."""
