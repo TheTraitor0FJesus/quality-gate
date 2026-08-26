@@ -110,6 +110,23 @@ def _patch_runtime(
 
 	monkeypatch.setattr(runner, "prepare", prepare)
 	monkeypatch.setattr(runner, "run", run)
+	monkeypatch.setattr(
+		runner,
+		"secret_candidate_result",
+		lambda *_args, **_kwargs: runner.CheckResult(
+			"secrets.candidate", runner.Status.PASSED, "no credentials detected"
+		),
+	)
+	monkeypatch.setattr(
+		runner,
+		"secret_history_result",
+		lambda *_args, **_kwargs: runner.CheckResult(
+			"secrets.history",
+			runner.Status.NOT_APPLICABLE,
+			"base-to-head history scan is not requested",
+			recovery_action="provide a verified CI base reference when range scanning applies",
+		),
+	)
 
 
 def _invoke(

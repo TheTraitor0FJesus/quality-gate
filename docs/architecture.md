@@ -12,7 +12,7 @@ Use this map before non-trivial codebase questions, design work, or code changes
 
 ## Flows
 
-- **Local and CI checking** — `quality-gate check` → `quality_gate/snapshot.py` → `quality_gate/runner.py` → validated manifest → structured verdict → Ruff, mypy, pytest, and report-only coverage when pinned.
+- **Local and CI checking** — `quality-gate check` → `quality_gate/snapshot.py` → `quality_gate/runner.py` → validated manifest → structured verdict → Git hygiene, Gitleaks, workflow/documentation checks, Ruff, mypy, pytest, and report-only coverage when pinned.
 - **Release and runtime preparation** — `quality-gate sync` → verified immutable release cache → `quality-gate setup` → repository-keyed runtime fingerprint → isolated Python environment; `quality-gate doctor` reports missing prerequisites as unchecked.
 - **Project bootstrap** — `$setup-repo` → `quality-gate.toml` and a CI caller → reusable `quality.yml`.
 - **Policy rollout** — validated `quality-gate` change → immutable release artifact → explicitly synchronized local and CI runtimes.

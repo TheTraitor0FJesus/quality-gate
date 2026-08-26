@@ -6,9 +6,11 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from quality_gate import runner
 from quality_gate.cli import main
 from quality_gate.contracts import Manifest, load_manifest
 from quality_gate.integrity import (
@@ -263,6 +265,32 @@ def test_cli_checks_the_staged_repository_candidate(
 	(root / "conflict.py").write_text("<<<<<<< HEAD\n", encoding="utf-8")
 	_git(root, "add", ".")
 	(root / "conflict.py").write_text("resolved = True\n", encoding="utf-8")
+	monkeypatch.setattr(
+		runner,
+		"prepare",
+		lambda *_args, **_kwargs: SimpleNamespace(
+			policy_root=FIXTURES,
+			release_manifest=None,
+			runtimes=(),
+		),
+	)
+	monkeypatch.setattr(
+		runner,
+		"secret_candidate_result",
+		lambda *_args, **_kwargs: runner.CheckResult(
+			"secrets.candidate", runner.Status.PASSED, "no credentials detected"
+		),
+	)
+	monkeypatch.setattr(
+		runner,
+		"secret_history_result",
+		lambda *_args, **_kwargs: runner.CheckResult(
+			"secrets.history",
+			runner.Status.NOT_APPLICABLE,
+			"base-to-head history scan is not requested",
+			recovery_action="provide a verified CI base reference when range scanning applies",
+		),
+	)
 	monkeypatch.setattr(sys, "argv", ["quality-gate", "--root", str(root), "check"])
 
 	result = main()

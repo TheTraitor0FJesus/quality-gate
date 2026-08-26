@@ -13,6 +13,7 @@ structured-reporting policy.
 - `quality-gate migrate` prints a read-only schema 1 migration proposal.
 - `quality-gate check` checks the complete declared contract and returns a structured verdict.
 - `quality-gate check --verbose` prints complete redacted diagnostics.
+- `quality-gate check --base <ref> [--head <ref>]` adds a verified base-to-head history scan for CI.
 - `quality-gate format <path>...` formats only the explicit Python paths with pinned Ruff; stage the changes and run `check` after formatting.
 - `quality-gate sync --source <release-directory-or-zip>` installs an integrity-checked immutable policy release.
 - `quality-gate setup` prepares the isolated runtime for every declared Python component.
@@ -27,3 +28,6 @@ installation verifies every declared artifact and external tool before atomic ac
 Consumer runtimes live below the user cache and are fingerprinted by the policy release, Python
 version, component contract, and declared dependency inputs; a changed input creates a new
 runtime instead of reusing an older one.
+Secret checks use the integrity-checked Gitleaks binary declared by the selected policy release.
+Candidate findings expose only a repository location and SHA-256 fingerprint; migration history
+scanning is provided as a secret-domain seam for the repository audit command.

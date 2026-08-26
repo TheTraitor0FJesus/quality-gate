@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -18,6 +20,7 @@ from quality_gate.contracts import (
 	Verdict,
 	fingerprint_secret,
 )
+from quality_gate.distribution import PolicyCache
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 EXIT_QUALITY_FAILURE = 1
@@ -44,6 +47,35 @@ def _run(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
 	env = os.environ.copy()
 	env["PYTHONPATH"] = str(REPOSITORY) + os.pathsep + env.get("PYTHONPATH", "")
 	env["PYTHONIOENCODING"] = "utf-8"
+	if arguments and arguments[0] == "check":
+		local_appdata = root / ".test-localappdata"
+		cache_root = local_appdata / "quality-gate"
+		source = root / ".test-policy-release"
+		source.mkdir(exist_ok=True)
+		scanner = shutil.which("gitleaks")
+		assert scanner is not None, "Gitleaks is required for CLI contract tests"
+		shutil.copy2(scanner, source / "gitleaks.exe")
+		(source / "quality_gate-2.0.0-py3-none-any.whl").write_bytes(b"test wheel")
+		files = ["quality_gate-2.0.0-py3-none-any.whl", "gitleaks.exe"]
+		digests = {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in files}
+		(source / "release.toml").write_text(
+			f'''[release]
+version = "v2.0.0"
+
+[[release.files]]
+path = "{files[0]}"
+sha256 = "{digests[files[0]]}"
+
+[[release.tools]]
+name = "gitleaks"
+version = "8.30.1"
+path = "{files[1]}"
+sha256 = "{digests[files[1]]}"
+''',
+			encoding="utf-8",
+		)
+		PolicyCache(cache_root).sync(source)
+		env["LOCALAPPDATA"] = str(local_appdata)
 	return subprocess.run(
 		[sys.executable, "-m", "quality_gate", "--root", str(root), *arguments],
 		cwd=root,

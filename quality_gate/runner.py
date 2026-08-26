@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import locale
+import logging
 import os
 import subprocess
 import sys
@@ -27,8 +29,10 @@ from quality_gate.integrity import documentation_results, git_integrity_results,
 from quality_gate.launcher import PreparedEnvironment, prepare
 from quality_gate.reporting import render
 from quality_gate.runtime import RuntimeUnavailable
+from quality_gate.secrets import secret_candidate_result, secret_history_result
 from quality_gate.snapshot import SnapshotError, candidate_snapshot
 
+_LOGGER = logging.getLogger(__name__)
 MANIFEST_NAME = "quality-gate.toml"
 POLICY_DIR = Path(__file__).resolve().parent / "policy"
 EXIT_UNCHECKED = 2
@@ -363,6 +367,29 @@ def _remaining(deadline: float, timeout: int) -> float:
 			recovery_action="inspect slow checks and retry within the gate time budget",
 		)
 	return remaining
+
+
+def _ci_history_refs(base: str | None, head: str | None) -> tuple[str | None, str]:
+	"""Resolve pull-request commit SHAs from GitHub event data when available."""
+	event_path = os.environ.get("GITHUB_EVENT_PATH")
+	event_base: str | None = None
+	event_head: str | None = None
+	if event_path:
+		try:
+			event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+			pull_request = event.get("pull_request", {})
+			base_data = pull_request.get("base", {})
+			head_data = pull_request.get("head", {})
+			if isinstance(base_data, dict) and isinstance(base_data.get("sha"), str):
+				event_base = base_data["sha"]
+			if isinstance(head_data, dict) and isinstance(head_data.get("sha"), str):
+				event_head = head_data["sha"]
+		except (OSError, UnicodeError, json.JSONDecodeError, AttributeError):
+			_LOGGER.debug("GitHub event payload is unavailable", exc_info=True)
+	return (
+		base or event_base or os.environ.get("GITHUB_BASE_REF"),
+		head or event_head or os.environ.get("GITHUB_SHA") or "HEAD",
+	)
 
 
 def _safe_environment(temporary_path: str) -> dict[str, str]:
@@ -783,6 +810,8 @@ def _check_snapshot(
 	verbose: bool = False,
 	repository_root: Path | None = None,
 	index_file: Path | None = None,
+	base: str | None = None,
+	head: str | None = None,
 ) -> Verdict:
 	actual_root = actual_root.resolve()
 	try:
@@ -801,12 +830,36 @@ def _check_snapshot(
 		workflow_result(actual_root, manifest),
 		*documentation_results(actual_root, manifest),
 	]
+	results = [contract_result, *repository_results]
 	try:
 		components = load_components(actual_root)
+		prepared = prepare(
+			actual_root,
+			repository_root=repository_root or actual_root,
+		)
 	except QualityGateError as error:
-		verdict = Verdict((contract_result, *repository_results, _error_result(error)))
-		return verdict
-	results = [contract_result, *repository_results]
+		return Verdict((*results, _error_result(error)))
+	except (DistributionError, RuntimeUnavailable, OSError) as error:
+		quality_error = QualityGateError(
+			str(error),
+			check_id="runtime.policy",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="run sync and setup, then retry the quality gate",
+		)
+		return Verdict((*results, _error_result(quality_error)))
+	history_base, history_head = _ci_history_refs(base, head)
+	results.extend(
+		(
+			secret_candidate_result(actual_root, manifest, prepared),
+			secret_history_result(
+				repository_root or actual_root,
+				manifest,
+				prepared,
+				base=history_base,
+				head=history_head,
+			),
+		)
+	)
 	if not components:
 		results.append(
 			CheckResult(
@@ -818,10 +871,6 @@ def _check_snapshot(
 		)
 	else:
 		try:
-			prepared = prepare(
-				actual_root,
-				repository_root=repository_root or actual_root,
-			)
 			policy_path = prepared.policy_root / "quality_gate" / "policy"
 			if not policy_path.is_dir():
 				raise QualityGateError(
@@ -846,7 +895,13 @@ def _check_snapshot(
 	return verdict
 
 
-def check(root: Path | None = None, *, verbose: bool = False) -> Verdict:
+def check(
+	root: Path | None = None,
+	*,
+	verbose: bool = False,
+	base: str | None = None,
+	head: str | None = None,
+) -> Verdict:
 	"""Run the complete quality contract against the exact staged candidate."""
 
 	actual_root = repository_root(root)
@@ -857,6 +912,8 @@ def check(root: Path | None = None, *, verbose: bool = False) -> Verdict:
 				verbose=verbose,
 				repository_root=actual_root,
 				index_file=getattr(snapshot, "repository_index", None),
+				base=base,
+				head=head,
 			)
 	except SnapshotError as error:
 		quality_error = QualityGateError(

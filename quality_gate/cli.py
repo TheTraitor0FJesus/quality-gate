@@ -21,6 +21,10 @@ def parser() -> argparse.ArgumentParser:
 	subcommands = result.add_subparsers(dest="command", required=True)
 	check_parser = subcommands.add_parser("check", help="Run quality checks.")
 	check_parser.add_argument("--verbose", action="store_true", help="Show all redacted findings.")
+	check_parser.add_argument("--base", help="Verified base Git reference for CI range scanning.")
+	check_parser.add_argument(
+		"--head", help="Verified head Git reference for CI range scanning. Defaults to HEAD."
+	)
 	format_parser = subcommands.add_parser(
 		"format", help="Format only explicit Python paths with the pinned Ruff release."
 	)
@@ -124,7 +128,12 @@ def _dispatch(arguments: argparse.Namespace) -> int:
 	if handler is not None:
 		result = handler()
 		return result if isinstance(result, int) else 0
-	verdict = check(arguments.root, verbose=arguments.verbose)
+	verdict = check(
+		arguments.root,
+		verbose=arguments.verbose,
+		base=arguments.base,
+		head=arguments.head,
+	)
 	return verdict.exit_code
 
 
