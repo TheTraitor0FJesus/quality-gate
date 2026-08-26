@@ -184,9 +184,14 @@ class RuntimeManager:
 				prefix="quality-gate-runtime-", dir=target.parent
 			) as temporary:
 				staged = Path(temporary) / "runtime"
+				venv_options = (
+					()
+					if component.dependency_inputs or policy_root is not None
+					else ("--without-pip",)
+				)
 				try:
 					result = subprocess.run(
-						[str(python), "-m", "venv", str(staged)],
+						[str(python), "-m", "venv", *venv_options, str(staged)],
 						cwd=root,
 						capture_output=True,
 						text=True,

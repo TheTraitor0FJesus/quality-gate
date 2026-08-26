@@ -17,8 +17,9 @@ This repository is the source of truth for shared Python quality checks.
 The reusable workflow and local launcher must consume an immutable policy release. A later
 release/sync change owns artifact retrieval, checksums, and exact workflow references.
 
-The global Git hook currently uses this local checkout and its untracked `.venv` runtime. Release
-and sync work must replace mutable branch coupling with an explicit cached release selection.
+The global Git hook currently uses the transition runtime at
+`S:\GITHUB-REPOSITORIES\code_projects\quality-gate-v1-runtime`. Release and sync work must
+replace this temporary routing with an explicit cached v2 release selection only at ticket 18.
 
 During the migration, the global commit hook uses the v1 runtime at
 `S:\GITHUB-REPOSITORIES\code_projects\quality-gate-v1-runtime`, including for this repository.
