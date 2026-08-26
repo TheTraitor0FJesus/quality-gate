@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,13 @@ from quality_gate.snapshot import SnapshotError, candidate_snapshot
 MANIFEST_NAME = "quality-gate.toml"
 POLICY_DIR = Path(__file__).resolve().parent / "policy"
 EXIT_UNCHECKED = 2
+MAX_COMMAND_OUTPUT_CHARS = 16_384
+MAX_COMMAND_OUTPUT_BYTES = MAX_COMMAND_OUTPUT_CHARS * 4 + 1
+PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
+
+
+class OutputReadError(RuntimeError):
+	"""A subprocess output reader could not finish safely."""
 
 
 class QualityGateError(RuntimeError):
@@ -212,22 +220,63 @@ def required_documents_result(root: Path, manifest: Manifest) -> CheckResult:
 	)
 
 
+def _run_bounded_subprocess(
+	command: list[str],
+	root: Path,
+	environment: dict[str, str],
+	timeout: float | None,
+) -> tuple[int, str]:
+	"""Run a subprocess while retaining only a bounded amount of output."""
+	process = subprocess.Popen(
+		command,
+		cwd=root,
+		env=environment,
+		stdout=subprocess.PIPE,
+		stderr=subprocess.STDOUT,
+	)
+	retained = bytearray()
+	reader_errors: list[Exception] = []
+
+	def drain_output() -> None:
+		assert process.stdout is not None
+		try:
+			while True:
+				chunk = process.stdout.read(4096)
+				if not chunk:
+					return
+				remaining = MAX_COMMAND_OUTPUT_BYTES - len(retained)
+				if remaining > 0:
+					retained.extend(chunk[:remaining])
+		except (OSError, ValueError) as error:
+			reader_errors.append(error)
+
+	reader = threading.Thread(target=drain_output, daemon=True)
+	reader.start()
+	try:
+		returncode = process.wait(timeout=timeout)
+	except subprocess.TimeoutExpired:
+		process.kill()
+		process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+		reader.join(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+		raise
+	reader.join(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+	if reader.is_alive():
+		raise subprocess.TimeoutExpired(command, PROCESS_CLEANUP_TIMEOUT_SECONDS)
+	if reader_errors:
+		raise OutputReadError("subprocess output could not be read") from reader_errors[0]
+	return returncode, decode_subprocess_output(bytes(retained))
+
+
 def run(
 	command: list[str],
 	root: Path,
 	environment: dict[str, str],
 	*,
 	timeout: float | None = None,
-) -> None:
+) -> str:
+	"""Run one quality command and return its decoded standard output."""
 	try:
-		result = subprocess.run(
-			command,
-			cwd=root,
-			env=environment,
-			capture_output=True,
-			check=False,
-			timeout=timeout,
-		)
+		returncode, output = _run_bounded_subprocess(command, root, environment, timeout)
 	except OSError as error:
 		raise QualityGateError(
 			f"{' '.join(command)} could not be executed: {error}",
@@ -242,12 +291,18 @@ def run(
 			exit_code=2,
 			recovery_action="inspect the command and retry within the declared time budget",
 		) from error
-	if result.returncode:
-		detail = (
-			decode_subprocess_output(result.stdout) + decode_subprocess_output(result.stderr)
-		).strip()
+	except OutputReadError as error:
+		raise QualityGateError(
+			f"{' '.join(command)} output could not be read",
+			check_id="runtime.command",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="restore subprocess output handling and retry the quality gate",
+		) from error
+	if returncode:
+		detail = output.strip()
+		detail = _bounded_output(detail)
 		if not detail:
-			detail = f"Command exited with {result.returncode}."
+			detail = f"Command exited with {returncode}."
 		lower_detail = detail.casefold()
 		missing_tool = any(
 			f"no module named {tool_name}" in lower_detail
@@ -272,6 +327,14 @@ def run(
 				else "fix the reported quality finding and retry the quality gate"
 			),
 		)
+	return _bounded_output(output).strip()
+
+
+def _bounded_output(value: str) -> str:
+	"""Limit external command output retained by the gate."""
+	if len(value) <= MAX_COMMAND_OUTPUT_CHARS:
+		return value
+	return value[:MAX_COMMAND_OUTPUT_CHARS] + "\n[output truncated]"
 
 
 def temporary_directory(root: Path) -> tempfile.TemporaryDirectory[str]:
@@ -321,6 +384,7 @@ def _safe_environment(temporary_path: str) -> dict[str, str]:
 			"PYTHONDONTWRITEBYTECODE": "1",
 			"RUFF_CACHE_DIR": temporary_path,
 			"MYPY_CACHE_DIR": temporary_path,
+			"COVERAGE_FILE": str(Path(temporary_path) / ".coverage"),
 		}
 	)
 	return environment
@@ -356,6 +420,14 @@ def _tool_command(prepared: PreparedEnvironment, python: Path, name: str) -> lis
 					return [str(python), "-m", name]
 				return [str(prepared.policy_root / tool.path)]
 	return [str(python), "-m", name]
+
+
+def _has_pinned_coverage(prepared: PreparedEnvironment) -> bool:
+	"""Return whether the selected policy release pins a coverage provider."""
+	release_manifest = getattr(prepared, "release_manifest", None)
+	return release_manifest is not None and any(
+		tool.name.casefold() == "coverage" for tool in release_manifest.tools
+	)
 
 
 def _component_commands(
@@ -407,22 +479,47 @@ def _component_commands(
 			)
 		)
 	if component.test_paths:
+		test_arguments = [
+			*(str(test_path.relative_to(actual_root)) for test_path in component.test_paths),
+			"-q",
+			"-p",
+			"no:cacheprovider",
+		]
 		commands.append(
 			(
 				f"{prefix}.pytest",
 				[
 					*_tool_command(prepared, python_executable, "pytest"),
-					*(
-						str(test_path.relative_to(actual_root))
-						for test_path in component.test_paths
-					),
-					"-q",
-					"-p",
-					"no:cacheprovider",
+					*test_arguments,
 				],
 				manifest.repository.test_timeout_seconds,
 			)
 		)
+		if _has_pinned_coverage(prepared):
+			commands.extend(
+				(
+					(
+						f"{prefix}.coverage",
+						[
+							*_tool_command(prepared, python_executable, "coverage"),
+							"run",
+							"-m",
+							"pytest",
+							*test_arguments,
+						],
+						manifest.repository.test_timeout_seconds,
+					),
+					(
+						f"{prefix}.coverage_report",
+						[
+							*_tool_command(prepared, python_executable, "coverage"),
+							"report",
+							"--show-missing",
+						],
+						manifest.repository.command_timeout_seconds,
+					),
+				)
+			)
 	return commands
 
 
@@ -432,22 +529,74 @@ def _execute_commands(
 	commands: list[tuple[str, list[str], int]],
 	component_timeout: int,
 	deadline: float,
-) -> tuple[list[str], list[QualityGateError]]:
+) -> tuple[list[str], list[QualityGateError], dict[str, str]]:
 	executed: list[str] = []
 	run_errors: list[QualityGateError] = []
+	run_outputs: dict[str, str] = {}
 	for check_id, command, timeout in commands:
 		executed.append(check_id)
 		try:
-			run(
+			output = run(
 				command,
 				actual_root,
 				environment,
 				timeout=_remaining(deadline, max(timeout, component_timeout)),
 			)
+			if output and check_id.endswith(".coverage_report"):
+				run_outputs[check_id] = output
 		except QualityGateError as error:
 			error.check_id = check_id
 			run_errors.append(error)
-	return executed, run_errors
+	return executed, run_errors, run_outputs
+
+
+def _command_results(
+	executed: list[str],
+	run_errors: list[QualityGateError],
+	run_outputs: dict[str, str],
+) -> list[CheckResult]:
+	results: list[CheckResult] = []
+	for check_id in executed:
+		errors = [error for error in run_errors if error.check_id == check_id]
+		is_coverage_collection = check_id.endswith(".coverage")
+		is_coverage_report = check_id.endswith(".coverage_report")
+		is_coverage = is_coverage_collection or is_coverage_report
+		status = Status.PASSED
+		if errors and not is_coverage:
+			status = (
+				Status.UNCHECKED
+				if any(error.exit_code == EXIT_UNCHECKED for error in errors)
+				else Status.FAILED
+			)
+		if is_coverage:
+			status = Status.PASSED
+		coverage_output = run_outputs.get(check_id, "")
+		summary = "check passed" if status is Status.PASSED else "check requires attention"
+		recovery_action = "restore verification and fix the reported finding, then retry"
+		if is_coverage_collection:
+			summary = "coverage collection completed"
+		if is_coverage_report:
+			report_lines = [line.strip() for line in coverage_output.splitlines() if line.strip()]
+			report_line = next(
+				(line for line in reversed(report_lines) if line.startswith("TOTAL")),
+				report_lines[-1] if report_lines else "coverage report generated",
+			)
+			summary = f"coverage report: {redact(report_line)}"
+			recovery_action = "coverage is report-only and does not affect the quality verdict"
+		if errors and is_coverage:
+			summary = "coverage report unavailable; report-only: " + redact(str(errors[0]))
+		results.append(
+			CheckResult(
+				check_id=check_id,
+				status=status,
+				summary=summary,
+				findings=()
+				if is_coverage
+				else tuple(Finding(message=redact(str(error))) for error in errors),
+				recovery_action=None if is_coverage else recovery_action if errors else None,
+			)
+		)
+	return results
 
 
 def _run_python_checks(
@@ -462,6 +611,7 @@ def _run_python_checks(
 		environment = _safe_environment(temporary_path)
 		run_errors: list[QualityGateError] = []
 		executed: list[str] = []
+		run_outputs: dict[str, str] = {}
 		for component_index, component in enumerate(components, start=1):
 			if not component.path_exists:
 				results.append(
@@ -505,7 +655,7 @@ def _run_python_checks(
 			except QualityGateError as error:
 				results.append(_error_result(error))
 				continue
-			component_executed, component_errors = _execute_commands(
+			component_executed, component_errors, component_outputs = _execute_commands(
 				actual_root,
 				environment,
 				_component_commands(
@@ -516,36 +666,38 @@ def _run_python_checks(
 			)
 			executed.extend(component_executed)
 			run_errors.extend(component_errors)
-	for check_id in executed:
-		errors = [error for error in run_errors if error.check_id == check_id]
-		status = Status.PASSED
-		if errors:
-			status = (
-				Status.UNCHECKED
-				if any(error.exit_code == EXIT_UNCHECKED for error in errors)
-				else Status.FAILED
-			)
-		results.append(
-			CheckResult(
-				check_id=check_id,
-				status=status,
-				summary="check passed" if status is Status.PASSED else "check requires attention",
-				findings=tuple(Finding(message=redact(str(error))) for error in errors),
-				recovery_action=(
-					"restore verification and fix the reported finding, then retry"
-					if errors
-					else None
-				),
-			)
-		)
+			run_outputs.update(component_outputs)
+	results.extend(_command_results(executed, run_errors, run_outputs))
 	for component_index, component in enumerate(components, start=1):
-		if component.tests is None:
+		tests_not_applicable = component.tests is None
+		has_coverage = _has_pinned_coverage(prepared)
+		if tests_not_applicable:
 			results.append(
 				CheckResult(
 					check_id=f"python.component_{component_index}.pytest",
 					status=Status.NOT_APPLICABLE,
 					summary="tests are explicitly not applicable",
 					recovery_action="declare test paths if tests apply",
+				)
+			)
+		if tests_not_applicable or not has_coverage:
+			results.append(
+				CheckResult(
+					check_id=f"python.component_{component_index}.coverage",
+					status=Status.NOT_APPLICABLE,
+					summary=(
+						"coverage is not applicable without tests"
+						if tests_not_applicable and has_coverage
+						else "coverage provider is not in the pinned policy inventory"
+					),
+					recovery_action=(
+						"declare test paths before collecting report-only coverage"
+						if tests_not_applicable and has_coverage
+						else (
+							"add a pinned coverage provider only when report-only coverage is "
+							"required"
+						)
+					),
 				)
 			)
 	return results

@@ -4,7 +4,8 @@ Shared, versioned quality checks for local Git hooks and GitHub CI.
 
 `quality-gate.toml` is a schema 2 repository contract. It declares repository obligations,
 Python components, immutable policy release identity, limits, and typed waivers. The runner
-owns the Ruff, mypy, pytest, isolated-environment, timeout, and structured-reporting policy.
+owns the Ruff, mypy, pytest, report-only coverage, isolated-environment, timeout, and
+structured-reporting policy.
 
 ## Commands
 

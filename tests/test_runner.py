@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import subprocess
 import sys
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
@@ -13,6 +15,7 @@ from quality_gate.distribution import ExternalTool, ReleaseFile, ReleaseManifest
 from quality_gate.launcher import PreparedEnvironment
 
 FIXTURES = Path(__file__).parent / "fixtures"
+EXPECTED_TIMEOUT_WAIT_CALLS = 2
 
 
 def _fake_candidate_snapshot(root: Path) -> AbstractContextManager[SimpleNamespace]:
@@ -56,19 +59,88 @@ def test_wheel_tool_runs_from_the_prepared_runtime() -> None:
 def test_run_reports_non_utf8_subprocess_output(
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-	monkeypatch.setattr(
-		runner.subprocess,
-		"run",
-		lambda *args, **kwargs: SimpleNamespace(
-			returncode=1,
-			stdout="stdout ошибка".encode("cp1251"),
-			stderr="stderr ошибка".encode("cp1251"),
-		),
-	)
+	class FailedProcess:
+		stdout = io.BytesIO("stdout ошибкаstderr ошибка".encode("cp1251"))
+
+		def wait(self, timeout: float | None = None) -> int:
+			return 1
+
+		def kill(self) -> None:
+			return None
+
+	monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: FailedProcess())
 	monkeypatch.setattr(runner.locale, "getpreferredencoding", lambda _do_setlocale: "cp1251")
 
 	with pytest.raises(runner.QualityGateError, match="stdout ошибка"):
 		runner.run(["pip", "install"], Path("."), {})
+
+
+def test_run_returns_decoded_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+	class SuccessfulProcess:
+		stdout = io.BytesIO(b"coverage report")
+
+		def wait(self, timeout: float | None = None) -> int:
+			return 0
+
+		def kill(self) -> None:
+			return None
+
+	monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: SuccessfulProcess())
+
+	assert runner.run(["coverage", "report"], Path("."), {}) == "coverage report"
+
+
+def test_bounded_output_marks_truncated_external_output() -> None:
+	result = runner._bounded_output("x" * (runner.MAX_COMMAND_OUTPUT_CHARS + 1))
+
+	assert result.endswith("[output truncated]")
+	assert len(result) < runner.MAX_COMMAND_OUTPUT_CHARS + 32
+
+
+def test_run_bounds_subprocess_output(monkeypatch: pytest.MonkeyPatch) -> None:
+	class LargeProcess:
+		stdout = io.BytesIO(b"x" * (runner.MAX_COMMAND_OUTPUT_BYTES + 100))
+
+		def wait(self, timeout: float | None = None) -> int:
+			return 0
+
+		def kill(self) -> None:
+			return None
+
+	monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: LargeProcess())
+
+	result = runner.run(["large-output"], Path("."), {})
+
+	assert result.endswith("[output truncated]")
+	assert len(result) < runner.MAX_COMMAND_OUTPUT_CHARS + 32
+
+
+def test_bounded_subprocess_kills_and_joins_after_timeout(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	class TimeoutProcess:
+		stdout = io.BytesIO(b"partial output")
+		wait_calls = 0
+		was_killed = False
+
+		def wait(self, timeout: float | None = None) -> int:
+			self.wait_calls += 1
+			if self.wait_calls == 1:
+				assert timeout is not None
+				raise subprocess.TimeoutExpired(["slow"], timeout)
+			return 0
+
+		def kill(self) -> None:
+			self.was_killed = True
+
+	process = TimeoutProcess()
+	monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: process)
+
+	with pytest.raises(subprocess.TimeoutExpired):
+		runner._run_bounded_subprocess(["slow"], Path("."), {}, 0.1)
+
+	assert process.was_killed
+	assert process.wait_calls == EXPECTED_TIMEOUT_WAIT_CALLS
 
 
 def test_load_components_accepts_repository_without_python() -> None:
