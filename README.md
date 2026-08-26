@@ -39,7 +39,8 @@ lesson format and release learning rules are defined in [`docs/lessons.md`](docs
 
 `.github/workflows/quality.yml` is a reusable workflow and the self-check workflow for this
 repository. It checks out the exact pull-request head with full history, reads the immutable
-`quality.policy_release` from `quality-gate.toml`, requires GitHub to report that release as
+`quality.policy_release` from `quality-gate.toml`, selects the runner-specific release asset,
+and requires GitHub to report that release as
 immutable, and verifies the downloaded archive against GitHub's asset digest before extraction.
 It then verifies the wheel checksum, synchronizes and prepares the release, and runs the same
 `quality-gate check` used by the local gate. Pull requests pass their explicit base and head commit

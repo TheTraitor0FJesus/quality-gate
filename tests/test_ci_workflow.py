@@ -222,6 +222,11 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert "QUALITY_GATE_ARCHIVE" in workflow
 	assert "--max-time 60" in workflow
 	assert "--max-filesize 104857600" in workflow
+	assert (
+		'QUALITY_GATE_ASSET_NAME="quality-gate-${QUALITY_GATE_RELEASE}-${RUNNER_OS}.zip"'
+		in workflow
+	)
+	assert '"${QUALITY_GATE_RELEASE_URL}/${QUALITY_GATE_ASSET_NAME}"' in workflow
 	assert 'QUALITY_GATE_WHEEL="$(python .quality-gate-ci/quality_gate/ci_release.py' in workflow
 	assert "manifest_python.outputs.versions" in workflow
 	assert 'default: "3.12"' not in workflow

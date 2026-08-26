@@ -15,7 +15,9 @@ This repository is the source of truth for shared Python quality checks.
 - `quality-gate.toml` in each consumer repository is the schema 2 contract: repository obligations,
   component metadata, limits, defaults, policy release identity, and typed waivers.
 
-The reusable workflow and local launcher must consume an immutable policy release. GitHub release
+The reusable workflow and local launcher must consume an immutable policy release. CI selects a
+platform-specific asset from that release so Windows and Linux receive compatible wheels and
+scanner binaries. GitHub release
 immutability and the GitHub-reported asset digest are the CI trust anchor; the workflow must reject
 a mutable release or a digest mismatch before extraction. `quality_gate/ci_release.py` also checks
 the release manifest, every declared artifact digest, safe relative paths, and regular extracted

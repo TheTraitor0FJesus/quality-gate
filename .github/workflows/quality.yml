@@ -104,7 +104,7 @@ jobs:
           fi
           QUALITY_GATE_RELEASE_URL="https://github.com/TheTraitor0FJesus/quality-gate/releases/download/${QUALITY_GATE_RELEASE}"
           QUALITY_GATE_RELEASE_API="https://api.github.com/repos/TheTraitor0FJesus/quality-gate/releases/tags/${QUALITY_GATE_RELEASE}"
-          export QUALITY_GATE_ASSET_NAME="quality-gate-${QUALITY_GATE_RELEASE}.zip"
+          export QUALITY_GATE_ASSET_NAME="quality-gate-${QUALITY_GATE_RELEASE}-${RUNNER_OS}.zip"
           export QUALITY_GATE_RELEASE_DIR="$RUNNER_TEMP/quality-gate-release"
           export QUALITY_GATE_ARCHIVE="$RUNNER_TEMP/quality-gate-release.zip"
           export QUALITY_GATE_RELEASE_METADATA="$RUNNER_TEMP/quality-gate-release.json"
@@ -116,7 +116,7 @@ jobs:
             "$QUALITY_GATE_RELEASE_API" \
             --output "$QUALITY_GATE_RELEASE_METADATA"
           curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 --max-filesize 104857600 \
-            "${QUALITY_GATE_RELEASE_URL}/quality-gate-${QUALITY_GATE_RELEASE}.zip" \
+            "${QUALITY_GATE_RELEASE_URL}/${QUALITY_GATE_ASSET_NAME}" \
             --output "$QUALITY_GATE_ARCHIVE"
           QUALITY_GATE_WHEEL="$(python .quality-gate-ci/quality_gate/ci_release.py \
             --metadata "$QUALITY_GATE_RELEASE_METADATA" \
