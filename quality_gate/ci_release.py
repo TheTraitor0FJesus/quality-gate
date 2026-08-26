@@ -94,7 +94,10 @@ def _validate_members(archive: zipfile.ZipFile, target: Path) -> None:
 		total_size += member.file_size
 		if total_size > MAX_ARCHIVE_BYTES:
 			raise CiReleaseError("release archive exceeds the size limit")
-		parts = _safe_relative_path(member.filename, "release archive member")
+		member_name = member.filename.rstrip("/")
+		if not member_name:
+			continue
+		parts = _safe_relative_path(member_name, "release archive member")
 		_target_path(target, parts, "release archive member")
 
 
@@ -109,7 +112,7 @@ def _manifest_inventory(
 	wheels = [
 		_object(item, "release file")
 		for item in files
-		if str(item.get("path", "")).endswith(".whl")
+		if str(item.get("path", "")).endswith(".whl") and item.get("kind", "artifact") == "artifact"
 	]
 	if len(wheels) != 1:
 		raise CiReleaseError("release must contain exactly one policy wheel")

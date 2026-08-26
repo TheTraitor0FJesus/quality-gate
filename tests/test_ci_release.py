@@ -75,6 +75,7 @@ sha256 = "{hashlib.sha256(tool).hexdigest()}"
 '''
 	with zipfile.ZipFile(path, "w") as archive:
 		archive.writestr("release.toml", release_manifest)
+		archive.writestr("quality_gate/policy/", b"")
 		archive.writestr(wheel_name, wheel)
 		archive.writestr("gitleaks.exe", tool)
 		if unsafe_member:
