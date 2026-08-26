@@ -162,6 +162,8 @@ jobs:
 
 
 def test_workflow_hygiene_accepts_a_pinned_reusable_caller(tmp_path: Path) -> None:
+	"""Accept a reusable caller whose workflow reference is immutable."""
+
 	workflow = tmp_path / ".github" / "workflows"
 	workflow.mkdir(parents=True)
 	workflow_text = (
@@ -185,6 +187,35 @@ jobs:
 	)
 	(workflow / "quality.yml").write_text(
 		workflow_text,
+		encoding="utf-8",
+	)
+
+	result = workflow_result(tmp_path, _manifest(tmp_path))
+
+	assert result.status.value == "passed"
+
+
+def test_workflow_hygiene_accepts_a_same_commit_reusable_caller(tmp_path: Path) -> None:
+	"""Accept a local reusable caller that is intrinsically pinned to the same commit."""
+
+	workflow = tmp_path / ".github" / "workflows"
+	workflow.mkdir(parents=True)
+	(workflow / "quality.yml").write_text(
+		"""name: Quality Gate
+on:
+  workflow_call:
+  pull_request:
+  push:
+permissions:
+  contents: read
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  quality-gate:
+    name: Quality Gate
+    uses: ./.github/workflows/reusable.yml
+""",
 		encoding="utf-8",
 	)
 

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import quality_gate.distribution as distribution
 from quality_gate.cli import main
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import DistributionError, PolicyCache
@@ -121,6 +122,32 @@ def test_sync_lock_blocks_a_second_mutation(tmp_path: Path) -> None:
 
 	with pytest.raises(DistributionError, match="locked"):
 		cache.sync(source, lock_timeout_seconds=0)
+
+
+def test_interrupted_sync_leaves_no_partial_release_and_can_recover(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	source = tmp_path / "source"
+	source.mkdir()
+	_release(source)
+	cache = PolicyCache(tmp_path / "cache")
+	real_replace = distribution.os.replace
+
+	def interrupt_staged_release(source_path: str, target_path: str) -> None:
+		if Path(target_path).parent == cache.releases:
+			raise OSError("simulated replacement interruption")
+		real_replace(source_path, target_path)
+
+	monkeypatch.setattr(distribution.os, "replace", interrupt_staged_release)
+	try:
+		with pytest.raises(OSError, match="interruption"):
+			cache.sync(source)
+	finally:
+		monkeypatch.undo()
+
+	assert not (cache.releases / "v2.0.0").exists()
+	assert cache.sync(source).version == "v2.0.0"
+	assert cache.select("v2.0.0").is_dir()
 
 
 def test_prune_requires_confirmation_and_keeps_active_releases(tmp_path: Path) -> None:

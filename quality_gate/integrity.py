@@ -407,7 +407,7 @@ def _is_top_level(item: tuple[int, str, str] | None) -> bool:
 
 
 def _update_job(current: list[object] | None, item: tuple[int, str, str] | None) -> None:
-	if current is None or not item or item[0] < _PROPERTY_LEVEL:
+	if current is None or not item or item[0] != _PROPERTY_LEVEL:
 		return
 	if item[1] == "name":
 		current[1] = item[2].strip("'\"")
@@ -597,7 +597,8 @@ def _workflow_reference_findings(workflow: _Workflow) -> list[Finding]:
 			"pin the reference to a 40-character commit SHA",
 		)
 		for reference in workflow.uses
-		if "@" not in reference or not _SHA.fullmatch(reference.rsplit("@", 1)[-1])
+		if not reference.startswith("./")
+		and ("@" not in reference or not _SHA.fullmatch(reference.rsplit("@", 1)[-1]))
 	]
 
 

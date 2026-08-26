@@ -164,5 +164,5 @@ def test_native_pre_push_hook_blocks_default_branch_and_allows_feature_branch(
 	assert protected.returncode == 1
 	assert "default branch" in protected.stderr.lower()
 	assert deletion.returncode == 1
-	assert malformed.returncode == 2
+	assert malformed.returncode == UNCHECKED_EXIT
 	assert "push unchecked" in malformed.stderr.lower()

@@ -11,12 +11,19 @@ This repository is the source of truth for shared Python quality checks.
 - `quality_gate/lessons.py` defines the escaped-defect lesson format and release learning gate.
 - `quality_gate/contracts.py`, `quality_gate/reporting.py`, and `quality_gate/migration.py` define the schema 2 manifest, verdict/reporting, waiver, and schema 1 migration contracts.
 - `.github/workflows/quality.yml` is the reusable GitHub CI workflow.
+- `.github/workflows/parity.yml` is the non-gating Windows/Linux parity workflow.
 - `quality-gate.toml` in each consumer repository is the schema 2 contract: repository obligations,
   component metadata, limits, defaults, policy release identity, and typed waivers.
 
-The reusable workflow and local launcher must consume an immutable policy release. The distribution
-layer owns artifact retrieval and checksums; the reusable workflow must derive its release URL from
-the manifest and synchronize it before running the CLI gate.
+The reusable workflow and local launcher must consume an immutable policy release. GitHub release
+immutability and the GitHub-reported asset digest are the CI trust anchor; the workflow must reject
+a mutable release or a digest mismatch before extraction. `quality_gate/ci_release.py` also checks
+the release manifest, every declared artifact digest, safe relative paths, and regular extracted
+tool files before chmod. The distribution layer then verifies the release inventory and synchronizes
+it before running the CLI gate. The workflow first installs a fixed bootstrap Python, reads all
+manifest component versions with `python`, and prepares the resulting multiline setup input. The
+parity workflow is dispatch/schedule-only, publishes one machine-readable result per platform, and
+compares the release, tools, check surface, history, redaction, and `unchecked` outcomes separately.
 
 The global Git hook currently uses the transition runtime at
 `S:\GITHUB-REPOSITORIES\code_projects\quality-gate-v1-runtime`. Release and sync work must

@@ -39,11 +39,22 @@ lesson format and release learning rules are defined in [`docs/lessons.md`](docs
 
 `.github/workflows/quality.yml` is a reusable workflow and the self-check workflow for this
 repository. It checks out the exact pull-request head with full history, reads the immutable
-`quality.policy_release` from `quality-gate.toml`, verifies the release wheel checksum before
-installation, synchronizes and prepares that release, then runs the same `quality-gate check`
-used by the local gate. Pull requests pass their explicit base and head commit SHAs to the range
-scan. A push to `main` repeats the gate and reports the private GitHub Free limitation: it detects
-a direct default-branch push but cannot undo it.
+`quality.policy_release` from `quality-gate.toml`, requires GitHub to report that release as
+immutable, and verifies the downloaded archive against GitHub's asset digest before extraction.
+It then verifies the wheel checksum, synchronizes and prepares the release, and runs the same
+`quality-gate check` used by the local gate. Pull requests pass their explicit base and head commit
+SHAs to the range scan. The verifier checkout uses `job.workflow_repository` and `job.workflow_sha`,
+so a consumer runs the verifier from the exact reusable-workflow source revision. CI installs one
+fixed bootstrap Python before reading the manifest, then prepares every declared version (or the
+explicit `python-version` override). A push to `main` repeats the gate and reports the private
+GitHub Free limitation: it detects a direct default-branch push but cannot undo it.
+
+`.github/workflows/parity.yml` runs only from manual dispatch or a weekly schedule. It calls the
+reusable workflow on both `windows-latest` and `ubuntu-latest`. Each runner executes
+`quality_gate/ci_parity.py` with the installed release wheel and publishes a machine-readable
+result. A separate Linux compare job checks policy release identity, tool names and versions, all
+check IDs and statuses, the PR history verdict, full and meaningful-substring redaction, shallow
+history as `unchecked`, and an unavailable scanner as `unchecked`.
 
 Consumer workflows must call the reusable workflow by a full 40-character commit SHA. The
 reusable workflow reads all declared component Python versions; an optional input can override
