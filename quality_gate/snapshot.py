@@ -26,6 +26,7 @@ _SUPPORTED_MODES = {b"100644", b"100755", b"120000"}
 _IndexFingerprint = tuple[int, int, int, bytes] | None
 _LOGGER = logging.getLogger(__name__)
 _MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_CANDIDATE_BLOB_SIZE_MIB = 64
 
 
 class SnapshotError(RuntimeError):
@@ -418,7 +419,7 @@ def _create_snapshot(
 		effective_blob_limit = (
 			_positive_limit(max_blob_size_mib, "snapshot blob limit")
 			if max_blob_size_mib is not None
-			else manifest_blob_limit
+			else max(manifest_blob_limit, MAX_CANDIDATE_BLOB_SIZE_MIB)
 		)
 		_materialize_candidate(
 			_MaterializationContext(

@@ -23,6 +23,7 @@ from quality_gate.contracts import (
 	redact,
 )
 from quality_gate.distribution import DistributionError
+from quality_gate.integrity import documentation_results, git_integrity_results, workflow_result
 from quality_gate.launcher import PreparedEnvironment, prepare
 from quality_gate.reporting import render
 from quality_gate.runtime import RuntimeUnavailable
@@ -781,6 +782,7 @@ def _check_snapshot(
 	*,
 	verbose: bool = False,
 	repository_root: Path | None = None,
+	index_file: Path | None = None,
 ) -> Verdict:
 	actual_root = actual_root.resolve()
 	try:
@@ -789,12 +791,22 @@ def _check_snapshot(
 		verdict = Verdict((_error_result(_manifest_error(error)),))
 		return verdict
 	contract_result = required_documents_result(actual_root, manifest)
+	repository_results = [
+		*git_integrity_results(
+			actual_root,
+			manifest,
+			repository=repository_root or actual_root,
+			index_file=index_file,
+		),
+		workflow_result(actual_root, manifest),
+		*documentation_results(actual_root, manifest),
+	]
 	try:
 		components = load_components(actual_root)
 	except QualityGateError as error:
-		verdict = Verdict((contract_result, _error_result(error)))
+		verdict = Verdict((contract_result, *repository_results, _error_result(error)))
 		return verdict
-	results = [contract_result]
+	results = [contract_result, *repository_results]
 	if not components:
 		results.append(
 			CheckResult(
@@ -844,6 +856,7 @@ def check(root: Path | None = None, *, verbose: bool = False) -> Verdict:
 				snapshot.root,
 				verbose=verbose,
 				repository_root=actual_root,
+				index_file=getattr(snapshot, "repository_index", None),
 			)
 	except SnapshotError as error:
 		quality_error = QualityGateError(

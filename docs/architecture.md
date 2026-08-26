@@ -4,7 +4,7 @@ Use this map before non-trivial codebase questions, design work, or code changes
 
 ## Navigation
 
-- **CLI and orchestration** — `quality_gate/cli.py` parses commands; `quality_gate/contracts.py` validates schema 2 and defines verdicts; `quality_gate/migration.py` prints read-only schema 1 proposals; `quality_gate/snapshot.py` materializes the read-only Git index candidate; `quality_gate/runner.py` executes checks against that candidate; `quality_gate/launcher.py` selects a pinned release and prepares consumer runtimes.
+- **CLI and orchestration** — `quality_gate/cli.py` parses commands; `quality_gate/contracts.py` validates schema 2 and defines verdicts; `quality_gate/migration.py` prints read-only schema 1 proposals; `quality_gate/snapshot.py` materializes the read-only Git index candidate; `quality_gate/integrity.py` checks Git hygiene, workflow hygiene, and mechanical documentation health; `quality_gate/runner.py` executes checks against that candidate; `quality_gate/launcher.py` selects a pinned release and prepares consumer runtimes.
 - **Policy distribution** — `quality_gate/distribution.py` validates release manifests and SHA-256 digests, installs releases through a locked same-volume replacement, quarantines corrupt entries, and retains active/previous selections.
 - **Local runtime** — `.venv/` contains the untracked Python environment used by the global Git hook; `quality_gate/runtime.py` creates a separate cache runtime per repository and fingerprint of policy, component, Python, and dependency inputs.
 - **CI integration** — `.github/workflows/quality.yml` is the reusable workflow boundary; later release work must pin consumers to immutable policy artifacts.

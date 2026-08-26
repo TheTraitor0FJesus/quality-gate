@@ -20,6 +20,22 @@ FIXTURES = Path(__file__).parent / "fixtures"
 REPOSITORY = Path(__file__).resolve().parents[1]
 EXIT_UNCHECKED = 2
 EXPECTED_MULTI_COMPONENT_RUFF_CHECKS = 4
+VALID_WORKFLOW = """name: Quality gate
+on:
+  pull_request:
+  push:
+permissions: read
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  quality-gate:
+    name: quality-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567
+"""
 
 
 def _coverage_release_manifest() -> ReleaseManifest:
@@ -47,7 +63,14 @@ def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
 
 def _disposable_repository(tmp_path: Path, fixture: str) -> Path:
 	root = tmp_path / "repository"
-	shutil.copytree(FIXTURES / fixture, root)
+	shutil.copytree(
+		FIXTURES / fixture,
+		root,
+		ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+	)
+	workflow = root / ".github" / "workflows" / "quality.yml"
+	workflow.parent.mkdir(parents=True)
+	workflow.write_text(VALID_WORKFLOW, encoding="utf-8")
 	assert _git(root, "init").returncode == 0
 	assert _git(root, "add", ".").returncode == 0
 	return root

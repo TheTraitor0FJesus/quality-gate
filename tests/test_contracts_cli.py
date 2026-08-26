@@ -22,6 +22,22 @@ from quality_gate.contracts import (
 REPOSITORY = Path(__file__).resolve().parents[1]
 EXIT_QUALITY_FAILURE = 1
 EXIT_UNCHECKED = 2
+VALID_WORKFLOW = """name: Quality gate
+on:
+  pull_request:
+  push:
+permissions: read
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  quality-gate:
+    name: quality-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567
+"""
 
 
 def _run(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -56,8 +72,11 @@ def _git(
 
 
 def _init_and_stage(root: Path, *paths: str) -> None:
+	workflow = root / ".github" / "workflows" / "quality.yml"
+	workflow.parent.mkdir(parents=True)
+	workflow.write_text(VALID_WORKFLOW, encoding="utf-8")
 	assert _git(root, "init").returncode == 0
-	assert _git(root, "add", *paths).returncode == 0
+	assert _git(root, "add", *paths, ".github/workflows/quality.yml").returncode == 0
 
 
 def _manifest(*, python: bool = False, documents: list[str] | None = None, waiver: str = "") -> str:
