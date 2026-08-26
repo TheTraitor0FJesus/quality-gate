@@ -8,6 +8,7 @@ This repository is the source of truth for shared Python quality checks.
 - `quality_gate/policy/mypy.ini` defines shared mypy policy.
 - `quality_gate/runner.py` defines which checks run and how project manifests apply them.
 - `quality_gate/integrity.py` defines repository Git, workflow, and mechanical documentation checks.
+- `quality_gate/lessons.py` defines the escaped-defect lesson format and release learning gate.
 - `quality_gate/contracts.py`, `quality_gate/reporting.py`, and `quality_gate/migration.py` define the schema 2 manifest, verdict/reporting, waiver, and schema 1 migration contracts.
 - `.github/workflows/quality.yml` is the reusable GitHub CI workflow.
 - `quality-gate.toml` in each consumer repository is the schema 2 contract: repository obligations,

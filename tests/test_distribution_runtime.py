@@ -69,6 +69,18 @@ def test_sync_installs_verified_release_and_keeps_previous_for_rollback(tmp_path
 	assert cache.select("v2.1.0").is_dir()
 	assert cache.status()["active"] == "v2.1.0"
 	assert cache.rollback().name == "v2.0.0"
+
+
+def test_consumer_policy_sync_is_independent_of_lessons(tmp_path: Path) -> None:
+	source = tmp_path / "source"
+	source.mkdir()
+	_release(source)
+	(tmp_path / "lessons").mkdir()
+	(tmp_path / "lessons" / "incident.md").write_text("not learned\n", encoding="utf-8")
+
+	cache = PolicyCache(tmp_path / "cache")
+
+	assert cache.sync(source).version == "v2.0.0"
 	assert cache.status()["active"] == "v2.0.0"
 
 

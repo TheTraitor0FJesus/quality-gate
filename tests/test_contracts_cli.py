@@ -47,7 +47,7 @@ def _run(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
 	env = os.environ.copy()
 	env["PYTHONPATH"] = str(REPOSITORY) + os.pathsep + env.get("PYTHONPATH", "")
 	env["PYTHONIOENCODING"] = "utf-8"
-	if arguments and arguments[0] == "check":
+	if arguments and arguments[0] in {"check", "audit"}:
 		local_appdata = root / ".test-localappdata"
 		cache_root = local_appdata / "quality-gate"
 		source = root / ".test-policy-release"
@@ -109,6 +109,33 @@ def _init_and_stage(root: Path, *paths: str) -> None:
 	workflow.write_text(VALID_WORKFLOW, encoding="utf-8")
 	assert _git(root, "init").returncode == 0
 	assert _git(root, "add", *paths, ".github/workflows/quality.yml").returncode == 0
+
+
+def _stage_lesson_repository(
+	root: Path, *, status: str, adaptation: str = "", evidence: str = ""
+) -> None:
+	(root / "quality-gate.toml").write_text(_manifest(), encoding="utf-8")
+	(root / "AGENTS.md").write_text("contract\n", encoding="utf-8")
+	lessons = root / "lessons"
+	lessons.mkdir()
+	(lessons / "incident.md").write_text(
+		f"""---
+id: incident-1
+status: {status}
+incident: A defect escaped the gate.
+expected_layer: repository check
+miss_cause: The case was not covered.
+adaptation: {adaptation}
+evidence: {evidence}
+---
+
+# Lesson
+
+The incident is recorded.
+""",
+		encoding="utf-8",
+	)
+	_init_and_stage(root, "quality-gate.toml", "AGENTS.md", "lessons/incident.md")
 
 
 def _manifest(*, python: bool = False, documents: list[str] | None = None, waiver: str = "") -> str:
@@ -420,3 +447,34 @@ def test_verdict_exit_precedence_and_finding_invariants() -> None:
 
 	assert Verdict((result,)).exit_code == EXIT_QUALITY_FAILURE
 	assert Verdict((result, unchecked)).exit_code == EXIT_UNCHECKED
+
+
+def test_audit_aggregates_full_history_and_learning_state(tmp_path: Path) -> None:
+	_stage_lesson_repository(
+		tmp_path, status="learned", adaptation="Added a regression check.", evidence="CI run 123."
+	)
+
+	result = _run(tmp_path, "audit")
+
+	assert result.returncode == 0
+	assert "lessons.learning: passed" in result.stdout
+	assert "secrets.audit: passed" in result.stdout
+
+
+def test_open_lesson_does_not_block_ordinary_check(tmp_path: Path) -> None:
+	_stage_lesson_repository(tmp_path, status="open")
+
+	result = _run(tmp_path, "check")
+
+	assert result.returncode == 0
+	assert "lessons.learning: passed" in result.stdout
+
+
+def test_unlearned_lesson_blocks_audit(tmp_path: Path) -> None:
+	_stage_lesson_repository(tmp_path, status="open")
+
+	result = _run(tmp_path, "audit")
+
+	assert result.returncode == EXIT_QUALITY_FAILURE
+	assert "lessons.learning: failed" in result.stdout
+	assert "record the gate adaptation and verification evidence" in result.stdout

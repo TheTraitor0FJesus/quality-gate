@@ -11,7 +11,14 @@ from quality_gate.distribution import DistributionError, PolicyCache
 from quality_gate.launcher import prepare
 from quality_gate.migration import migration_proposal
 from quality_gate.reporting import render
-from quality_gate.runner import QualityGateError, _error_result, check, format_paths, validate
+from quality_gate.runner import (
+	QualityGateError,
+	_error_result,
+	audit,
+	check,
+	format_paths,
+	validate,
+)
 from quality_gate.runtime import RuntimeManager, RuntimeUnavailable, runtime_identity
 
 
@@ -25,6 +32,8 @@ def parser() -> argparse.ArgumentParser:
 	check_parser.add_argument(
 		"--head", help="Verified head Git reference for CI range scanning. Defaults to HEAD."
 	)
+	audit_parser = subcommands.add_parser("audit", help="Run a complete onboarding audit.")
+	audit_parser.add_argument("--verbose", action="store_true", help="Show all redacted findings.")
 	format_parser = subcommands.add_parser(
 		"format", help="Format only explicit Python paths with the pinned Ruff release."
 	)
@@ -123,6 +132,7 @@ def _dispatch(arguments: argparse.Namespace) -> int:
 		"doctor": lambda: _doctor(arguments.root, arguments.cache_dir),
 		"setup": lambda: _setup(arguments.root, arguments.cache_dir),
 		"format": lambda: format_paths(arguments.root, tuple(arguments.paths)),
+		"audit": lambda: audit(arguments.root, verbose=arguments.verbose).exit_code,
 	}
 	handler = handlers.get(arguments.command)
 	if handler is not None:

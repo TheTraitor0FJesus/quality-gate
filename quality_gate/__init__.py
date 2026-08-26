@@ -13,6 +13,15 @@ from .contracts import (
 	redact,
 )
 from .distribution import DistributionError, PolicyCache, ReleaseManifest
+from .lessons import (
+	Lesson,
+	LessonError,
+	ReleaseBlocked,
+	ensure_release_ready,
+	lessons_result,
+	load_lessons,
+	release_readiness,
+)
 from .runtime import RuntimeInspection, RuntimeManager, RuntimeUnavailable, runtime_fingerprint
 from .secrets import secret_audit_result, secret_candidate_result, secret_history_result
 
@@ -32,6 +41,13 @@ __all__ = [
 	"DistributionError",
 	"PolicyCache",
 	"ReleaseManifest",
+	"Lesson",
+	"LessonError",
+	"ReleaseBlocked",
+	"ensure_release_ready",
+	"lessons_result",
+	"load_lessons",
+	"release_readiness",
 	"RuntimeInspection",
 	"RuntimeManager",
 	"RuntimeUnavailable",

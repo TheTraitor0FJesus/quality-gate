@@ -13,6 +13,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from quality_gate.contracts import (
 	CheckResult,
@@ -27,9 +28,10 @@ from quality_gate.contracts import (
 from quality_gate.distribution import DistributionError
 from quality_gate.integrity import documentation_results, git_integrity_results, workflow_result
 from quality_gate.launcher import PreparedEnvironment, prepare
+from quality_gate.lessons import lessons_result
 from quality_gate.reporting import render
 from quality_gate.runtime import RuntimeUnavailable
-from quality_gate.secrets import secret_candidate_result, secret_history_result
+from quality_gate.secrets import secret_audit_result, secret_candidate_result, secret_history_result
 from quality_gate.snapshot import SnapshotError, candidate_snapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -812,6 +814,7 @@ def _check_snapshot(
 	index_file: Path | None = None,
 	base: str | None = None,
 	head: str | None = None,
+	mode: Literal["check", "audit"] = "check",
 ) -> Verdict:
 	actual_root = actual_root.resolve()
 	try:
@@ -831,6 +834,7 @@ def _check_snapshot(
 		*documentation_results(actual_root, manifest),
 	]
 	results = [contract_result, *repository_results]
+	results.append(lessons_result(actual_root, is_complete_required=mode == "audit"))
 	try:
 		components = load_components(actual_root)
 		prepared = prepare(
@@ -848,18 +852,19 @@ def _check_snapshot(
 		)
 		return Verdict((*results, _error_result(quality_error)))
 	history_base, history_head = _ci_history_refs(base, head)
-	results.extend(
-		(
-			secret_candidate_result(actual_root, manifest, prepared),
+	results.append(secret_candidate_result(actual_root, manifest, prepared))
+	if mode == "audit":
+		results.append(secret_audit_result(repository_root or actual_root, manifest, prepared))
+	else:
+		results.append(
 			secret_history_result(
 				repository_root or actual_root,
 				manifest,
 				prepared,
 				base=history_base,
 				head=history_head,
-			),
+			)
 		)
-	)
 	if not components:
 		results.append(
 			CheckResult(
@@ -881,7 +886,7 @@ def _check_snapshot(
 				)
 			run_results = _run_python_checks(actual_root, manifest, components, prepared)
 		except QualityGateError as error:
-			return Verdict((contract_result, _error_result(error)))
+			return Verdict((*results, _error_result(error)))
 		except (DistributionError, RuntimeUnavailable, OSError) as error:
 			quality_error = QualityGateError(
 				str(error),
@@ -889,7 +894,7 @@ def _check_snapshot(
 				exit_code=EXIT_UNCHECKED,
 				recovery_action="run sync and setup, then retry the quality gate",
 			)
-			return Verdict((contract_result, _error_result(quality_error)))
+			return Verdict((*results, _error_result(quality_error)))
 		results.extend(run_results)
 	verdict = Verdict(tuple(results))
 	return verdict
@@ -905,6 +910,26 @@ def check(
 	"""Run the complete quality contract against the exact staged candidate."""
 
 	actual_root = repository_root(root)
+	verdict = _run_snapshot(
+		actual_root,
+		verbose=verbose,
+		base=base,
+		head=head,
+		mode="check",
+	)
+	emit(render(verdict, verbose=verbose))
+	return verdict
+
+
+def _run_snapshot(
+	actual_root: Path,
+	*,
+	verbose: bool = False,
+	base: str | None = None,
+	head: str | None = None,
+	mode: Literal["check", "audit"] = "check",
+) -> Verdict:
+	"""Run one candidate snapshot and convert snapshot failures to a verdict."""
 	try:
 		with candidate_snapshot(actual_root) as snapshot:
 			verdict = _check_snapshot(
@@ -914,14 +939,26 @@ def check(
 				index_file=getattr(snapshot, "repository_index", None),
 				base=base,
 				head=head,
+				mode=mode,
 			)
 	except SnapshotError as error:
 		quality_error = QualityGateError(
 			error.message,
 			check_id="candidate.snapshot",
 			exit_code=EXIT_UNCHECKED,
-			recovery_action="restore a stable supported Git index and run check again",
+			recovery_action=f"restore a stable supported Git index and run {mode} again",
 		)
 		verdict = Verdict((_error_result(quality_error),))
+	return verdict
+
+
+def audit(root: Path | None = None, *, verbose: bool = False) -> Verdict:
+	"""Run every implemented domain and an explicit full-history secret audit."""
+	actual_root = repository_root(root)
+	verdict = _run_snapshot(
+		actual_root,
+		verbose=verbose,
+		mode="audit",
+	)
 	emit(render(verdict, verbose=verbose))
 	return verdict
