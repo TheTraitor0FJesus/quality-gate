@@ -161,6 +161,38 @@ jobs:
 	assert result.status.value == "passed"
 
 
+def test_workflow_hygiene_accepts_a_pinned_reusable_caller(tmp_path: Path) -> None:
+	workflow = tmp_path / ".github" / "workflows"
+	workflow.mkdir(parents=True)
+	workflow_text = (
+		"""name: Quality Gate
+on:
+  workflow_call:
+  pull_request:
+  push:
+permissions:
+  contents: read
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  quality-gate:
+    name: Quality Gate
+"""
+		+ "    uses: TheTraitor0FJesus/quality-gate/.github/workflows/quality.yml@"
+		+ "0123456789abcdef0123456789abcdef01234567"
+		+ "\n"
+	)
+	(workflow / "quality.yml").write_text(
+		workflow_text,
+		encoding="utf-8",
+	)
+
+	result = workflow_result(tmp_path, _manifest(tmp_path))
+
+	assert result.status.value == "passed"
+
+
 def test_workflow_hygiene_reports_mutable_reference_and_missing_controls(tmp_path: Path) -> None:
 	workflow = tmp_path / ".github" / "workflows"
 	workflow.mkdir(parents=True)

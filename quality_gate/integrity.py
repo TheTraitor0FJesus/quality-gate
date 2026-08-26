@@ -363,7 +363,7 @@ class _Workflow:
 	path: str
 	text: str
 	uses: tuple[str, ...]
-	jobs: tuple[tuple[str, str | None, str | None], ...]
+	jobs: tuple[tuple[str, str | None, str | None, bool], ...]
 	on_text: str
 	permissions: tuple[str, ...]
 	concurrency_cancels: bool
@@ -413,14 +413,16 @@ def _update_job(current: list[object] | None, item: tuple[int, str, str] | None)
 		current[1] = item[2].strip("'\"")
 	elif item[1] == "timeout-minutes":
 		current[2] = item[2].strip("'\"")
+	elif item[1] == "uses":
+		current[3] = True
 
 
 def _workflow_jobs(
 	keys: list[tuple[int, str, str] | None],
-) -> list[tuple[str, str | None, str | None]]:
+) -> list[tuple[str, str | None, str | None, bool]]:
 	if not any(item and item[0] == _TOP_LEVEL and item[1] == "jobs" for item in keys):
 		raise ValueError("workflow has no jobs mapping")
-	jobs: list[tuple[str, str | None, str | None]] = []
+	jobs: list[tuple[str, str | None, str | None, bool]] = []
 	in_jobs = False
 	current: list[object] | None = None
 	for item in keys:
@@ -434,7 +436,7 @@ def _workflow_jobs(
 		if item and item[0] == _JOB_LEVEL:
 			if current is not None:
 				jobs.append(tuple(current))  # type: ignore[arg-type]
-			current = [item[1], None, None]
+			current = [item[1], None, None, False]
 			continue
 		_update_job(current, item)
 	if current is not None:
@@ -554,8 +556,8 @@ def _single_workflow_findings(workflow: _Workflow) -> list[Finding]:
 				"declare the default-branch push trigger",
 			)
 		)
-	for job_id, _name, timeout in workflow.jobs:
-		if timeout is None or not timeout.isdigit() or int(timeout) <= 0:
+	for job_id, _name, timeout, is_reusable in workflow.jobs:
+		if not is_reusable and (timeout is None or not timeout.isdigit() or int(timeout) <= 0):
 			findings.append(
 				_workflow_finding(
 					workflow.path,
@@ -573,7 +575,7 @@ def _workflow_findings(workflows: list[_Workflow]) -> list[Finding]:
 	quality_jobs = [
 		(job_id, workflow.path)
 		for workflow in workflows
-		for job_id, name, _timeout in workflow.jobs
+		for job_id, name, _timeout, _is_reusable in workflow.jobs
 		if job_id.casefold() == "quality-gate" or (name or "").casefold() == "quality gate"
 	]
 	if len(quality_jobs) != 1:

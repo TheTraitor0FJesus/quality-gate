@@ -14,8 +14,9 @@ This repository is the source of truth for shared Python quality checks.
 - `quality-gate.toml` in each consumer repository is the schema 2 contract: repository obligations,
   component metadata, limits, defaults, policy release identity, and typed waivers.
 
-The reusable workflow and local launcher must consume an immutable policy release. A later
-release/sync change owns artifact retrieval, checksums, and exact workflow references.
+The reusable workflow and local launcher must consume an immutable policy release. The distribution
+layer owns artifact retrieval and checksums; the reusable workflow must derive its release URL from
+the manifest and synchronize it before running the CLI gate.
 
 The global Git hook currently uses the transition runtime at
 `S:\GITHUB-REPOSITORIES\code_projects\quality-gate-v1-runtime`. Release and sync work must

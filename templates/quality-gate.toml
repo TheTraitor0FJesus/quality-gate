@@ -19,3 +19,5 @@ gate_timeout_seconds = 600
 
 # Add one [[python]] table for each Python component when needed.
 # Paths describe component layout; they do not override shared quality rules.
+# The consumer's GitHub workflow must call the reusable workflow at a full commit SHA.
+# Its optional python-version input may override the versions declared by the components.

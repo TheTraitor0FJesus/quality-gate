@@ -1,22 +1,129 @@
-name: Quality gate
+name: Quality Gate
 
 on:
   workflow_call:
     inputs:
       python-version:
+        description: "Python used to bootstrap and prepare declared component runtimes."
         required: false
-        default: "3.11"
+        default: "3.12"
         type: string
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   quality-gate:
-    name: quality-gate
+    name: Quality Gate
+    if: github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - name: Check out the exact candidate commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          python-version: ${{ inputs.python-version }}
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install "quality-gate[tools] @ git+https://github.com/TheTraitor0FJesus/quality-gate.git@main"
-      - run: quality-gate check
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Read declared Python versions
+        id: manifest_python
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo 'versions<<QUALITY_GATE_VERSIONS'
+            python3 -c 'import re, tomllib; versions = sorted({item["python_version"] for item in tomllib.load(open("quality-gate.toml", "rb")).get("python", [])}); invalid = [version for version in versions if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", version)]; raise SystemExit(f"invalid Python version: {invalid[0]}") if invalid else None; print("\n".join(versions))'
+            echo QUALITY_GATE_VERSIONS
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install the declared bootstrap Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v6.0.0
+        with:
+          python-version: ${{ inputs['python-version'] || steps.manifest_python.outputs.versions || '3.12' }}
+
+      - name: Sync the manifest's immutable Quality Gate release
+        shell: bash
+        run: |
+          set -euo pipefail
+          QUALITY_GATE_RELEASE="$(python -c 'import tomllib; print(tomllib.load(open("quality-gate.toml", "rb"))["quality"]["policy_release"])')"
+          if [[ ! "$QUALITY_GATE_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid policy release: $QUALITY_GATE_RELEASE" >&2
+            exit 2
+          fi
+          QUALITY_GATE_RELEASE_URL="https://github.com/TheTraitor0FJesus/quality-gate/releases/download/${QUALITY_GATE_RELEASE}"
+          export QUALITY_GATE_RELEASE_DIR="$RUNNER_TEMP/quality-gate-release"
+          export QUALITY_GATE_ARCHIVE="$RUNNER_TEMP/quality-gate-release.zip"
+          mkdir -p "$QUALITY_GATE_RELEASE_DIR"
+          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 --max-filesize 104857600 \
+            "${QUALITY_GATE_RELEASE_URL}/quality-gate-${QUALITY_GATE_RELEASE}.zip" \
+            --output "$QUALITY_GATE_ARCHIVE"
+          QUALITY_GATE_WHEEL_RELATIVE="$(python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path, PurePosixPath
+          import tomllib
+          import zipfile
+
+          archive = Path(os.environ["QUALITY_GATE_ARCHIVE"])
+          target = Path(os.environ["QUALITY_GATE_RELEASE_DIR"])
+          target_root = target.resolve()
+          with zipfile.ZipFile(archive) as release_archive:
+              members = release_archive.infolist()
+              total_size = sum(member.file_size for member in members)
+              if len(members) > 10000 or total_size > 100 * 1024 * 1024:
+                  raise SystemExit("release archive exceeds the size or entry limit")
+              for member in members:
+                  member_path = PurePosixPath(member.filename)
+                  extracted = (target / member.filename).resolve()
+                  if (
+                      not member.filename
+                      or "\\" in member.filename
+                      or member_path.is_absolute()
+                      or any(part in {"", ".", ".."} for part in member_path.parts)
+                      or target_root not in extracted.parents
+                  ):
+                      raise SystemExit("release archive contains an unsafe path")
+              release = tomllib.loads(release_archive.read("release.toml").decode())["release"]
+              wheels = [item for item in release["files"] if item["path"].endswith(".whl")]
+              if len(wheels) != 1:
+                  raise SystemExit("release must contain exactly one policy wheel")
+              wheel = wheels[0]
+              content = release_archive.read(wheel["path"])
+              if hashlib.sha256(content).hexdigest() != wheel["sha256"]:
+                  raise SystemExit("release wheel checksum mismatch")
+              release_archive.extractall(target)
+              print(wheel["path"])
+PY
+)"
+          QUALITY_GATE_WHEEL="$QUALITY_GATE_RELEASE_DIR/$QUALITY_GATE_WHEEL_RELATIVE"
+          test -f "$QUALITY_GATE_WHEEL"
+          python -m pip install --no-deps "$QUALITY_GATE_WHEEL"
+          quality-gate sync --source "$QUALITY_GATE_RELEASE_DIR" --version "$QUALITY_GATE_RELEASE"
+          quality-gate setup
+
+      - name: Run the complete Quality Gate for a pull request range
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          QUALITY_GATE_BASE: ${{ github.event.pull_request.base.sha }}
+          QUALITY_GATE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          quality-gate check --base "$QUALITY_GATE_BASE" --head "$QUALITY_GATE_HEAD"
+
+      - name: Repeat the gate and report direct default-branch pushes
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::notice title=Quality Gate::Default-branch pushes are detection-only on private GitHub Free repositories; local pre-push policy and pull requests remain required."
+          quality-gate check --head "$GITHUB_SHA"

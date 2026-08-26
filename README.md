@@ -34,3 +34,28 @@ Secret checks use the integrity-checked Gitleaks binary declared by the selected
 Candidate findings expose only a repository location and SHA-256 fingerprint; migration history
 scanning is provided as a secret-domain seam for the repository audit command. Escaped-defect
 lesson format and release learning rules are defined in [`docs/lessons.md`](docs/lessons.md).
+
+## GitHub CI
+
+`.github/workflows/quality.yml` is a reusable workflow and the self-check workflow for this
+repository. It checks out the exact pull-request head with full history, reads the immutable
+`quality.policy_release` from `quality-gate.toml`, verifies the release wheel checksum before
+installation, synchronizes and prepares that release, then runs the same `quality-gate check`
+used by the local gate. Pull requests pass their explicit base and head commit SHAs to the range
+scan. A push to `main` repeats the gate and reports the private GitHub Free limitation: it detects
+a direct default-branch push but cannot undo it.
+
+Consumer workflows must call the reusable workflow by a full 40-character commit SHA. The
+reusable workflow reads all declared component Python versions; an optional input can override
+that list:
+
+```yaml
+jobs:
+  quality-gate:
+    uses: TheTraitor0FJesus/quality-gate/.github/workflows/quality.yml@<40-character-commit-sha>
+    with:
+      python-version: "3.12"
+```
+
+Dependabot checks GitHub Actions references weekly in `.github/dependabot.yml`. Policy and
+workflow updates remain human merge decisions; no auto-merge rule is configured.
