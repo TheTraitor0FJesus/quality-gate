@@ -19,6 +19,11 @@ release/sync change owns artifact retrieval, checksums, and exact workflow refer
 The global Git hook currently uses this local checkout and its untracked `.venv` runtime. Release
 and sync work must replace mutable branch coupling with an explicit cached release selection.
 
+During the migration, the global commit hook uses the v1 runtime at
+`S:\GITHUB-REPOSITORIES\code_projects\quality-gate-v1-runtime`, including for this repository.
+The v2 runner remains available for explicit development checks but must not become the commit
+blocking path before ticket 17 completes. Ticket 17 owns the final hook switch to v2.
+
 ## Change procedure
 
 1. Identify whether the change affects a shared policy, the runner, the manifest contract, or CI behavior.
