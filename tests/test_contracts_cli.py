@@ -195,6 +195,13 @@ def test_validate_accepts_non_python_manifest(tmp_path: Path) -> None:
 	assert "schema 2" in result.stdout
 
 
+def test_version_cli_reports_the_installed_quality_gate_version(tmp_path: Path) -> None:
+	result = _run(tmp_path, "version")
+
+	assert result.returncode == 0
+	assert result.stdout.strip() == "quality-gate 2.0.1"
+
+
 def test_validate_accepts_python_manifest(tmp_path: Path) -> None:
 	(tmp_path / "quality-gate.toml").write_text(_manifest(python=True), encoding="utf-8")
 	result = _run(tmp_path, "validate")

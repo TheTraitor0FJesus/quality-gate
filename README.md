@@ -22,6 +22,14 @@ structured-reporting policy.
 - `quality-gate doctor` reports missing or stale policy and runtime prerequisites as unchecked.
 - `quality-gate sync --rollback [VERSION]` selects a retained release without network access.
 - `quality-gate sync --prune` previews old cache entries; add `--confirm` to perform explicit cleanup.
+- `quality-gate version` prints the installed policy engine version.
+
+Agent routes:
+
+- [`docs/agent-reference.md`](docs/agent-reference.md) is the concise operation, migration,
+  audit, troubleshooting, extension, and rollback map.
+- [`docs/release.md`](docs/release.md) defines the self-host release controller and human
+  publication boundary.
 
 Schema 2 does not expose changed-only checking or generic dependency installation. Verification
 is read-only and uses the exact repository root supplied by `--root` or discovered from Git.

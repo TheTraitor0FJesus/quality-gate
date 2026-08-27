@@ -352,7 +352,7 @@ class PolicyCache:
 					release_root = target.resolve()
 					if release_root not in member_path.parents and member_path != release_root:
 						raise DistributionError("release archive contains an unsafe path")
-			archive.extractall(target)
+				archive.extractall(target)
 			return
 		raise DistributionError("release source does not exist")
 
