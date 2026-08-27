@@ -53,6 +53,16 @@ def _run(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
 		source = root / ".test-policy-release"
 		source.mkdir(exist_ok=True)
 		scanner = shutil.which("gitleaks")
+		if scanner is None:
+			policy_root = os.environ.get("QUALITY_GATE_POLICY_ROOT")
+			if policy_root:
+				for candidate in (
+					Path(policy_root) / "gitleaks",
+					Path(policy_root) / "gitleaks.exe",
+				):
+					if candidate.is_file():
+						scanner = str(candidate)
+						break
 		assert scanner is not None, "Gitleaks is required for CLI contract tests"
 		shutil.copy2(scanner, source / "gitleaks.exe")
 		(source / "quality_gate-2.0.0-py3-none-any.whl").write_bytes(b"test wheel")
