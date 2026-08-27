@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from quality_gate import __version__
 from quality_gate.contracts import ValidationError, Verdict, load_manifest
 from quality_gate.distribution import DistributionError, PolicyCache
 from quality_gate.launcher import prepare
@@ -56,6 +57,7 @@ def parser() -> argparse.ArgumentParser:
 	doctor_parser.add_argument("--cache-dir", type=Path)
 	setup_parser = subcommands.add_parser("setup", help="Prepare the pinned policy and runtimes.")
 	setup_parser.add_argument("--cache-dir", type=Path)
+	subcommands.add_parser("version", help="Print the installed Quality Gate version.")
 	return result
 
 
@@ -124,6 +126,10 @@ def _migrate(root: Path | None) -> None:
 	sys.stdout.write(migration_proposal(root or Path(".")))
 
 
+def _version() -> None:
+	sys.stdout.write(f"quality-gate {__version__}\n")
+
+
 def _dispatch(arguments: argparse.Namespace) -> int:
 	handlers = {
 		"validate": lambda: validate(arguments.root),
@@ -133,6 +139,7 @@ def _dispatch(arguments: argparse.Namespace) -> int:
 		"setup": lambda: _setup(arguments.root, arguments.cache_dir),
 		"format": lambda: format_paths(arguments.root, tuple(arguments.paths)),
 		"audit": lambda: audit(arguments.root, verbose=arguments.verbose).exit_code,
+		"version": _version,
 	}
 	handler = handlers.get(arguments.command)
 	if handler is not None:

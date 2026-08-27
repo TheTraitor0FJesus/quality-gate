@@ -9,6 +9,8 @@ This repository is the source of truth for shared Python quality checks.
 - `quality_gate/runner.py` defines which checks run and how project manifests apply them.
 - `quality_gate/integrity.py` defines repository Git, workflow, and mechanical documentation checks.
 - `quality_gate/lessons.py` defines the escaped-defect lesson format and release learning gate.
+- `quality_gate/release.py` validates the self-host source and exact release artifact before
+  publication.
 - `quality_gate/contracts.py`, `quality_gate/reporting.py`, and `quality_gate/migration.py` define the schema 2 manifest, verdict/reporting, waiver, and schema 1 migration contracts.
 - `.github/workflows/quality.yml` is the reusable GitHub CI workflow.
 - `.github/workflows/parity.yml` is the non-gating Windows/Linux parity workflow.
@@ -42,8 +44,9 @@ blocking path before ticket 18 completes. Ticket 18 owns the final hook switch t
 2. Update the source of truth in this repository. Do not add a project-local override to weaken a shared rule.
 3. Update focused tests when runner behavior or manifest handling changes.
 4. Run the relevant tests and `quality-gate check` from this repository.
-5. Inspect the diff for unintended changes to the shared policy or CI workflow.
-6. Commit and push to `main` only after the checks pass.
+5. Run `quality-gate audit` and the release controller before publishing a policy release.
+6. Inspect the diff for unintended changes to the shared policy or CI workflow.
+7. Commit and push to `main` only after the checks pass.
 
 ## Project-specific behavior
 

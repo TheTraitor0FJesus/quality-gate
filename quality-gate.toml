@@ -17,8 +17,12 @@ domains = ["repository", "python"]
 required_documents = [
     "AGENTS.md",
     "README.md",
+    "docs/agent-reference.md",
     "docs/architecture.md",
+    "docs/coding-standards.md",
+    "docs/lessons.md",
     "docs/quality-policy-changes.md",
+    "docs/release.md",
     "quality-gate.toml",
 ]
 

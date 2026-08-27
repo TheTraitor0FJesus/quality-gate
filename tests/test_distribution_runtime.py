@@ -4,6 +4,7 @@ import hashlib
 import os
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,21 @@ def test_sync_installs_verified_release_and_keeps_previous_for_rollback(tmp_path
 	assert cache.select("v2.1.0").is_dir()
 	assert cache.status()["active"] == "v2.1.0"
 	assert cache.rollback().name == "v2.0.0"
+
+
+def test_sync_installs_a_verified_zip_release(tmp_path: Path) -> None:
+	source = tmp_path / "source"
+	source.mkdir()
+	_release(source)
+	archive = tmp_path / "release.zip"
+	with zipfile.ZipFile(archive, "w") as zipped:
+		for path in source.iterdir():
+			zipped.write(path, path.name)
+
+	cache = PolicyCache(tmp_path / "cache")
+
+	assert cache.sync(archive).version == "v2.0.0"
+	assert cache.select("v2.0.0").is_dir()
 
 
 def test_consumer_policy_sync_is_independent_of_lessons(tmp_path: Path) -> None:

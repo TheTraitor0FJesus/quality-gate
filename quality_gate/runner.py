@@ -417,6 +417,8 @@ def _safe_environment(temporary_path: str) -> dict[str, str]:
 			"COVERAGE_FILE": str(Path(temporary_path) / ".coverage"),
 		}
 	)
+	if os.name == "nt":
+		environment["USERPROFILE"] = temporary_path
 	return environment
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 from contextlib import AbstractContextManager, nullcontext
@@ -225,6 +226,8 @@ def test_safe_environment_isolated_from_user_python_state(
 	assert environment["HOME"] == "quality-gate-temporary"
 	assert environment["TMP"] == "quality-gate-temporary"
 	assert environment["TEMP"] == "quality-gate-temporary"
+	if os.name == "nt":
+		assert environment["USERPROFILE"] == "quality-gate-temporary"
 	assert "PYTHONPATH" not in environment
 	assert "VIRTUAL_ENV" not in environment
 	assert "QUALITY_GATE_POLICY_ROOT" not in environment
