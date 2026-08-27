@@ -138,7 +138,7 @@ def _shallow_result(
 def _unavailable_cache(selected: Path, manifest: ReleaseManifest, temporary_root: Path) -> Path:
 	broken_release = temporary_root / "broken-release"
 	shutil.copytree(selected, broken_release)
-	tool = manifest.tools[0]
+	tool = next(tool for tool in manifest.tools if tool.name == "gitleaks")
 	tool_path = broken_release / tool.path
 	tool_path.write_bytes(b"unavailable scanner")
 	release_path = broken_release / "release.toml"

@@ -27,6 +27,7 @@ PARITY_WORKFLOW = REPOSITORY / ".github" / "workflows" / "parity.yml"
 PARITY_SCRIPT = REPOSITORY / "quality_gate" / "ci_parity.py"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXPECTED_CI_CHECK_INVOCATIONS = 2
+POLICY_RELEASE = "v2.0.1"
 RESULT_LINE = re.compile(
 	r"^(?P<check_id>[a-z0-9_.]+): "
 	r"(?P<status>passed|failed|unchecked|not_applicable|waived)(?: - |$)",
@@ -86,7 +87,7 @@ def _policy_root() -> Path | None:
 
 def _cached_policy_root() -> Path | None:
 	try:
-		return PolicyCache().select("v2.0.0")
+		return PolicyCache().select(POLICY_RELEASE)
 	except (DistributionError, FileNotFoundError, OSError, ValueError):
 		return None
 
@@ -189,7 +190,7 @@ def _write_release(release: Path, scanner: Path | bytes, wheel: Path) -> None:
 	}
 	(release / "release.toml").write_text(
 		f'''[release]
-version = "v2.0.0"
+version = "{POLICY_RELEASE}"
 
 [[release.files]]
 path = "{wheel.name}"
@@ -496,7 +497,7 @@ def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(tmp_path: Pa
 	for cache_base in cache_bases:
 		cache = PolicyCache(cache_base / "quality-gate")
 		cache.sync(release)
-		selected = cache.select("v2.0.0")
+		selected = cache.select(POLICY_RELEASE)
 		selected_releases.append(
 			tomllib.loads((selected / "release.toml").read_text(encoding="utf-8"))["release"]
 		)
@@ -517,7 +518,7 @@ def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(tmp_path: Pa
 	assert _result_surface(local.stdout) == _result_surface(ci.stdout)
 	assert _result_surface(local.stdout)
 	assert _result_surface(local.stdout)["secrets.history"] == "failed"
-	assert [release["version"] for release in selected_releases] == ["v2.0.0", "v2.0.0"]
+	assert [release["version"] for release in selected_releases] == [POLICY_RELEASE, POLICY_RELEASE]
 	assert [
 		[(tool["name"], tool["version"]) for tool in release["tools"]]
 		for release in selected_releases
