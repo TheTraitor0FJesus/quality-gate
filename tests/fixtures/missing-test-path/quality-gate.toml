@@ -5,8 +5,8 @@ schema = 2
 policy_release = "v2.0.1"
 
 [repository]
-name = "no-python"
-domains = ["repository"]
+name = "missing-test-path"
+domains = ["repository", "python"]
 required_documents = ["quality-gate.toml"]
 
 [repository.limits]
@@ -16,3 +16,12 @@ max_blob_size_mib = 5
 command_timeout_seconds = 120
 test_timeout_seconds = 300
 gate_timeout_seconds = 600
+
+[[python]]
+name = "app"
+path = "app"
+python_version = "3.12"
+dependency_inputs = []
+test_paths = ["missing-tests"]
+tests_applicable = true
+timeout_seconds = 300

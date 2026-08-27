@@ -7,13 +7,34 @@ This repository is the source of truth for shared Python quality checks.
 - `quality_gate/policy/ruff.toml` defines shared Ruff policy.
 - `quality_gate/policy/mypy.ini` defines shared mypy policy.
 - `quality_gate/runner.py` defines which checks run and how project manifests apply them.
+- `quality_gate/integrity.py` defines repository Git, workflow, and mechanical documentation checks.
+- `quality_gate/lessons.py` defines the escaped-defect lesson format and release learning gate.
+- `quality_gate/contracts.py`, `quality_gate/reporting.py`, and `quality_gate/migration.py` define the schema 2 manifest, verdict/reporting, waiver, and schema 1 migration contracts.
 - `.github/workflows/quality.yml` is the reusable GitHub CI workflow.
-- `quality-gate.toml` in each consumer repository contains component metadata only.
+- `.github/workflows/parity.yml` is the non-gating Windows/Linux parity workflow.
+- `quality-gate.toml` in each consumer repository is the schema 2 contract: repository obligations,
+  component metadata, limits, defaults, policy release identity, and typed waivers.
 
-The reusable workflow installs this public repository directly from `main`; consumer
-repositories do not need a repository secret for the shared package.
+The reusable workflow and local launcher must consume an immutable policy release. CI selects a
+platform-specific asset from that release so Windows and Linux receive compatible wheels and
+scanner binaries. GitHub release
+immutability and the GitHub-reported asset digest are the CI trust anchor; the workflow must reject
+a mutable release or a digest mismatch before extraction. `quality_gate/ci_release.py` also checks
+the release manifest, every declared artifact digest, safe relative paths, and regular extracted
+tool files before chmod. The distribution layer then verifies the release inventory and synchronizes
+it before running the CLI gate. The workflow first installs a fixed bootstrap Python, reads all
+manifest component versions with `python`, and prepares the resulting multiline setup input. The
+parity workflow is dispatch/schedule-only, publishes one machine-readable result per platform, and
+compares the release, tools, check surface, history, redaction, and `unchecked` outcomes separately.
 
-The global Git hook uses this local checkout and its untracked `.venv` runtime. Consumer CI workflows invoke this repository from `main`. A commit pushed to `main` therefore rolls out to every connected repository.
+The global Git hook currently uses the transition runtime at
+`S:\GITHUB-REPOSITORIES\code_projects\quality-gate-v1-runtime`. Release and sync work must
+replace this temporary routing with an explicit cached v2 release selection only at ticket 18.
+
+During the migration, the global commit hook uses the v1 runtime at
+`S:\GITHUB-REPOSITORIES\code_projects\quality-gate-v1-runtime`, including for this repository.
+The v2 runner remains available for explicit development checks but must not become the commit
+blocking path before ticket 18 completes. Ticket 18 owns the final hook switch to v2.
 
 ## Change procedure
 

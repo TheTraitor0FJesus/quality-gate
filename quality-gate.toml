@@ -1,8 +1,40 @@
+[[waivers]]
+kind = "standard"
+check_id = "repository.workflow"
+target = ".github/workflows/parity.yml"
+reason = "Parity is intentionally non-gating and runs only by dispatch or weekly schedule."
+approved_by = "TheTraitor0FJesus"
+reviewed_on = "2026-08-26"
+expires_on = "2027-08-26"
+
 [quality]
-schema = 1
-policy = "quality-gate-v1"
+schema = 2
+policy_release = "v2.0.1"
+
+[repository]
+name = "quality-gate"
+domains = ["repository", "python"]
+required_documents = [
+    "AGENTS.md",
+    "README.md",
+    "docs/architecture.md",
+    "docs/quality-policy-changes.md",
+    "quality-gate.toml",
+]
+
+[repository.limits]
+max_blob_size_mib = 5
+
+[repository.defaults]
+command_timeout_seconds = 120
+test_timeout_seconds = 300
+gate_timeout_seconds = 600
 
 [[python]]
-path = "."
-tests = "tests"
-typecheck = true
+name = "quality-gate"
+path = "quality_gate"
+python_version = "3.12"
+dependency_inputs = ["pyproject.toml"]
+test_paths = ["tests"]
+tests_applicable = true
+timeout_seconds = 300

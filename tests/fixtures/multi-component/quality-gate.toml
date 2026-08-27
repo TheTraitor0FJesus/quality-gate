@@ -5,7 +5,7 @@ schema = 2
 policy_release = "v2.0.1"
 
 [repository]
-name = "valid"
+name = "multi-component"
 domains = ["repository", "python"]
 required_documents = ["quality-gate.toml"]
 
@@ -18,11 +18,21 @@ test_timeout_seconds = 300
 gate_timeout_seconds = 600
 
 [[python]]
-name = "app"
-path = "app"
+name = "first"
+path = "app1"
 python_version = "3.12"
 dependency_inputs = []
 test_paths = []
 tests_applicable = false
-tests_reason = "Fixture validates manifest loading without running tests."
+tests_reason = "Fixture checks per-component runtime reporting."
+timeout_seconds = 300
+
+[[python]]
+name = "second"
+path = "app2"
+python_version = "3.12"
+dependency_inputs = []
+test_paths = []
+tests_applicable = false
+tests_reason = "Fixture checks per-component runtime reporting."
 timeout_seconds = 300

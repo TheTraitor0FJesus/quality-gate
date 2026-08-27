@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quality-gate"
-version = "1.0.0"
+version = "2.0.1"
 description = "One quality contract for local Git hooks and GitHub CI."
 requires-python = ">=3.11"
 

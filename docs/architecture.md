@@ -4,14 +4,16 @@ Use this map before non-trivial codebase questions, design work, or code changes
 
 ## Navigation
 
-- **CLI and orchestration** — `quality_gate/cli.py` parses commands; `quality_gate/runner.py` loads manifests and executes checks.
-- **Shared policy** — `quality_gate/policy/ruff.toml` and `quality_gate/policy/mypy.ini` define the common static-analysis rules.
-- **Local runtime** — `.venv/` contains the untracked Python environment used by the global Git hook.
-- **CI integration** — `.github/workflows/quality.yml` exposes the reusable workflow from `main`; project CI callers use the same branch as the local hook.
-- **Project contract** — `templates/quality-gate.toml` is the manifest shape generated for a project by `$setup-repo`.
+- **CLI and orchestration** — `quality_gate/cli.py` parses commands; `quality_gate/contracts.py` validates schema 2 and defines verdicts; `quality_gate/migration.py` prints read-only schema 1 proposals; `quality_gate/snapshot.py` materializes the read-only Git index candidate; `quality_gate/integrity.py` checks Git hygiene, workflow hygiene, and mechanical documentation health; `quality_gate/lessons.py` validates escaped-defect lessons and release readiness; `quality_gate/runner.py` executes checks and audits against that candidate; `quality_gate/launcher.py` selects a pinned release and prepares consumer runtimes; `quality_gate/hooks.py` exposes the native Git launch and push protocol; `quality_gate/hook_setup.py` installs managed wrappers safely.
+- **Policy distribution** — `quality_gate/distribution.py` validates release manifests and SHA-256 digests, installs releases through a locked same-volume replacement, quarantines corrupt entries, and retains active/previous selections.
+- **Local runtime** — the transition runtime at `S:\GITHUB-REPOSITORIES\code_projects\quality-gate-v1-runtime` backs the global commit hook until ticket 18; `quality_gate/runtime.py` creates a separate cache runtime per repository and fingerprint of policy, component, Python, and dependency inputs.
+- **CI integration** — `.github/workflows/quality.yml` is the reusable GitHub workflow boundary; it checks out `job.workflow_repository` at `job.workflow_sha`, bootstraps Python before reading component versions, selects a platform-specific immutable release asset, and uses `quality_gate/ci_release.py` to verify GitHub release immutability, the GitHub-reported asset digest, every declared release file, and safe extraction paths; `.github/workflows/parity.yml` runs the release-backed fixture on Windows and Linux from dispatch or schedule, uploads machine-readable results, and compares them in a separate job; every external Action is pinned to a full commit SHA, and pull requests pass explicit range refs to the same CLI gate.
+- **Project contract** — `quality_gate/contracts.py` is the source of truth for schema 2 repository, component, verdict, and waiver models; `templates/quality-gate.toml` is the manifest shape and `templates/quality.yml` plus `templates/dependabot.yml` are the consumer CI shapes generated for a project by `$setup-repo`.
+- **Learning contract** — `docs/lessons.md` defines the English Markdown lesson format; `quality_gate/lessons.py` validates lessons and provides the audit and release readiness results.
 
 ## Flows
 
-- **Local and CI checking** — `quality-gate check` → `quality_gate/runner.py` → Ruff, mypy, pytest.
+- **Local and CI checking** — `quality-gate check` → `quality_gate/snapshot.py` → `quality_gate/runner.py` → validated manifest → structured verdict → Git hygiene, Gitleaks, workflow/documentation checks, Ruff, mypy, pytest, and report-only coverage when pinned. `.github/workflows/quality.yml` verifies and installs the release wheel, syncs the manifest release, prepares declared Python versions, and passes pull-request base/head SHAs; `quality_gate/ci_parity.py` invokes that installed console entry point against one release-backed fixture and emits the comparison surface; `quality-gate audit` adds full reachable-history secret scanning and complete lessons.
+- **Release and runtime preparation** — `quality-gate sync` → verified immutable release cache → `quality-gate setup` → repository-keyed runtime fingerprint → isolated Python environment; `quality-gate doctor` reports missing prerequisites as unchecked.
 - **Project bootstrap** — `$setup-repo` → `quality-gate.toml` and a CI caller → reusable `quality.yml`.
-- **Policy rollout** — validated `quality-gate` change → commit and push to `main` → local hooks and CI callers use the new behavior.
+- **Policy rollout** — validated `quality-gate` change → immutable release artifact → explicitly synchronized local and CI runtimes.
