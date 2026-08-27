@@ -86,6 +86,7 @@ sha256 = "{digests[files[1]]}"
 		)
 		PolicyCache(cache_root).sync(source)
 		env["LOCALAPPDATA"] = str(local_appdata)
+		env["XDG_CACHE_HOME"] = str(local_appdata)
 	return subprocess.run(
 		[sys.executable, "-m", "quality_gate", "--root", str(root), *arguments],
 		cwd=root,

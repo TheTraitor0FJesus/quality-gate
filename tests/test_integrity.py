@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from datetime import date
@@ -321,6 +322,9 @@ def test_cli_checks_the_staged_repository_candidate(
 ) -> None:
 	root = tmp_path / "repository"
 	shutil.copytree(FIXTURES / "no-python", root)
+	for path in (root, *root.rglob("*")):
+		if not path.is_symlink():
+			path.chmod(path.stat().st_mode | stat.S_IWUSR)
 	workflow = root / ".github" / "workflows" / "quality.yml"
 	workflow.parent.mkdir(parents=True)
 	workflow.write_text(VALID_WORKFLOW, encoding="utf-8")
