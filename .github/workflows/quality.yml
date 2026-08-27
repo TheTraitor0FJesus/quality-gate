@@ -32,7 +32,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: quality-${{ github.workflow }}-${{ github.ref }}
+  group: quality-${{ github.workflow }}-${{ github.ref }}-${{ inputs['runner-os'] || 'ubuntu-latest' }}
   cancel-in-progress: true
 
 jobs:

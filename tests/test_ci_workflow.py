@@ -319,6 +319,10 @@ def test_reusable_workflow_has_one_stable_job_and_detects_private_push_bypass() 
 	assert "name: Quality Gate" in workflow
 	assert "github.event.repository.default_branch" in workflow
 	assert "timeout-minutes: 10" in workflow
+	assert (
+		"group: quality-${{ github.workflow }}-${{ github.ref }}-"
+		"${{ inputs['runner-os'] || 'ubuntu-latest' }}" in workflow
+	)
 	assert "cancel-in-progress: true" in workflow
 	assert "Default-branch pushes are detection-only" in workflow
 	assert "private GitHub Free repositories" in workflow
