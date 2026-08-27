@@ -51,6 +51,11 @@ add explicit deltas; they override this file only where they conflict.
 ## Verification and maintenance
 
 - Cover new logic with tests; add a regression test for every fixed defect and documented fragile invariant.
+- Profile new or changed integration tests that create environments, install packages, or run
+  external tools with `pytest --durations`. Do not repeat immutable preparation slower than two
+  seconds at function scope. Share it only with proven isolation, while preserving real artifact
+  paths, assertions, and failure injection. Compare focused and full wall time; require explicit
+  ticket justification for a full-suite regression over 10% or 10 seconds.
 - Run the complete project verification suite before committing. Every skipped or expected-failure test states its reason.
 - Keep documentation current when behavior, interfaces, architecture, configuration, or feature specifications change.
 - When removing a feature, remove its orphaned dependencies, configuration, files, and selectors in the same change.

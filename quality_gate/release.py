@@ -321,7 +321,7 @@ def _execute_artifact_gate(
 	else:
 		environment["XDG_CACHE_HOME"] = str(workspace)
 	_run_release_command(
-		[sys.executable, "-m", "venv", str(venv_root)],
+		[sys.executable, "-m", "venv", "--without-pip", str(venv_root)],
 		cwd=gate_root,
 		environment=environment,
 		deadline=deadline,
@@ -329,7 +329,16 @@ def _execute_artifact_gate(
 	)
 	python = _python_executable(venv_root)
 	_run_release_command(
-		[str(python), "-m", "pip", "install", "--no-deps", str(wheel_path)],
+		[
+			sys.executable,
+			"-m",
+			"pip",
+			"--python",
+			str(python),
+			"install",
+			"--no-deps",
+			str(wheel_path),
+		],
 		cwd=gate_root,
 		environment=environment,
 		deadline=deadline,
