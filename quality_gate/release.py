@@ -108,7 +108,11 @@ def _windows_final_path(path: Path) -> Path:
 		import ctypes
 		from ctypes import wintypes
 
-		kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+		win_dll = getattr(ctypes, "WinDLL", None)
+		get_last_error = getattr(ctypes, "get_last_error", None)
+		if win_dll is None or get_last_error is None:
+			raise OSError("Windows ctypes APIs are unavailable")
+		kernel32 = win_dll("kernel32", use_last_error=True)
 	except (AttributeError, OSError) as error:
 		raise ReleaseControllerError("release workspace final path is unavailable") from error
 
@@ -145,16 +149,14 @@ def _windows_final_path(path: Path) -> Path:
 		None,
 	)
 	if handle == ctypes.c_void_p(-1).value:
-		raise OSError(ctypes.get_last_error(), "release workspace cannot be opened")
+		raise OSError(get_last_error(), "release workspace cannot be opened")
 	try:
 		buffer_size = 256
 		while True:
 			buffer = ctypes.create_unicode_buffer(buffer_size)
 			length = get_final_path(handle, buffer, buffer_size, 0)
 			if length == 0:
-				raise OSError(
-					ctypes.get_last_error(), "release workspace final path is unavailable"
-				)
+				raise OSError(get_last_error(), "release workspace final path is unavailable")
 			if length < buffer_size - 1:
 				break
 			if buffer_size >= WINDOWS_MAX_PATH_BUFFER_CHARS:
