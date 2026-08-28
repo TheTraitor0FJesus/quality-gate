@@ -199,7 +199,7 @@ def test_version_cli_reports_the_installed_quality_gate_version(tmp_path: Path) 
 	result = _run(tmp_path, "version")
 
 	assert result.returncode == 0
-	assert result.stdout.strip() == "quality-gate 2.0.1"
+	assert result.stdout.strip() == "quality-gate 2.0.2"
 
 
 def test_validate_accepts_python_manifest(tmp_path: Path) -> None:
