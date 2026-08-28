@@ -88,6 +88,42 @@ def test_sync_installs_a_verified_zip_release(tmp_path: Path) -> None:
 	assert cache.select("v2.0.0").is_dir()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable permissions are not portable")
+def test_sync_restores_executable_permissions_for_zip_tools(tmp_path: Path) -> None:
+	source = tmp_path / "source"
+	source.mkdir()
+	_release(source)
+	archive = tmp_path / "release.zip"
+	with zipfile.ZipFile(archive, "w") as zipped:
+		for path in source.iterdir():
+			zipped.write(path, path.name)
+
+	cache = PolicyCache(tmp_path / "cache")
+	cache.sync(archive)
+
+	assert os.access(cache.select("v2.0.0") / "ruff.exe", os.X_OK)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable permissions are not portable")
+def test_repeat_sync_repairs_existing_zip_tool_permissions(tmp_path: Path) -> None:
+	source = tmp_path / "source"
+	source.mkdir()
+	_release(source)
+	archive = tmp_path / "release.zip"
+	with zipfile.ZipFile(archive, "w") as zipped:
+		for path in source.iterdir():
+			zipped.write(path, path.name)
+
+	cache = PolicyCache(tmp_path / "cache")
+	cache.sync(archive)
+	installed = cache.select("v2.0.0") / "ruff.exe"
+	installed.chmod(installed.stat().st_mode & ~0o111)
+
+	cache.sync(archive)
+
+	assert os.access(installed, os.X_OK)
+
+
 def test_consumer_policy_sync_is_independent_of_lessons(tmp_path: Path) -> None:
 	source = tmp_path / "source"
 	source.mkdir()
