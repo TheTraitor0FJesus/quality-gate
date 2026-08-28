@@ -38,6 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567
 """
+TRACKER_DEPLOY = (FIXTURES / "tracker-deploy.yml").read_text(encoding="utf-8")
 
 
 def _manifest(root: Path, fixture: str = "no-python") -> Manifest:
@@ -223,6 +224,116 @@ jobs:
 	result = workflow_result(tmp_path, _manifest(tmp_path))
 
 	assert result.status.value == "passed"
+
+
+def _repository_workflows(tmp_path: Path, deploy: str = TRACKER_DEPLOY) -> Path:
+	workflow = tmp_path / ".github" / "workflows"
+	workflow.mkdir(parents=True)
+	(workflow / "quality.yml").write_text(VALID_WORKFLOW, encoding="utf-8")
+	(workflow / "deploy.yml").write_text(deploy, encoding="utf-8")
+	return workflow
+
+
+def test_workflow_hygiene_accepts_quality_gate_and_tracker_deployment(tmp_path: Path) -> None:
+	_repository_workflows(tmp_path)
+
+	result = workflow_result(tmp_path, _manifest(tmp_path))
+
+	assert result.status.value == "passed"
+
+
+def test_workflow_hygiene_accepts_inline_default_branch_deployment(tmp_path: Path) -> None:
+	deploy = TRACKER_DEPLOY.replace("branches:\n      - main", "branches: [main]", 1)
+	_repository_workflows(tmp_path, deploy)
+
+	result = workflow_result(tmp_path, _manifest(tmp_path))
+
+	assert result.status.value == "passed"
+
+
+@pytest.mark.parametrize(
+	("original", "replacement", "message"),
+	[
+		("  push:\n", "  pull_request:\n  push:\n", "reachable from pull requests"),
+		("permissions:\n  contents: read", "permissions:\n  contents: write", "broader"),
+		("      contents: write", "      issues: write", "unrelated write"),
+		("    timeout-minutes: 10\n", "", "timeout"),
+		(
+			"actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+			"actions/checkout@main",
+			"pinned",
+		),
+	],
+)
+def test_tracker_deployment_rejects_unsafe_policy_shapes(
+	tmp_path: Path,
+	original: str,
+	replacement: str,
+	message: str,
+) -> None:
+	_repository_workflows(tmp_path, TRACKER_DEPLOY.replace(original, replacement, 1))
+
+	result = workflow_result(tmp_path, _manifest(tmp_path))
+
+	assert result.status.value == "failed"
+	assert any(message in finding.message for finding in result.findings)
+
+
+@pytest.mark.parametrize(
+	"push_filter",
+	[
+		"    branches:\n      - feature/main\n",
+		"    tags:\n      - 'v*'\n",
+	],
+)
+def test_repository_rejects_false_default_branch_coverage(tmp_path: Path, push_filter: str) -> None:
+	workflow = _repository_workflows(tmp_path)
+	quality = (workflow / "quality.yml").read_text(encoding="utf-8")
+	quality = quality.replace("  push:\n", f"  push:\n{push_filter}", 1)
+	(workflow / "quality.yml").write_text(quality, encoding="utf-8")
+
+	result = workflow_result(tmp_path, _manifest(tmp_path))
+
+	assert result.status.value == "failed"
+	assert any("default branch" in finding.message for finding in result.findings)
+
+
+@pytest.mark.parametrize(
+	("trigger", "message"),
+	[
+		("  pull_request:\n", "pull requests"),
+		("  push:\n", "default branch"),
+	],
+)
+def test_repository_quality_gate_requires_pr_and_default_branch_coverage(
+	tmp_path: Path,
+	trigger: str,
+	message: str,
+) -> None:
+	workflow = _repository_workflows(tmp_path)
+	quality = (workflow / "quality.yml").read_text(encoding="utf-8")
+	(workflow / "quality.yml").write_text(quality.replace(trigger, "", 1), encoding="utf-8")
+
+	result = workflow_result(tmp_path, _manifest(tmp_path))
+
+	assert result.status.value == "failed"
+	assert any(message in finding.message for finding in result.findings)
+
+
+def test_repository_rejects_ambiguous_quality_gate_jobs(tmp_path: Path) -> None:
+	workflow = _repository_workflows(tmp_path)
+	deploy = (workflow / "deploy.yml").read_text(encoding="utf-8")
+	deploy += """
+  duplicate-quality:
+    name: Quality Gate
+    uses: ./.github/workflows/quality.yml
+"""
+	(workflow / "deploy.yml").write_text(deploy, encoding="utf-8")
+
+	result = workflow_result(tmp_path, _manifest(tmp_path))
+
+	assert result.status.value == "failed"
+	assert any("exactly one" in finding.message for finding in result.findings)
 
 
 def test_workflow_hygiene_reports_mutable_reference_and_missing_controls(tmp_path: Path) -> None:

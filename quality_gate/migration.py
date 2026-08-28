@@ -55,7 +55,7 @@ def _component(value: object, index: int) -> LegacyComponent:
 
 
 def migration_proposal(
-	root: Path | str = ".", manifest_name: str = "quality-gate.toml", policy_release: str = "v2.0.3"
+	root: Path | str = ".", manifest_name: str = "quality-gate.toml", policy_release: str = "v2.0.4"
 ) -> str:
 	path = Path(root).resolve() / manifest_name
 	try:

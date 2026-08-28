@@ -1,0 +1,226 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      mark_runtime_switch:
+        description: "Set only after manual Docker cutover acceptance is recorded"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  update-lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      deploy_sha: ${{ steps.result.outputs.deploy_sha }}
+      is_current: ${{ steps.result.outputs.is_current }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Regenerate requirements.lock with hashes
+        run: |
+          python -m venv /tmp/lock-venv
+          source /tmp/lock-venv/bin/activate
+          pip install pip-tools --quiet
+          pip-compile --generate-hashes --strip-extras \
+            --output-file=bot/requirements.lock bot/requirements.txt
+
+      - name: Commit lock and resolve the immutable pipeline revision
+        id: result
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+            echo "A newer main revision owns deployment; this run is stale."
+            echo "is_current=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git add bot/requirements.lock
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: regenerate requirements.lock [skip ci]"
+            if ! git push origin HEAD:main; then
+              git fetch origin main
+              origin_sha="$(git rev-parse origin/main)"
+              if [[ "$(git rev-parse HEAD)" == "$origin_sha" ]]; then
+                echo "The lock commit reached main despite the client-side push error."
+              elif [[ "$(git rev-parse HEAD^)" != "$origin_sha" ]]; then
+                echo "A concurrent main update superseded this run."
+                echo "is_current=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              else
+                echo "The lock commit could not be pushed although main did not advance." >&2
+                exit 1
+              fi
+            fi
+          fi
+
+          deploy_sha="$(git rev-parse HEAD)"
+          if [[ ! "$deploy_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Resolved deploy SHA is not a full 40-character revision: $deploy_sha" >&2
+            exit 1
+          fi
+          echo "deploy_sha=$deploy_sha" >> "$GITHUB_OUTPUT"
+          echo "is_current=true" >> "$GITHUB_OUTPUT"
+
+  security-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: update-lock
+    if: needs.update-lock.outputs.is_current == 'true'
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.update-lock.outputs.deploy_sha }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev dependencies
+        run: pip install -r bot/requirements-dev.txt
+
+      - name: pip-audit
+        run: pip-audit --disable-pip --no-deps -r bot/requirements.lock
+
+      - name: Import smoke-test
+        run: python -c "import bot.main"
+        env:
+          BOT_TOKEN: ci-test-token
+          ADMIN_TELEGRAM_ID: "1"
+
+  publish-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [update-lock, security-and-smoke]
+    if: needs.update-lock.outputs.is_current == 'true'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_ref: ${{ steps.image.outputs.image_ref }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.update-lock.outputs.deploy_sha }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve immutable image reference
+        id: image
+        shell: bash
+        env:
+          DEPLOY_SHA: ${{ needs.update-lock.outputs.deploy_sha }}
+        run: |
+          set -Eeuo pipefail
+          image_repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          image_ref="$image_repository:$DEPLOY_SHA"
+          echo "image_repository=$image_repository" >> "$GITHUB_OUTPUT"
+          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Build immutable image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          load: true
+          tags: ${{ steps.image.outputs.image_ref }}
+
+      - name: Verify Compose persistent-data runtime
+        shell: bash
+        env:
+          IMAGE_REPOSITORY: ${{ steps.image.outputs.image_repository }}
+          IMAGE_TAG: ${{ needs.update-lock.outputs.deploy_sha }}
+        run: bash scripts/ci/verify-compose-runtime.sh "$IMAGE_REPOSITORY" "$IMAGE_TAG"
+
+      - name: Verify deploy readiness handling
+        shell: bash
+        run: bash scripts/ci/verify-deploy-readiness.sh
+
+      - name: Publish verified immutable image
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.image_ref }}
+        run: docker push "$IMAGE_REF"
+
+  deploy:
+    # Keep the explicit status functions: without them GitHub prepends an
+    # implicit success() check across the complete needs graph. The additional
+    # result/output checks intentionally skip obsolete revisions.
+    if: >-
+      (!failure() && !cancelled()) &&
+      needs.update-lock.outputs.is_current == 'true' &&
+      needs.publish-image.result == 'success' &&
+      (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [update-lock, security-and-smoke, publish-image]
+    permissions:
+      contents: read
+
+    steps:
+      - name: Deploy exact verified revision via SSH
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        env:
+          DEPLOY_SHA: ${{ needs.update-lock.outputs.deploy_sha }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          envs: DEPLOY_SHA
+          script: |
+            set -eu
+            checkout=/opt/argus_tracker_deploy
+            if [ ! -d "$checkout/.git" ]; then
+              echo "Retained deployment checkout is missing: $checkout" >&2
+              echo "Complete docs/docker-runtime.md 'Host bootstrap' before rerunning deployment." >&2
+              exit 20
+            fi
+            git -C "$checkout" fetch origin main
+            git -C "$checkout" cat-file -e "$DEPLOY_SHA^{commit}"
+            git -C "$checkout" reset --hard "$DEPLOY_SHA"
+            sudo bash "$checkout/deploy/deploy-image.sh" "$DEPLOY_SHA"
+
+      - name: Mark accepted Docker runtime switch
+        if: github.event_name == 'workflow_dispatch' && inputs.mark_runtime_switch
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          script: |
+            set -eu
+            sudo bash /opt/argus_tracker_deploy/deploy/mark-runtime-switch.sh
