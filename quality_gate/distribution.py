@@ -309,6 +309,7 @@ class PolicyCache:
 				staged = Path(temporary) / "release"
 				self._copy_source(Path(source), staged)
 				manifest = verify_release(staged)
+				self._restore_tool_permissions(staged, manifest)
 				if version is not None and manifest.version != version:
 					raise DistributionError(
 						f"requested {version}, source contains {manifest.version}"
@@ -329,6 +330,7 @@ class PolicyCache:
 							raise DistributionError(
 								f"release {manifest.version} is immutable and already installed"
 							)
+						self._restore_tool_permissions(target, cached)
 						self._set_active(manifest.version)
 						return manifest
 				os.replace(staged, target)
@@ -355,6 +357,21 @@ class PolicyCache:
 				archive.extractall(target)
 			return
 		raise DistributionError("release source does not exist")
+
+	def _restore_tool_permissions(self, root: Path, manifest: ReleaseManifest) -> None:
+		"""Make declared native tools runnable after ZIP extraction on POSIX."""
+		if os.name == "nt":
+			return
+		for tool in manifest.tools:
+			if tool.path.lower().endswith(".whl"):
+				continue
+			path = root / tool.path
+			try:
+				path.chmod(path.stat().st_mode | 0o111)
+			except OSError as error:
+				raise DistributionError(
+					f"release tool permissions could not be prepared: {tool.name}"
+				) from error
 
 	def _validate_directory_size(self, source: Path) -> None:
 		total_size = 0
