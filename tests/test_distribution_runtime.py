@@ -242,6 +242,30 @@ def test_runtime_fingerprint_changes_when_dependency_input_changes(tmp_path: Pat
 	assert first_digest != hashlib.sha256(dependency.read_bytes()).hexdigest()
 
 
+def test_runtime_fingerprint_ignores_dependency_line_ending_conversion(tmp_path: Path) -> None:
+	manifest_root = Path(__file__).parent / "fixtures" / "valid"
+	manifest = load_manifest(manifest_root)
+	component = manifest.python[0]
+	dependency = tmp_path / "requirements.txt"
+	component = component.__class__(
+		component.name,
+		component.path,
+		component.python_version,
+		("requirements.txt",),
+		component.test_paths,
+		component.tests_applicable,
+		component.tests_reason,
+		component.timeout_seconds,
+	)
+	dependency.write_bytes(b"package==1.0\r\nother==2.0\r\n")
+	windows_fingerprint = runtime_fingerprint(runtime_identity(tmp_path, manifest, component))
+
+	dependency.write_bytes(b"package==1.0\nother==2.0\n")
+	git_fingerprint = runtime_fingerprint(runtime_identity(tmp_path, manifest, component))
+
+	assert windows_fingerprint == git_fingerprint
+
+
 def test_missing_dependency_input_is_unchecked(tmp_path: Path) -> None:
 	manifest = load_manifest(Path(__file__).parent / "fixtures" / "valid")
 	component = manifest.python[0].__class__(

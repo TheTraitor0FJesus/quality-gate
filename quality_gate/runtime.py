@@ -60,7 +60,8 @@ def _file_identity(root: Path, relative: str) -> dict[str, object]:
 	if root.resolve() not in path.parents and path != root.resolve():
 		raise RuntimeUnavailable(f"dependency input escapes the repository: {relative}")
 	try:
-		content = path.read_bytes()
+		# Git index snapshots use LF when a Windows checkout materializes CRLF.
+		content = path.read_bytes().replace(b"\r\n", b"\n")
 	except (OSError, UnicodeError) as error:
 		raise RuntimeUnavailable(f"dependency input is unavailable: {relative}") from error
 	return {"path": relative.replace("\\", "/"), "sha256": hashlib.sha256(content).hexdigest()}
