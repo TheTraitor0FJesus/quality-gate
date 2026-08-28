@@ -27,7 +27,7 @@ PARITY_WORKFLOW = REPOSITORY / ".github" / "workflows" / "parity.yml"
 PARITY_SCRIPT = REPOSITORY / "quality_gate" / "ci_parity.py"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXPECTED_CI_CHECK_INVOCATIONS = 2
-POLICY_RELEASE = "v2.0.3"
+POLICY_RELEASE = "v2.0.4"
 RESULT_LINE = re.compile(
 	r"^(?P<check_id>[a-z0-9_.]+): "
 	r"(?P<status>passed|failed|unchecked|not_applicable|waived)(?: - |$)",
@@ -268,7 +268,7 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert 'QUALITY_GATE_WHEEL="$(python .quality-gate-ci/quality_gate/ci_release.py' in workflow
 	assert "manifest_python.outputs.versions" in workflow
 	assert 'default: "3.12"' not in workflow
-	assert manifest["quality"]["policy_release"] == "v2.0.3"
+	assert manifest["quality"]["policy_release"] == "v2.0.4"
 
 
 def test_workflow_bootstraps_before_reading_a_multicomponent_manifest(tmp_path: Path) -> None:

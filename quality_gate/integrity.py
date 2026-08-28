@@ -359,14 +359,24 @@ def git_integrity_results(
 
 
 @dataclass(frozen=True, slots=True)
+class _WorkflowJob:
+	id: str
+	name: str | None
+	timeout: str | None
+	is_reusable: bool
+	permissions: tuple[tuple[str | None, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _Workflow:
 	path: str
-	text: str
 	uses: tuple[str, ...]
-	jobs: tuple[tuple[str, str | None, str | None, bool], ...]
+	jobs: tuple[_WorkflowJob, ...]
 	on_text: str
-	permissions: tuple[str, ...]
-	concurrency_cancels: bool
+	events: frozenset[str]
+	permissions: tuple[tuple[str | None, str], ...]
+	concurrency_group: str | None
+	concurrency_cancel: str | None
 
 
 def _key(line: str) -> tuple[int, str, str] | None:
@@ -406,62 +416,113 @@ def _is_top_level(item: tuple[int, str, str] | None) -> bool:
 	return item is not None and item[0] == _TOP_LEVEL
 
 
-def _update_job(current: list[object] | None, item: tuple[int, str, str] | None) -> None:
-	if current is None or not item or item[0] != _PROPERTY_LEVEL:
-		return
-	if item[1] == "name":
-		current[1] = item[2].strip("'\"")
-	elif item[1] == "timeout-minutes":
-		current[2] = item[2].strip("'\"")
-	elif item[1] == "uses":
-		current[3] = True
-
-
-def _workflow_jobs(
+def _permission_entries(
 	keys: list[tuple[int, str, str] | None],
-) -> list[tuple[str, str | None, str | None, bool]]:
-	if not any(item and item[0] == _TOP_LEVEL and item[1] == "jobs" for item in keys):
-		raise ValueError("workflow has no jobs mapping")
-	jobs: list[tuple[str, str | None, str | None, bool]] = []
-	in_jobs = False
-	current: list[object] | None = None
-	for item in keys:
-		if item and item[0] == _TOP_LEVEL and item[1] == "jobs":
-			in_jobs = True
-			continue
-		if not in_jobs:
-			continue
-		if item and item[0] == _TOP_LEVEL:
-			break
-		if item and item[0] == _JOB_LEVEL:
-			if current is not None:
-				jobs.append(tuple(current))  # type: ignore[arg-type]
-			current = [item[1], None, None, False]
-			continue
-		_update_job(current, item)
-	if current is not None:
-		jobs.append(tuple(current))  # type: ignore[arg-type]
-	return jobs
-
-
-def _workflow_permissions(keys: list[tuple[int, str, str] | None]) -> tuple[str, ...]:
-	values: list[str] = []
-	for index, item in enumerate(keys):
-		if not item or item[0] != _TOP_LEVEL or item[1] != "permissions":
+	start: int,
+	end: int,
+	indent: int,
+) -> tuple[tuple[str | None, str], ...]:
+	for index in range(start, end):
+		item = keys[index]
+		if not item or item[0] != indent or item[1] != "permissions":
 			continue
 		if item[2]:
 			raw_value = item[2].strip("'\"")
 			if raw_value.startswith("{"):
-				values.extend(re.findall(r":\s*([a-z-]+)", raw_value.casefold()))
-			else:
-				values.append(raw_value)
-		else:
-			for child in keys[index + 1 :]:
-				if child and child[0] == _TOP_LEVEL:
-					break
-				if child and child[0] == _JOB_LEVEL:
-					values.append(child[2].strip("'\""))
-	return tuple(values)
+				return tuple(
+					(scope, value)
+					for scope, value in re.findall(
+						r"([a-z-]+)\s*:\s*([a-z-]+)", raw_value.casefold()
+					)
+				)
+			return ((None, raw_value),)
+		entries: list[tuple[str | None, str]] = []
+		for child in keys[index + 1 : end]:
+			if child and child[0] <= indent:
+				break
+			if child and child[0] == indent + 2:
+				entries.append((child[1], child[2].strip("'\"")))
+		return tuple(entries)
+	return ()
+
+
+def _workflow_jobs(keys: list[tuple[int, str, str] | None]) -> list[_WorkflowJob]:
+	jobs_start = next(
+		(
+			index
+			for index, item in enumerate(keys)
+			if item and item[0] == _TOP_LEVEL and item[1] == "jobs"
+		),
+		None,
+	)
+	if jobs_start is None:
+		raise ValueError("workflow has no jobs mapping")
+	jobs_end = next(
+		(index for index in range(jobs_start + 1, len(keys)) if _is_top_level(keys[index])),
+		len(keys),
+	)
+	job_starts = [
+		index
+		for index, item in enumerate(keys[jobs_start + 1 : jobs_end], jobs_start + 1)
+		if item and item[0] == _JOB_LEVEL and item[1] != "jobs"
+	]
+	jobs: list[_WorkflowJob] = []
+	for position, start in enumerate(job_starts):
+		end = job_starts[position + 1] if position + 1 < len(job_starts) else jobs_end
+		properties = {
+			item[1]: item[2].strip("'\"")
+			for item in keys[start + 1 : end]
+			if item and item[0] == _PROPERTY_LEVEL
+		}
+		job_item = keys[start]
+		assert job_item is not None
+		jobs.append(
+			_WorkflowJob(
+				job_item[1],
+				properties.get("name"),
+				properties.get("timeout-minutes"),
+				"uses" in properties,
+				_permission_entries(keys, start + 1, end, _PROPERTY_LEVEL),
+			)
+		)
+	return jobs
+
+
+def _workflow_events(keys: list[tuple[int, str, str] | None]) -> frozenset[str]:
+	for index, item in enumerate(keys):
+		if not item or item[0] != _TOP_LEVEL or item[1] != "on":
+			continue
+		if item[2]:
+			return frozenset(re.findall(r"[a-z_]+", item[2].casefold()))
+		on_end = next(
+			(position for position in range(index + 1, len(keys)) if _is_top_level(keys[position])),
+			len(keys),
+		)
+		return frozenset(
+			child[1].casefold()
+			for child in keys[index + 1 : on_end]
+			if child and child[0] == _JOB_LEVEL
+		)
+	return frozenset()
+
+
+def _workflow_concurrency(
+	keys: list[tuple[int, str, str] | None],
+) -> tuple[str | None, str | None]:
+	for index, item in enumerate(keys):
+		if not item or item[0] != _TOP_LEVEL or item[1] != "concurrency":
+			continue
+		group: str | None = None
+		cancel: str | None = None
+		for child in keys[index + 1 :]:
+			if child and child[0] == _TOP_LEVEL:
+				break
+			if child and child[0] == _JOB_LEVEL and child[1] == "group":
+				group = child[2].strip("'\"") or None
+			elif child and child[0] == _JOB_LEVEL and child[1] == "cancel-in-progress":
+				cancel = child[2].strip("'\"").casefold() or None
+		return group, cancel
+	return None, None
 
 
 def _parse_workflow(path: Path, relative: str) -> _Workflow:
@@ -478,18 +539,17 @@ def _parse_workflow(path: Path, relative: str) -> _Workflow:
 		if (match := _WORKFLOW_REFERENCE.match(line)) is not None
 	)
 	jobs = _workflow_jobs(keys)
-	permissions = _workflow_permissions(keys)
-	concurrency_cancels = any(
-		item and item[1] == "cancel-in-progress" and item[2].casefold() == "true" for item in keys
-	)
+	permissions = _permission_entries(keys, 0, len(keys), _TOP_LEVEL)
+	concurrency_group, concurrency_cancel = _workflow_concurrency(keys)
 	return _Workflow(
 		relative,
-		text,
 		uses,
 		tuple(jobs),
 		on_text,
+		_workflow_events(keys),
 		permissions,
-		concurrency_cancels,
+		concurrency_group,
+		concurrency_cancel,
 	)
 
 
@@ -508,6 +568,40 @@ def _workflow_paths(root: Path) -> list[Path]:
 def _single_workflow_findings(workflow: _Workflow) -> list[Finding]:
 	findings: list[Finding] = []
 	findings.extend(_workflow_reference_findings(workflow))
+	is_pull_request = bool({"pull_request", "pull_request_target"} & workflow.events)
+	findings.extend(_workflow_permission_findings(workflow, is_pull_request))
+	if workflow.concurrency_group is None or workflow.concurrency_cancel is None:
+		findings.append(
+			_workflow_finding(
+				workflow.path,
+				"workflow does not declare explicit concurrency cancellation behavior",
+				"declare concurrency.cancel-in-progress explicitly",
+			)
+		)
+	elif is_pull_request and workflow.concurrency_cancel != "true":
+		findings.append(
+			_workflow_finding(
+				workflow.path,
+				"pull-request concurrency does not cancel superseded runs",
+				"set concurrency.cancel-in-progress to true",
+			)
+		)
+	for job in workflow.jobs:
+		if not job.is_reusable and (
+			job.timeout is None or not job.timeout.isdigit() or int(job.timeout) <= 0
+		):
+			findings.append(
+				_workflow_finding(
+					workflow.path,
+					f"job {job.id!r} has no positive timeout-minutes",
+					"declare a bounded job timeout",
+				)
+			)
+	return findings
+
+
+def _workflow_permission_findings(workflow: _Workflow, is_pull_request: bool) -> list[Finding]:
+	findings: list[Finding] = []
 	if not workflow.permissions:
 		findings.append(
 			_workflow_finding(
@@ -516,7 +610,9 @@ def _single_workflow_findings(workflow: _Workflow) -> list[Finding]:
 				"declare the minimum required read permissions",
 			)
 		)
-	elif any(value.casefold() not in {"", "read", "none"} for value in workflow.permissions):
+	elif any(
+		value.casefold() not in {"", "read", "none"} for _scope, value in workflow.permissions
+	):
 		findings.append(
 			_workflow_finding(
 				workflow.path,
@@ -524,45 +620,39 @@ def _single_workflow_findings(workflow: _Workflow) -> list[Finding]:
 				"reduce permissions to the minimum required values",
 			)
 		)
-	if re.search(r"(?im)^\s+[a-z0-9_-]+:\s*write(?:\s|$)", workflow.text):
+	write_permissions = [
+		(scope, job.id)
+		for job in workflow.jobs
+		for scope, value in job.permissions
+		if value.casefold() not in {"", "read", "none"}
+	]
+	if write_permissions and is_pull_request:
 		findings.append(
 			_workflow_finding(
 				workflow.path,
-				"workflow permissions are broader than read-only",
-				"reduce permissions to the minimum required values",
+				"write-capable jobs are reachable from pull requests",
+				"remove write permissions or isolate the jobs in a deployment-only workflow",
 			)
 		)
-	if not workflow.concurrency_cancels:
-		findings.append(
-			_workflow_finding(
-				workflow.path,
-				"pull-request concurrency does not cancel superseded runs",
-				"set concurrency.cancel-in-progress to true",
-			)
+	elif write_permissions:
+		unrelated_scopes = sorted(
+			{scope or "write-all" for scope, _job_id in write_permissions}
+			- {"contents", "packages"}
 		)
-	if not re.search(r"\bpull_request\b", workflow.on_text):
-		findings.append(
-			_workflow_finding(
-				workflow.path,
-				"pull-request trigger is missing",
-				"declare the pull_request trigger",
-			)
-		)
-	if not _has_default_push_trigger(workflow.on_text):
-		findings.append(
-			_workflow_finding(
-				workflow.path,
-				"push trigger is missing",
-				"declare the default-branch push trigger",
-			)
-		)
-	for job_id, _name, timeout, is_reusable in workflow.jobs:
-		if not is_reusable and (timeout is None or not timeout.isdigit() or int(timeout) <= 0):
+		if unrelated_scopes:
 			findings.append(
 				_workflow_finding(
 					workflow.path,
-					f"job {job_id!r} has no positive timeout-minutes",
-					"declare a bounded job timeout",
+					"deployment job uses an unrelated write permission",
+					"limit job-level writes to contents and packages",
+				)
+			)
+		if not _is_deployment_only(workflow):
+			findings.append(
+				_workflow_finding(
+					workflow.path,
+					"write-capable workflow is not restricted to deployment triggers",
+					"limit it to default-branch pushes and/or workflow_dispatch",
 				)
 			)
 	return findings
@@ -573,10 +663,10 @@ def _workflow_findings(workflows: list[_Workflow]) -> list[Finding]:
 		finding for workflow in workflows for finding in _single_workflow_findings(workflow)
 	]
 	quality_jobs = [
-		(job_id, workflow.path)
+		(job, workflow)
 		for workflow in workflows
-		for job_id, name, _timeout, _is_reusable in workflow.jobs
-		if job_id.casefold() == "quality-gate" or (name or "").casefold() == "quality gate"
+		for job in workflow.jobs
+		if job.id.casefold() == "quality-gate" or (job.name or "").casefold() == "quality gate"
 	]
 	if len(quality_jobs) != 1:
 		findings.append(
@@ -584,6 +674,22 @@ def _workflow_findings(workflows: list[_Workflow]) -> list[Finding]:
 				".github/workflows",
 				"workflow must expose exactly one stable Quality Gate job identity",
 				"keep one job named quality-gate",
+			)
+		)
+	elif "pull_request" not in quality_jobs[0][1].events:
+		findings.append(
+			_workflow_finding(
+				quality_jobs[0][1].path,
+				"Quality Gate job is not reachable from pull requests",
+				"declare the pull_request trigger on the Quality Gate workflow",
+			)
+		)
+	if len(quality_jobs) == 1 and not _has_default_push_trigger(quality_jobs[0][1].on_text):
+		findings.append(
+			_workflow_finding(
+				quality_jobs[0][1].path,
+				"Quality Gate job is not reachable from the default branch",
+				"declare the default-branch push trigger on the Quality Gate workflow",
 			)
 		)
 	return findings
@@ -603,16 +709,54 @@ def _workflow_reference_findings(workflow: _Workflow) -> list[Finding]:
 
 
 def _has_default_push_trigger(on_text: str) -> bool:
-	push_match = re.search(r"\bpush\b", on_text)
-	if push_match is None:
+	push_text = _push_trigger_text(on_text)
+	if push_text is None:
 		return False
-	push_text = on_text[push_match.start() :]
-	branch_match = re.search(r"(?m)^\s+branches(?:-ignore)?\s*:\s*(.*)$", push_text)
-	if branch_match is None:
+	branches = _push_branches(push_text)
+	if branches is None:
+		if re.search(r"(?m)^[ ]{4}(?:branches-ignore|tags|tags-ignore)[ ]*:", push_text):
+			return False
 		return True
-	if "branches-ignore" in branch_match.group(0):
+	return bool(set(branches) & _DEFAULT_BRANCHES)
+
+
+def _push_trigger_text(on_text: str) -> str | None:
+	match = re.search(
+		r"(?ms)^[ ]{2}push[ ]*:[ ]*$.*?(?=^[ ]{2}[a-z_][a-z0-9_-]*[ ]*:|\Z)",
+		on_text,
+	)
+	return match.group(0) if match else None
+
+
+def _push_branches(push_text: str) -> tuple[str, ...] | None:
+	match = re.search(r"(?m)^[ ]{4}branches[ ]*:[ ]*(?P<inline>[^\n]*)$", push_text)
+	if match is None:
+		return None
+	inline = match.group("inline").strip()
+	if inline:
+		if not (inline.startswith("[") and inline.endswith("]")):
+			return ()
+		return tuple(
+			branch.strip().strip("'\"").casefold()
+			for branch in inline[1:-1].split(",")
+			if branch.strip()
+		)
+	return tuple(
+		item.group(1).strip("'\"").casefold()
+		for item in re.finditer(r"(?m)^[ ]{6}-[ ]*([^\s#]+)", push_text[match.end() :])
+	)
+
+
+def _is_deployment_only(workflow: _Workflow) -> bool:
+	if not workflow.events or not workflow.events <= {"push", "workflow_dispatch"}:
 		return False
-	return any(re.search(rf"\b{re.escape(branch)}\b", push_text) for branch in _DEFAULT_BRANCHES)
+	if workflow.events == {"workflow_dispatch"}:
+		return True
+	push_text = _push_trigger_text(workflow.on_text)
+	if push_text is None:
+		return False
+	branches = _push_branches(push_text)
+	return branches is not None and bool(branches) and set(branches) <= _DEFAULT_BRANCHES
 
 
 def workflow_result(root: Path, manifest: Manifest) -> CheckResult:
