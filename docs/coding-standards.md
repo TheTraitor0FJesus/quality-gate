@@ -1,8 +1,7 @@
 # Coding Standards
 
-Canonical standards for code repositories. Copy this file into a repository as
-`docs/coding-standards.md` before its code is reviewed. Repository-specific rules may
-add explicit deltas; they override this file only where they conflict.
+Apply these standards to code changes and reviews. Repository-specific rules override
+them where they conflict.
 
 ## Scope and design
 
@@ -11,51 +10,58 @@ add explicit deltas; they override this file only where they conflict.
 - Report unrelated defects; do not repair them as part of the change.
 - Prefer a simpler solution when it removes a dependency, a complexity layer, or moving parts.
 - Build incrementally: preserve a working path while adding the next capability.
-- Before adding code or a dependency, check existing project facilities and maintained libraries, including their documentation and types.
+- Before adding code or a dependency, check existing project facilities and current project dependencies, including their documentation and types.
 - Clarify an unclear goal. Resolve implementation details autonomously unless they change a public interface, data schema, module boundary, or cross-module contract.
+- Give an optional parameter one safe, unambiguous meaning when omitted. Require an explicit choice when omission can change correctness.
 
 ## Code structure
 
 - Give each function and module one focused responsibility.
 - Keep control flow shallow; use early returns instead of nesting three or more levels.
-- Use precise names. Boolean names use `is_` or `has_`; private module names use `_`; avoid abbreviations and generic placeholders such as `data`, `temp`, `val`, `x`, and `y`.
-- Give public functions one-line documentation that states what they do. Comment only a non-obvious constraint, workaround, or decision.
+- Prefer deep modules: keep the public interface small and place policy in the implementation. Remove abstractions that only delegate without adding policy.
+- Follow the language and project naming conventions. Use precise names; avoid abbreviations and generic placeholders such as `data`, `temp`, `val`, `x`, and `y` when a domain name is available.
+- Document a public contract when its constraints, errors, side effects, or purpose are not clear from its signature. Use comments only for non-obvious context that code alone cannot communicate: a constraint, workaround, rationale, or decision.
 - In typed languages, annotate parameters and return values according to the project's type system.
-- Keep user-configurable values in the project's configuration mechanism. Keep secrets only in ignored environment configuration; never hardcode secrets, URLs, timeouts, or environment-specific values in application logic.
+- Store user-configurable values, secrets, environment-dependent URLs, and operational timeouts in the project's configuration mechanism. Keep stable protocol constants with the code that owns them. Keep local secret configuration ignored.
+- Resolve required configuration before expensive or irreversible work. Add every new environment key to the repository's example configuration in the same change.
 
 ## Errors, inputs, and observability
 
-- Use the project's logger, not production `print()` calls. Log startup, shutdown, and external calls at the appropriate level; log or re-raise each caught exception.
+- Use the project's logger for runtime observability. Log an exception once at the boundary that owns its handling; otherwise translate it with its cause intact or let it propagate.
 - Use exceptions for contract violations and explicit absence/error results for expected outcomes; keep one error-handling style within a module.
 - Catch specific exception types. Do not silently suppress failures.
 - Validate external input against an allowlist before using it as a key, path component, query element, column, or log interpolation.
 - Bound external input at ingestion: ranges for numbers, lengths for strings, sizes for files and bodies, transfer deadlines for network calls, and page/item limits for pagination.
-- Isolate failures in batch and fan-out loops so one item cannot abort the rest.
+- Give each batch an explicit failure contract: atomic, fail-fast, or independently isolated per item. Preserve that contract in error handling and tests.
 
 ## Architecture and persistence
 
 - Keep dependency direction inward: UI -> application -> domain. Lower layers do not import upper layers.
-- Reach across modules only through their public exports. Keep filesystem, database, and HTTP access behind testable interfaces.
+- Reach across modules only through their public exports. Put filesystem, database, and HTTP policy behind stable boundaries; introduce an interface when it hides policy, permits a required implementation change, or provides a controlled test double.
+- When a domain field changes what an entity is, update every affected projection in the same change, including filters, counts, badges, serialization, and access rules.
+- Build a path with the semantics of its destination environment. Normalize both operands before comparing paths from different sources.
+- Deliver streaming events as they arrive when timeouts, liveness, or process control depend on them.
 - Write multi-step persistent files atomically: write a temporary file in the target directory, then replace the target.
-- Protect runtime credentials: use restrictive file permissions, exclude recoverable credentials from off-host backups, and document datastore exclusions when applicable.
+- Protect runtime credentials: use restrictive file permissions and exclude recoverable credentials from off-host backups. When a datastore contains recoverable credentials, document its backup exclusions.
 
 ## Security and delivery
 
-- Give served HTML a Content Security Policy. Pin external scripts with integrity metadata or self-host them.
+- For served HTML, apply a Content Security Policy that allows only the resource origins and capabilities required by the deployment. Pin external scripts with integrity metadata or self-host them.
 - Record any CSP exception in architecture documentation. Turn documented security invariants into a runtime check or test; add malformed-input negative tests for authentication guards.
 - Pin third-party CI actions to full commit SHAs, set least-privilege job permissions, and isolate secret-bearing or write-capable jobs from unpinned dependency installation.
 - Add concurrency control to workflows that can retrigger themselves. Use locked, bounded, hashed dependencies where the ecosystem supports them.
-- Harden deployed system services with `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, and an explicit `CapabilityBoundingSet=`.
+- For systemd services, apply `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, and an explicit `CapabilityBoundingSet=` where the service contract permits them; document required exceptions.
 - When a change requires a human action outside version control, report a concrete action list in the completion message.
 
 ## Verification and maintenance
 
 - Cover new logic with tests; add a regression test for every fixed defect and documented fragile invariant.
-- Profile new or changed integration tests that create environments, install packages, or run
-  external tools with `pytest --durations`. Do not repeat immutable preparation slower than two
-  seconds at function scope. Share it only with proven isolation, while preserving real artifact
-  paths, assertions, and failure injection. Compare focused and full wall time; require explicit
-  ticket justification for a full-suite regression over 10% or 10 seconds.
+- For authorization, financial rules, state transitions, data integrity, and boundary-heavy branching, map each contract rule to an observable outcome. Use the smallest case set that distinguishes every rule and boundary; for a failure, assert both its result and the absence of its forbidden side effect.
+- Parameterize tests only when they share one seam, setup, and assertion shape. Treat coverage as execution evidence, not proof of behavior. When mutation testing is configured, run the changed critical scope, strengthen observable assertions, and leave no actionable survivor.
+- Before changing fixture ownership in an integration test that creates an environment, installs a package, starts a service, or invokes an external tool, time the smallest affected scope and capture its slowest setup, call, and teardown operations. For every operation slower than two seconds, name its owner and report its time, classification, impact, and next action; classify it as mutable state, immutable infrastructure, or behavior under test.
+- Keep mutable test state function-scoped. Share immutable infrastructure only when tests cannot modify it and order, repetition, and parallel execution remain isolated. Require ticket justification when immutable preparation slower than two seconds still repeats per test. When initialization is behavior under test, preserve its real public path and optimize the authoritative production seam instead.
+- Preserve the real artifact, integrity checks, installation path, commands, assertions, and failure injection required by the contract. An optimization is valid only when the original failure still makes the test fail and subprocess, timeout, integrity, and stage failures remain fail-closed.
+- Measure the focused scope and full suite in the same environment before and after a test optimization. Record wall time, slowest operations, and percentage change; require explicit ticket justification for a full-suite regression over 10% or 10 seconds.
 - Run the complete project verification suite before committing. Every skipped or expected-failure test states its reason.
 - Keep documentation current when behavior, interfaces, architecture, configuration, or feature specifications change.
 - When removing a feature, remove its orphaned dependencies, configuration, files, and selectors in the same change.
