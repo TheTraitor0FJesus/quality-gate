@@ -28,10 +28,9 @@ explicit mutation commands.
    source formatting needs correction.
 5. Use `quality-gate version` to confirm which installed policy engine is executing.
 
-The native pre-commit wrapper calls the stable launcher for staged commits. The native pre-push
+The native pre-commit wrapper reads the staged manifest, verifies its exact cached v2 wheel, and
+calls the release-backed gate without importing mutable repository source. The native pre-push
 wrapper blocks updates and deletion of the remote default branch when Git can prove its name.
-Until ticket 18 is complete, the configured global commit path remains the v1 runtime. Do not
-change that routing while working on tickets 10–17.
 
 ## Setup and unavailable verification
 
@@ -43,11 +42,36 @@ quality-gate setup
 quality-gate doctor
 ```
 
-Use `quality-gate sync --rollback [VERSION]` for a retained release. Use
-`quality-gate sync --prune` to preview cleanup and add `--confirm` only after reviewing the
+Use `quality-gate sync --prune` to preview cleanup and add `--confirm` only after reviewing the
 preview. A missing release, runtime, tool, Python version, unreadable tree, timeout, or shallow
 history is `unchecked`; it blocks completion and requires the recovery action in the report.
 Never treat an `unchecked` result as a pass.
+
+## Consumer release update
+
+Keep the consumer on its current release while downloading the target immutable asset:
+
+```text
+quality-gate sync --url <target-release-asset-url> --version <target-version>
+```
+
+Then change these two independent pins in one feature-branch candidate:
+
+1. Set `quality.policy_release` in `quality-gate.toml` to the target release. This selects the
+   local wheel, policy files, scanner, and component tools.
+2. Set the caller workflow `uses` value to the full commit SHA that contains the compatible
+   reusable `.github/workflows/quality.yml`. This selects the CI implementation. Obtain the SHA
+   from the verified release tag or publication record; do not use a tag or branch in the caller.
+
+Run `validate`, `setup`, and `doctor`, then stage the manifest and workflow together. Run the
+consumer's complete ordinary test suite and the staged `quality-gate check`. Commit only after
+both pass; the native commit hook repeats the staged gate. Push the feature branch, require the
+single `Quality Gate` pull-request status, and leave approval and merge to a human.
+
+For rollback, restore both pins to the last known-good pair in a new feature-branch candidate,
+then run `doctor`, the complete tests, and the staged gate again. `quality-gate sync --rollback`
+only changes cache retention state; it does not override `quality.policy_release` or the workflow
+SHA, so it is not a consumer rollback by itself.
 
 ## Migration, audit, and lessons
 
@@ -67,6 +91,8 @@ release-only gate.
 - Repair a failed finding, then rerun the same command and the complete `check`.
 - Restore an `unchecked` prerequisite, then rerun the command; do not add a waiver for missing
   verification.
+- Add a typed waiver only for one reviewed current finding. Keep its exact check ID and target,
+  record approver, reason, review date, and expiry, and remove it when the exception ends.
 - Secret reports contain locations and fingerprints only. Check normal, verbose, hook, CI, and
   migration output for redaction before sharing a report.
 - A real credential found during migration must be rotated or revoked. History rewriting is a
@@ -79,11 +105,16 @@ pushes but cannot undo them.
 
 ## Extension route
 
-Read the architecture map and quality policy change guide before changing a shared check. Add a
-check at the established `CheckResult` boundary, keep check IDs stable, add malformed-input and
-failure-injection coverage at the public CLI or native Git seam, and update the architecture map
-when a module, flow, or search route changes. Consumer configuration may describe structure and
-narrow current waivers; it must not replace shared Ruff, mypy, runner, or CI policy.
+Read the architecture map and quality policy change guide before changing a shared check. Use the
+authority files listed at the top of this page; do not move shared policy into a consumer manifest.
+Add results at the established `CheckResult` boundary, keep published check IDs stable, and
+preserve the meanings of `passed`, `failed`, `unchecked`, `not_applicable`, and `waived`.
+
+Cover malformed input and injected failures at the public CLI, native Git, or CI seam affected by
+the change. Preserve secret redaction in normal, verbose, hook, CI, audit, and migration output.
+Update the architecture map when a module, flow, or search route changes. Release shared behavior
+only as a new immutable version, then update each consumer's synchronized release and CI SHA as one
+reviewed change; release publication and merge remain human decisions.
 
 ## Release and rollback route
 
@@ -93,5 +124,6 @@ self-host manifest and lessons and verifies every declared artifact in a tempora
 human publishes the immutable GitHub Release.
 
 Retain the active and preceding policy releases. To recover a bad activation, run
-`quality-gate sync --rollback`, verify with `doctor`, and run the complete `check`. Release
-publication, ruleset changes, and policy updates remain human-reviewed operations.
+the consumer rollback procedure above: restore the manifest release and reusable-workflow SHA,
+then verify the complete candidate. Release publication, ruleset changes, and policy updates
+remain human-reviewed operations.

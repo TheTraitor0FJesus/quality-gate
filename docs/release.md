@@ -72,15 +72,12 @@ pre-push and CI detection limitation.
 
 ## Rollback and retention
 
-The distribution cache keeps the active release and preceding releases. Select the preceding
-release without network access:
+The distribution cache keeps the active release and preceding releases. A consumer selects its
+local policy through `quality.policy_release` and its CI implementation through the full
+reusable-workflow commit SHA. Restore both pins to the last known-good pair in a reviewed
+feature-branch change, then run `doctor`, the complete tests, and the staged gate.
 
-```text
-quality-gate sync --rollback
-quality-gate doctor
-quality-gate check
-```
-
-Use an explicit version only when the retained release is known to be valid. Preview old entries
-with `quality-gate sync --prune`; confirmed pruning is a separate maintenance action and never
-runs as part of a commit.
+`quality-gate sync --rollback [VERSION]` changes cache state only. It does not override either
+consumer pin and is not a consumer rollback by itself. Preview old entries with
+`quality-gate sync --prune`; confirmed pruning is a separate maintenance action and never runs as
+part of a commit.
