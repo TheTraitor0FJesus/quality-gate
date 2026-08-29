@@ -29,14 +29,9 @@ manifest component versions with `python`, and prepares the resulting multiline 
 parity workflow is dispatch/schedule-only, publishes one machine-readable result per platform, and
 compares the release, tools, check surface, history, redaction, and `unchecked` outcomes separately.
 
-The global Git hook currently uses the transition runtime at
-`S:\GITHUB-REPOSITORIES\code_projects\quality-gate-v1-runtime`. Release and sync work must
-replace this temporary routing with an explicit cached v2 release selection only at ticket 18.
-
-During the migration, the global commit hook uses the v1 runtime at
-`S:\GITHUB-REPOSITORIES\code_projects\quality-gate-v1-runtime`, including for this repository.
-The v2 runner remains available for explicit development checks but must not become the commit
-blocking path before ticket 18 completes. Ticket 18 owns the final hook switch to v2.
+The global Git hook is a stable machine-owned wrapper. It reads the staged schema 2 manifest,
+verifies the declared policy wheel in the immutable local cache, and launches that exact v2
+release. It must not import mutable source from this repository or depend on Codex or an IDE.
 
 ## Change procedure
 
@@ -56,4 +51,8 @@ Projects may keep pytest markers, test discovery, package metadata, and dependen
 
 ## Rollback
 
-If a policy change blocks correct projects, revert the responsible `quality-gate` commit and push the revert to `main`. This restores the prior shared behavior for both the global hook and consumer CI.
+Do not replace an immutable release asset or move an existing tag. Publish a corrected patch
+release when the shared policy is wrong. For an urgent consumer rollback, restore both the
+manifest `quality.policy_release` and the reusable-workflow commit SHA to their last known-good
+pair through a feature branch and pull request. The native hook follows the staged manifest and
+CI follows the workflow SHA; changing local cache selection alone changes neither contract.

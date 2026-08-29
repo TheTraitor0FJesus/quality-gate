@@ -1,4 +1,5 @@
 .quality-gate-tmp/
 .venv/
+build/
 __pycache__/
 *.egg-info/
