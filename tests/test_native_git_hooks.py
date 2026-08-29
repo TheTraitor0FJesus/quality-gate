@@ -9,17 +9,65 @@ import pytest
 HOOKS = Path(r"C:\Users\Traitor\.codex\MY-SETTINGS\hooks")
 SETUP = HOOKS / "setup_native_hooks.py"
 HOOKS_DOCUMENTATION = HOOKS.parent / "HOOKS.md"
-MANIFEST = "python = []\n\n[quality]\nschema = 1\n"
+MANIFEST = """\
+waivers = []
+
+[quality]
+schema = 2
+policy_release = "v2.0.4"
+
+[repository]
+name = "native-hook-test"
+domains = ["repository"]
+required_documents = ["quality-gate.toml"]
+
+[repository.limits]
+max_blob_size_mib = 5
+
+[repository.defaults]
+command_timeout_seconds = 120
+test_timeout_seconds = 300
+gate_timeout_seconds = 600
+"""
 SETUP_FAILURE_EXIT = 2
+WORKFLOW = """\
+name: Quality Gate
+on:
+  pull_request:
+  push:
+permissions: read
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567
+"""
 
 
-def _git(root: Path, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _hook_environment() -> dict[str, str]:
+	environment = os.environ.copy()
+	environment.setdefault("LOCALAPPDATA", str(HOOKS.parents[2] / "AppData" / "Local"))
+	return environment
+
+
+def _git(
+	root: Path,
+	*arguments: str,
+	check: bool = True,
+	environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
 	result = subprocess.run(
 		["git", *arguments],
 		cwd=root,
 		capture_output=True,
 		text=True,
 		check=False,
+		env=environment,
 	)
 	if check:
 		assert result.returncode == 0, result.stderr
@@ -38,6 +86,7 @@ def _commit(root: Path, message: str) -> None:
 		"commit",
 		"-m",
 		message,
+		environment=_hook_environment(),
 	)
 
 
@@ -48,7 +97,16 @@ def _run_pre_commit(root: Path) -> subprocess.CompletedProcess[str]:
 		capture_output=True,
 		text=True,
 		check=False,
+		env=_hook_environment(),
 	)
+
+
+def _write_contract(root: Path) -> None:
+	(root / "quality-gate.toml").write_text(MANIFEST, encoding="utf-8")
+	(root / "README.md").write_text("initial\n", encoding="utf-8")
+	workflow = root / ".github" / "workflows" / "quality-gate.yml"
+	workflow.parent.mkdir(parents=True)
+	workflow.write_text(WORKFLOW, encoding="utf-8")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="machine native wrappers use Windows paths")
@@ -56,8 +114,7 @@ def test_real_git_commit_preserves_staged_and_unstaged_state(tmp_path: Path) -> 
 	if not (HOOKS / "pre-commit").is_file():
 		pytest.skip("machine native hooks are not installed")
 	_git(tmp_path, "init", "-b", "main")
-	(tmp_path / "quality-gate.toml").write_text(MANIFEST, encoding="utf-8")
-	(tmp_path / "README.md").write_text("initial\n", encoding="utf-8")
+	_write_contract(tmp_path)
 	_git(tmp_path, "add", ".")
 	_commit(tmp_path, "initial")
 
@@ -90,8 +147,7 @@ def test_real_git_pre_push_blocks_default_updates_and_allows_feature_pushes(
 	_git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
 	_git(tmp_path, "init", "-b", "main")
 	_git(tmp_path, "remote", "add", "origin", str(remote))
-	(tmp_path / "quality-gate.toml").write_text(MANIFEST, encoding="utf-8")
-	(tmp_path / "README.md").write_text("initial\n", encoding="utf-8")
+	_write_contract(tmp_path)
 	_git(tmp_path, "add", ".")
 	_commit(tmp_path, "initial")
 	bundle = tmp_path / "initial.bundle"
@@ -111,6 +167,7 @@ def test_real_git_pre_push_blocks_default_updates_and_allows_feature_pushes(
 		"origin",
 		"main",
 		check=False,
+		environment=_hook_environment(),
 	)
 	assert protected.returncode == 1
 	assert "default branch" in protected.stderr.lower()
@@ -119,7 +176,16 @@ def test_real_git_pre_push_blocks_default_updates_and_allows_feature_pushes(
 	(tmp_path / "feature.txt").write_text("feature\n", encoding="utf-8")
 	_git(tmp_path, "add", "feature.txt")
 	_commit(tmp_path, "feature")
-	_git(tmp_path, "-c", f"core.hooksPath={HOOKS}", "push", "-u", "origin", "feature/native-hook")
+	_git(
+		tmp_path,
+		"-c",
+		f"core.hooksPath={HOOKS}",
+		"push",
+		"-u",
+		"origin",
+		"feature/native-hook",
+		environment=_hook_environment(),
+	)
 
 	deletion = _git(
 		tmp_path,
@@ -129,6 +195,7 @@ def test_real_git_pre_push_blocks_default_updates_and_allows_feature_pushes(
 		"origin",
 		":main",
 		check=False,
+		environment=_hook_environment(),
 	)
 	assert deletion.returncode == 1
 	assert "default branch" in deletion.stderr.lower()
