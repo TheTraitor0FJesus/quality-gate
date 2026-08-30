@@ -10,11 +10,11 @@ requires-python = ">=3.11"
 
 [project.optional-dependencies]
 tools = [
-    "mypy==1.19.1",
-    "pytest==9.0.3",
-    "ruff==0.15.12",
+    "mypy==2.3.1",
+    "pytest==9.1.1",
+    "ruff==0.16.4",
 ]
-test = ["pytest==9.0.3"]
+test = ["pytest==9.1.1"]
 
 [project.scripts]
 quality-gate = "quality_gate.cli:main"
