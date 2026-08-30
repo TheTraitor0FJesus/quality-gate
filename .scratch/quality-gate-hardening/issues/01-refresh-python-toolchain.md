@@ -1,7 +1,7 @@
 ---
 id: "01"
 title: "Refresh the pinned Python quality toolchain"
-state: in_progress
+state: done
 blocked_by: []
 ---
 
