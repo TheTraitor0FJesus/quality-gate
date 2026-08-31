@@ -87,7 +87,9 @@ def _artifact(root: Path, version: str = "2.0.0", *, valid_wheel: bool = True) -
 				'setup.add_argument("--cache-dir", type=Path, required=True)\n'
 				'commands.add_parser("audit")\n'
 				"options = parser.parse_args()\n"
-				'expected_root_value = os.environ.get("QUALITY_GATE_RELEASE_EXPECT_ROOT", options.root)\n'
+				"expected_root_value = os.environ.get(\n"
+				'    "QUALITY_GATE_RELEASE_EXPECT_ROOT", options.root\n'
+				")\n"
 				"expected_root = Path(expected_root_value)\n"
 				"if options.root.resolve() != expected_root.resolve():\n"
 				'    parser.error("--root does not identify the release source")\n'

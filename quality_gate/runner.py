@@ -243,12 +243,14 @@ def _run_bounded_subprocess(
 	)
 	retained = bytearray()
 	reader_errors: list[Exception] = []
+	stdout = process.stdout
+	if stdout is None:
+		raise OutputReadError("subprocess output pipe is unavailable")
 
 	def drain_output() -> None:
-		assert process.stdout is not None
 		try:
 			while True:
-				chunk = process.stdout.read(4096)
+				chunk = stdout.read(4096)
 				if not chunk:
 					return
 				remaining = MAX_COMMAND_OUTPUT_BYTES - len(retained)
