@@ -1,7 +1,7 @@
 ---
 id: "02"
 title: "Enable the high-signal Ruff policy"
-state: todo
+state: done
 blocked_by:
   - "01"
 ---

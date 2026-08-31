@@ -49,6 +49,58 @@ Each project may declare Python component paths, existing test directories, and 
 
 Projects may keep pytest markers, test discovery, package metadata, and dependency configuration that describe their own code. They must not keep separate Ruff or mypy policies, or CI jobs that rerun the shared quality tools independently.
 
+## Ruff policy selection
+
+The shared policy uses the stable Ruff 0.16.4 surface. It enables all stable Bugbear rules (`B`),
+keeps `C901` at 10 and `PLR0915` at 50, and adds these calibrated rule sets:
+
+- Ruff-native correctness: `RUF006`, `RUF008`, `RUF009`, `RUF012`, `RUF016`, `RUF017`,
+  `RUF018`, `RUF024`, `RUF032`, `RUF040`, `RUF043`, `RUF048`, `RUF049`, `RUF053`,
+  `RUF059`, `RUF060`, `RUF063`, `RUF064`, and `RUF068`.
+- Ruff suppression and configuration integrity: `RUF101`, `RUF102`, `RUF103`, `RUF104`, and
+  `RUF200`.
+- Security: `S101`, `S102`, `S105`-`S108`, `S110`, `S112`, `S113`, `S201`, `S202`,
+  `S301`-`S308`, `S312`-`S319`, `S321`, `S323`, `S324`, `S501`-`S509`, `S601`, `S602`,
+  `S604`, `S605`, `S608`-`S612`, `S701`, `S702`, and `S704`.
+
+Only test files under a `tests` directory or named `test_*.py` or `*_test.py` may use assertions
+and literal fixture credentials without an `S101` or `S105`-`S107` finding. The equivalent
+production patterns remain blocking.
+
+Stable candidates excluded after fleet calibration are:
+
+- `RUF001`-`RUF003`: multilingual product text, comments, and docstrings produce widespread
+  confusable-character false positives without evidence of an identifier defect.
+- `RUF005`, `RUF007`, `RUF010`, `RUF015`, `RUF019`, `RUF021`-`RUF023`, `RUF026`, `RUF028`,
+  `RUF030`, `RUF033`, `RUF034`, `RUF036`, `RUF037`, `RUF041`, `RUF046`, `RUF051`, `RUF057`,
+  `RUF058`, and `RUF061`: these request style, ordering, syntax, or micro-optimization changes
+  without identifying a fleet safety or correctness invariant.
+- `RUF013` and `RUF020`: these overlap the typed-component contract and would enforce annotation
+  spelling rather than an additional runtime invariant.
+- `RUF100`: its result depends on the complete enabled-rule set and it reported existing
+  suppressions for intentionally external or migration-only rules; invalid and redirected
+  suppressions remain covered by `RUF101`-`RUF104`.
+- `S103`: normal executable permissions such as `0o755` are reported as permissive.
+- `S104`: binding a service to all interfaces is a deployment decision and was valid in the fleet.
+- `S310` and `S311`: these rules cannot distinguish allowlisted URL schemes or non-security random
+  selection, so they require data-flow context that Ruff does not have.
+- `S603`, `S606`, and `S607`: they report ordinary argument-list and `PATH`-resolved tool launches
+  without evidence of shell expansion or untrusted input; shell and injection cases remain covered
+  by `S601`, `S602`, `S604`, `S605`, `S608`, and `S609`.
+
+Preview rules are excluded because their contracts can change. Removed rules are excluded because
+Ruff no longer implements them. A diagnostic run with Ruff 0.16.4 against each declared Python
+component produced this migration surface after applying the test-only exceptions:
+
+| Repository | New findings |
+| --- | --- |
+| `quality-gate` | none after local remediation |
+| `ARGUS_BRAIN` | none |
+| `ARGUS_TG` | `B008` (1), `B904` (1), `B905` (2), `S101` (2) |
+| `ARGUS_tracker_multiuser` | `B905` (1) |
+| `ARGUS_TRADING` | `S608` (2) |
+| `ARGUS_WEB` | `S105` (2) |
+
 ## Rollback
 
 Do not replace an immutable release asset or move an existing tag. Publish a corrected patch

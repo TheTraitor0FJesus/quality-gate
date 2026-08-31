@@ -213,9 +213,9 @@ def locked(path: Path, timeout_seconds: float) -> Iterator[None]:
 			with path.open("x", encoding="ascii") as stream:
 				stream.write(f"{os.getpid()}\n")
 			break
-		except FileExistsError:
+		except FileExistsError as error:
 			if time.monotonic() >= deadline:
-				raise DistributionError("release cache is locked")
+				raise DistributionError("release cache is locked") from error
 			time.sleep(0.05)
 	try:
 		yield

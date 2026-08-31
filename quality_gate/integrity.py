@@ -8,6 +8,7 @@ import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 from urllib.parse import unquote
 
 from .contracts import CheckResult, Finding, Manifest, Status
@@ -474,8 +475,7 @@ def _workflow_jobs(keys: list[tuple[int, str, str] | None]) -> list[_WorkflowJob
 			for item in keys[start + 1 : end]
 			if item and item[0] == _PROPERTY_LEVEL
 		}
-		job_item = keys[start]
-		assert job_item is not None
+		job_item = cast(tuple[int, str, str], keys[start])
 		jobs.append(
 			_WorkflowJob(
 				job_item[1],

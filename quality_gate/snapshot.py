@@ -16,6 +16,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO, cast
 
 from quality_gate.contracts import (
 	DEFAULT_COMMAND_TIMEOUT_SECONDS,
@@ -311,8 +312,7 @@ def _git_blob(context: _MaterializationContext, object_id: bytes) -> bytes:
 		)
 	except OSError as exc:
 		raise SnapshotError("Git could not provide the candidate snapshot") from exc
-	assert process.stdout is not None
-	stdout = process.stdout
+	stdout = cast(BinaryIO, process.stdout)
 	_LOGGER.debug("running Git candidate blob operation")
 	output: list[bytes] = []
 	read_error: list[OSError] = []

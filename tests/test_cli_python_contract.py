@@ -165,6 +165,54 @@ def test_cli_checks_all_declared_components_and_collapses_passed_output(
 	)
 
 
+def test_cli_blocks_and_accepts_the_staged_python_policy_candidate(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+	root = _disposable_repository(tmp_path, "valid")
+	source = root / "app" / "app.py"
+	source.write_text(
+		"""def unsafe(values: list[str] = []) -> None:
+\tvalues.append("x")
+""",
+		encoding="utf-8",
+	)
+	assert _git(root, "add", "app/app.py").returncode == 0
+	monkeypatch.setattr(
+		runner,
+		"prepare",
+		lambda *_args, **_kwargs: SimpleNamespace(
+			policy_root=REPOSITORY,
+			runtimes=(SimpleNamespace(python=Path(sys.executable), current=True),),
+		),
+	)
+	monkeypatch.setattr(
+		runner,
+		"secret_candidate_result",
+		lambda *_args, **_kwargs: runner.CheckResult(
+			"secrets.candidate", runner.Status.PASSED, "no credentials detected"
+		),
+	)
+
+	failed_result, failed_output = _invoke(root, monkeypatch, capsys)
+
+	assert failed_result == 1
+	assert "python.component_1.ruff: failed" in failed_output
+
+	source.write_text(
+		"""def safe(values: list[str] | None = None) -> None:
+\tif values is not None:
+\t\tvalues.append("x")
+""",
+		encoding="utf-8",
+	)
+	assert _git(root, "add", "app/app.py").returncode == 0
+
+	passed_result, passed_output = _invoke(root, monkeypatch, capsys)
+
+	assert passed_result == 0
+	assert "python.component_1.ruff: passed" in passed_output
+
+
 def test_cli_reports_explicitly_not_applicable_tests_without_blocking(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

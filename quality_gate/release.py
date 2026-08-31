@@ -238,13 +238,13 @@ def _release_workspace(
 			if os.name == "nt":
 				try:
 					final = _windows_final_path(workspace)
-				except (OSError, ReleaseControllerError):
+				except (OSError, ReleaseControllerError) as error:
 					failure_reasons.append("workspace final-path validation failed")
 					if workspace_parent is not None:
 						raise ReleaseControllerError(
 							"release workspace final path is unavailable; provide a shorter "
 							"--workspace-parent directory"
-						)
+						) from error
 					continue
 				if len(str(final)) > WINDOWS_MAX_WORKSPACE_PATH_CHARS:
 					failure_reasons.append("workspace path is too long")
