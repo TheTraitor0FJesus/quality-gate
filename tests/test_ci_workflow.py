@@ -175,6 +175,14 @@ def _install_wheel(tmp_path: Path, wheel: Path) -> Path:
 	return venv / ("Scripts/quality-gate.exe" if os.name == "nt" else "bin/quality-gate")
 
 
+@pytest.fixture(scope="module")
+def _release_gate(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+	"""Build and install one immutable release CLI for the module's contract tests."""
+	root = tmp_path_factory.mktemp("release-gate")
+	wheel = _build_wheel(root)
+	return _install_wheel(root, wheel), wheel
+
+
 def _write_release(release: Path, scanner: Path | bytes, wheel: Path) -> None:
 	"""Write a release fixture with the wheel that the test installs."""
 
@@ -440,13 +448,14 @@ def test_ci_and_local_check_return_the_same_public_result_contract(
 	]
 
 
-def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(tmp_path: Path) -> None:
+def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(
+	tmp_path: Path, _release_gate: tuple[Path, Path]
+) -> None:
 	"""Verify local and CI runs expose one release, tool, result, and redaction surface."""
 
 	scanner = _installed_scanner()
 	assert scanner is not None, "the active policy release must provide Gitleaks"
-	wheel = _build_wheel(tmp_path)
-	gate = _install_wheel(tmp_path, wheel)
+	gate, wheel = _release_gate
 	root = tmp_path / "repository"
 	shutil.copytree(REPOSITORY / "tests" / "fixtures" / "no-python", root)
 	_make_writable(root)
@@ -539,7 +548,9 @@ def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(tmp_path: Pa
 	_assert_shallow_history_is_unchecked(root, tmp_path, gate, environments[1], base, credential)
 
 
-def test_ci_reports_an_unavailable_release_scanner_as_unchecked(tmp_path: Path) -> None:
+def test_ci_reports_an_unavailable_release_scanner_as_unchecked(
+	tmp_path: Path, _release_gate: tuple[Path, Path]
+) -> None:
 	"""Verify an unusable release tool cannot produce a clean CI verdict."""
 
 	root = tmp_path / "repository"
@@ -558,8 +569,7 @@ def test_ci_reports_an_unavailable_release_scanner_as_unchecked(tmp_path: Path) 
 		"base",
 	)
 	release = root / ".release"
-	wheel = _build_wheel(tmp_path)
-	gate = _install_wheel(tmp_path, wheel)
+	gate, wheel = _release_gate
 	_write_release(release, b"not an executable scanner", wheel)
 	cache_base = root / ".ci-cache"
 	PolicyCache(cache_base / "quality-gate").sync(release)
