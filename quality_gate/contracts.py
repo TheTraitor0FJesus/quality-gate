@@ -18,6 +18,10 @@ DEFAULT_MAX_BLOB_SIZE_MIB = 5
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120
 DEFAULT_TEST_TIMEOUT_SECONDS = 300
 DEFAULT_GATE_TIMEOUT_SECONDS = 600
+DEFAULT_JAVASCRIPT_FILE_KIB = 100
+DEFAULT_CSS_FILE_KIB = 50
+DEFAULT_JAVASCRIPT_TOTAL_KIB = 250
+DEFAULT_CSS_TOTAL_KIB = 100
 MAX_FINDINGS_PER_CHECK = 20
 MAX_FINDINGS_TOTAL = 100
 _CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
@@ -80,10 +84,12 @@ def _relative_path(value: object, path: str) -> str:
 	result = _string(value, path).replace("\\", "/")
 	candidate = Path(result)
 	if (
-		candidate.is_absolute()
+		"\x00" in result
+		or ":" in result
+		or candidate.is_absolute()
+		or bool(candidate.drive)
 		or result == "."
-		or result.startswith("../")
-		or "/../" in f"/{result}"
+		or any(part in {".", ".."} for part in candidate.parts)
 	):
 		raise ValidationError(path, "must be a repository-relative path")
 	return result
@@ -128,6 +134,19 @@ class PythonComponent:
 
 
 @dataclass(frozen=True, slots=True)
+class WebComponent:
+	name: str
+	root: str
+	javascript: tuple[str, ...]
+	css: tuple[str, ...]
+	exclude: tuple[str, ...]
+	javascript_file_kib: int
+	css_file_kib: int
+	javascript_total_kib: int
+	css_total_kib: int
+
+
+@dataclass(frozen=True, slots=True)
 class Waiver:
 	kind: str
 	check_id: str
@@ -153,6 +172,7 @@ class Manifest:
 	policy_release: str
 	repository: RepositoryContract
 	python: tuple[PythonComponent, ...]
+	web: tuple[WebComponent, ...]
 	waivers: tuple[Waiver, ...]
 
 	def resolve_waiver(
@@ -243,6 +263,7 @@ def _parse_component(value: object, index: int) -> PythonComponent:
 		},
 		path,
 	)
+
 	tests_applicable = cast(
 		bool, _type(table.get("tests_applicable"), bool, f"{path}.tests_applicable")
 	)
@@ -279,6 +300,81 @@ def _parse_component(value: object, index: int) -> PythonComponent:
 		if tests_reason is not None
 		else None,
 		timeout_seconds=_positive_int(table.get("timeout_seconds", 300), f"{path}.timeout_seconds"),
+	)
+
+
+def _asset_pattern(value: object, path: str, suffix: str | None = None) -> str:
+	pattern = _relative_path(value, path)
+	parts = pattern.split("/")
+	if "\x00" in pattern or ":" in pattern or "{" in pattern or "}" in pattern:
+		raise ValidationError(path, "must be a safe repository-relative glob pattern")
+	if any(part in {"", "."} for part in parts):
+		raise ValidationError(path, "must not contain empty or current-directory segments")
+	if pattern.count("[") != pattern.count("]"):
+		raise ValidationError(path, "contains an unbalanced character class")
+	if any("**" in part and part != "**" for part in parts):
+		raise ValidationError(path, "may use ** only as a complete path segment")
+	if suffix is not None and not pattern.casefold().endswith(suffix):
+		raise ValidationError(path, f"must select only {suffix} assets")
+	return pattern
+
+
+def _pattern_list(value: object, path: str, suffix: str | None = None) -> tuple[str, ...]:
+	patterns = tuple(
+		_asset_pattern(item, f"{path}[{index}]", suffix)
+		for index, item in enumerate(_list(value, path))
+	)
+	if len(set(patterns)) != len(patterns):
+		raise ValidationError(path, "must contain unique patterns")
+	return patterns
+
+
+def _parse_web_component(value: object, index: int) -> WebComponent:
+	path = f"web[{index}]"
+	table = _table(value, path)
+	_keys(table, {"name", "root", "javascript", "css", "exclude", "limits"}, path)
+	root = _relative_path(table.get("root"), f"{path}.root")
+	if _WILDCARD.search(root) or any(part in {"", "."} for part in root.split("/")):
+		raise ValidationError(
+			f"{path}.root", "must not contain wildcards, empty, or current-directory segments"
+		)
+	javascript = _pattern_list(table.get("javascript", []), f"{path}.javascript", ".js")
+	css = _pattern_list(table.get("css", []), f"{path}.css", ".css")
+	if not javascript and not css:
+		raise ValidationError(path, "must declare JavaScript or CSS assets")
+	limits = _table(table.get("limits", {}), f"{path}.limits")
+	_keys(
+		limits,
+		{
+			"javascript_file_kib",
+			"css_file_kib",
+			"javascript_total_kib",
+			"css_total_kib",
+		},
+		f"{path}.limits",
+	)
+	return WebComponent(
+		name=_string(table.get("name"), f"{path}.name"),
+		root=root,
+		javascript=javascript,
+		css=css,
+		exclude=_pattern_list(table.get("exclude", []), f"{path}.exclude"),
+		javascript_file_kib=_positive_int(
+			limits.get("javascript_file_kib", DEFAULT_JAVASCRIPT_FILE_KIB),
+			f"{path}.limits.javascript_file_kib",
+		),
+		css_file_kib=_positive_int(
+			limits.get("css_file_kib", DEFAULT_CSS_FILE_KIB),
+			f"{path}.limits.css_file_kib",
+		),
+		javascript_total_kib=_positive_int(
+			limits.get("javascript_total_kib", DEFAULT_JAVASCRIPT_TOTAL_KIB),
+			f"{path}.limits.javascript_total_kib",
+		),
+		css_total_kib=_positive_int(
+			limits.get("css_total_kib", DEFAULT_CSS_TOTAL_KIB),
+			f"{path}.limits.css_total_kib",
+		),
 	)
 
 
@@ -343,7 +439,7 @@ def _parse_waiver(value: object, index: int) -> Waiver:
 
 def _load_table(raw: Mapping[str, object]) -> Manifest:
 	root = _table(raw, "manifest")
-	_keys(root, {"quality", "repository", "python", "waivers"}, "manifest")
+	_keys(root, {"quality", "repository", "python", "web", "waivers"}, "manifest")
 	quality = _table(root.get("quality"), "quality")
 	if quality.get("schema") != SCHEMA_VERSION:
 		raise ValidationError(
@@ -361,10 +457,12 @@ def _load_table(raw: Mapping[str, object]) -> Manifest:
 		_string(value, f"repository.domains[{index}]")
 		for index, value in enumerate(_list(repository.get("domains"), "repository.domains"))
 	)
-	if "repository" not in domains or set(domains) - {"repository", "python"}:
+	if "repository" not in domains or set(domains) - {"repository", "python", "web"}:
 		raise ValidationError(
-			"repository.domains", "must contain only repository and optional python"
+			"repository.domains", "must contain only repository and optional python or web"
 		)
+	if len(set(domains)) != len(domains):
+		raise ValidationError("repository.domains", "must contain unique domains")
 	documents = tuple(
 		_relative_path(value, f"repository.required_documents[{index}]")
 		for index, value in enumerate(
@@ -410,6 +508,15 @@ def _load_table(raw: Mapping[str, object]) -> Manifest:
 	)
 	if ("python" in domains) != bool(components):
 		raise ValidationError("repository.domains", "python domain must match the component list")
+	web_components = tuple(
+		_parse_web_component(value, index)
+		for index, value in enumerate(_list(root.get("web", []), "web"))
+	)
+	if ("web" in domains) != bool(web_components):
+		raise ValidationError("repository.domains", "web domain must match the component list")
+	web_names = [component.name.casefold() for component in web_components]
+	if len(set(web_names)) != len(web_names):
+		raise ValidationError("web", "duplicate component name")
 	waivers = tuple(
 		_parse_waiver(value, index)
 		for index, value in enumerate(_list(root.get("waivers", []), "waivers"))
@@ -417,7 +524,7 @@ def _load_table(raw: Mapping[str, object]) -> Manifest:
 	keys = [(item.kind, item.check_id, item.target, item.fingerprint) for item in waivers]
 	if len(set(keys)) != len(keys):
 		raise ValidationError("waivers", "duplicate waiver")
-	return Manifest(policy_release, contract, components, waivers)
+	return Manifest(policy_release, contract, components, web_components, waivers)
 
 
 def load_manifest(root: Path | str = ".", manifest_name: str = MANIFEST_NAME) -> Manifest:

@@ -26,9 +26,22 @@ Quality Gate applies the same versioned quality contract to the staged Git candi
    timeout_seconds = 300
    ```
 
-4. Copy [templates/quality.yml](templates/quality.yml) to `.github/workflows/quality.yml` and replace `<40-character-commit-sha>` with the exact commit SHA of the reusable workflow.
-5. Copy [templates/dependabot.yml](templates/dependabot.yml) to `.github/dependabot.yml`.
-6. Synchronize the release named by `quality.policy_release`, prepare its isolated runtimes, and verify the repository.
+4. Add one `[[web]]` table for each project-owned JavaScript/CSS boundary. Patterns and explicit exclusions are relative to the component root.
+
+   ```toml
+   [[web]]
+   name = "frontend"
+   root = "static"
+   javascript = ["js/**/*.js"]
+   css = ["css/**/*.css"]
+   exclude = ["vendor/**", "generated/**"]
+   ```
+
+   Optional `[web.limits]` values are expressed in KiB. Defaults are 100 per JavaScript file, 50 per CSS file, 250 total JavaScript, and 100 total CSS.
+
+5. Copy [templates/quality.yml](templates/quality.yml) to `.github/workflows/quality.yml` and replace `<40-character-commit-sha>` with the exact commit SHA of the reusable workflow.
+6. Copy [templates/dependabot.yml](templates/dependabot.yml) to `.github/dependabot.yml`.
+7. Synchronize the release named by `quality.policy_release`, prepare its isolated runtimes, and verify the repository.
 
    ```powershell
    quality-gate sync --url "<release-asset-url>" --version <release>
@@ -52,7 +65,7 @@ The manual check is the first line of defense. The commit hook repeats the check
 
 ### Repository and Git candidate
 
-- The manifest uses schema 2 and contains valid repository and Python component declarations.
+- The manifest uses schema 2 and contains valid repository, Python, and web component declarations.
 - Declared component paths, test paths, dependency inputs, limits, and timeouts are valid.
 - The staged candidate has no unresolved index merge entries or intent-to-add entries.
 - The Git index does not change while the check is running.
@@ -91,6 +104,13 @@ Quality Gate checks only these objective documentation properties. It does not g
 - pytest runs the declared test paths sequentially and treats collection errors, failures, and timeouts as blocking results.
 - Coverage is report-only and never blocks the verdict. It runs only when the selected policy release includes a pinned coverage provider.
 - Each component runs with its declared Python version in an isolated, fingerprinted runtime built from its dependency inputs and pinned policy tools.
+
+### Web components
+
+- Each component declares a bounded root and JavaScript and/or CSS asset patterns.
+- Generated and vendor assets remain in scope unless an explicit component exclusion matches them.
+- Staged file bytes are checked against per-file and component-total budgets.
+- Findings use repository-relative forward-slash paths on every supported platform.
 
 ### Escaped-defect lessons
 

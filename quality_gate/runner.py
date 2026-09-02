@@ -26,6 +26,7 @@ from quality_gate.contracts import (
 	Status,
 	ValidationError,
 	Verdict,
+	WebComponent,
 	load_manifest,
 	redact,
 )
@@ -198,6 +199,213 @@ def load_components(root: Path) -> list[PythonComponent]:
 			)
 		)
 	return components
+
+
+def _is_excluded(path: PurePosixPath, patterns: tuple[str, ...]) -> bool:
+	for pattern in patterns:
+		if path.match(pattern):
+			return True
+		prefix = pattern[:-3].rstrip("/") + "/"
+		if pattern.endswith("/**") and path.as_posix().startswith(prefix):
+			return True
+	return False
+
+
+def _is_link(path: Path) -> bool:
+	is_junction = getattr(path, "is_junction", None)
+	return path.is_symlink() or (is_junction is not None and is_junction())
+
+
+def _unsafe_web_path(root: Path, path: Path) -> bool:
+	resolved_root = root.resolve(strict=True)
+	resolved_path = path.resolve(strict=True)
+	if resolved_path != resolved_root and resolved_root not in resolved_path.parents:
+		return True
+	relative_parts = path.relative_to(root).parts
+	path_chain = (
+		root.joinpath(*relative_parts[:index]) for index in range(1, len(relative_parts) + 1)
+	)
+	return any(_is_link(candidate) for candidate in path_chain)
+
+
+def _web_assets(
+	root: Path,
+	component: WebComponent,
+	patterns: tuple[str, ...],
+) -> tuple[tuple[Path, ...], tuple[Finding, ...]]:
+	component_root = root / component.root
+	assets: set[Path] = set()
+	unsafe: list[Finding] = []
+	for pattern in patterns:
+		for candidate in component_root.glob(pattern):
+			relative = PurePosixPath(candidate.relative_to(component_root).as_posix())
+			if _is_excluded(relative, component.exclude):
+				continue
+			try:
+				is_unsafe = _unsafe_web_path(root, candidate)
+			except OSError:
+				is_unsafe = True
+			if is_unsafe:
+				unsafe.append(
+					Finding(
+						path=candidate.relative_to(root).as_posix(),
+						message="declared web asset is outside or traverses a symbolic link",
+						action="replace it with a project-owned regular file",
+					)
+				)
+				continue
+			if not candidate.is_file():
+				continue
+			assets.add(candidate)
+	return tuple(sorted(assets, key=lambda path: path.relative_to(root).as_posix())), tuple(unsafe)
+
+
+def _web_budget_result(
+	root: Path,
+	component: WebComponent,
+	component_index: int,
+	*,
+	language: Literal["javascript", "css"],
+) -> CheckResult:
+	patterns = component.javascript if language == "javascript" else component.css
+	label = "JavaScript" if language == "javascript" else "CSS"
+	check_id = f"web.component_{component_index}.{language}_budget"
+	if not patterns:
+		return CheckResult(
+			check_id=check_id,
+			status=Status.NOT_APPLICABLE,
+			summary=f"no {label} assets are declared",
+			recovery_action=f"declare {label} asset patterns if this component owns them",
+		)
+	component_root = root / component.root
+	root_parts = component.root.split("/")
+	path_chain = tuple(
+		root.joinpath(*root_parts[:index]) for index in range(1, len(root_parts) + 1)
+	)
+	try:
+		resolved_root = root.resolve(strict=True)
+		resolved_component_root = component_root.resolve(strict=True)
+	except OSError:
+		return CheckResult(
+			check_id=check_id,
+			status=Status.UNCHECKED,
+			summary=f"{label} asset boundary could not be resolved",
+			findings=(
+				Finding(
+					path=component.root,
+					message="declared web component root could not be resolved",
+					action="restore a readable project-owned component root",
+				),
+			),
+			recovery_action="restore a readable web component root and retry",
+		)
+	root_is_unsafe = (
+		resolved_component_root != resolved_root
+		and resolved_root not in resolved_component_root.parents
+	) or any(_is_link(path) for path in path_chain)
+	if root_is_unsafe:
+		return CheckResult(
+			check_id=check_id,
+			status=Status.UNCHECKED,
+			summary=f"{label} asset boundary is unsafe",
+			findings=(
+				Finding(
+					path=component.root,
+					message="declared web component root is or traverses a symbolic link",
+					action="use a project-owned regular directory inside the repository",
+				),
+			),
+			recovery_action="declare a regular web component root inside the repository",
+		)
+	if not component_root.is_dir():
+		return CheckResult(
+			check_id=check_id,
+			status=Status.UNCHECKED,
+			summary=f"{label} asset budget is unavailable",
+			findings=(
+				Finding(
+					path=component.root,
+					message="declared web component root does not exist",
+					action="restore the declared web component root",
+				),
+			),
+			recovery_action="restore the declared web component root and retry the quality gate",
+		)
+	try:
+		assets, unsafe = _web_assets(root, component, patterns)
+		sizes = tuple((asset, asset.stat().st_size) for asset in assets)
+	except OSError:
+		return CheckResult(
+			check_id=check_id,
+			status=Status.UNCHECKED,
+			summary=f"{label} assets could not be measured",
+			recovery_action="restore readable project-owned web assets and retry the quality gate",
+		)
+	if unsafe:
+		return CheckResult(
+			check_id=check_id,
+			status=Status.UNCHECKED,
+			summary=f"{label} asset boundary contains an unsafe file",
+			findings=unsafe,
+			recovery_action="replace linked or external assets with project-owned regular files",
+		)
+	if not sizes:
+		return CheckResult(
+			check_id=check_id,
+			status=Status.UNCHECKED,
+			summary=f"declared {label} patterns match no project-owned assets",
+			recovery_action=f"correct the {label} patterns or add the declared assets and retry",
+		)
+	file_kib = component.javascript_file_kib if language == "javascript" else component.css_file_kib
+	total_kib = (
+		component.javascript_total_kib if language == "javascript" else component.css_total_kib
+	)
+	file_limit = file_kib * 1024
+	total_limit = total_kib * 1024
+	findings = [
+		Finding(
+			path=asset.relative_to(root).as_posix(),
+			message=f"{label} file size {size} bytes exceeds {file_limit} bytes",
+			action=f"reduce the file to at most {file_kib} KiB or set a reviewed component limit",
+		)
+		for asset, size in sizes
+		if size > file_limit
+	]
+	total_size = sum(size for _, size in sizes)
+	if total_size > total_limit:
+		findings.append(
+			Finding(
+				path=component.root,
+				message=f"total {label} size {total_size} bytes exceeds {total_limit} bytes",
+				action=(
+					f"reduce component assets to at most {total_kib} KiB or set a reviewed limit"
+				),
+			)
+		)
+	if findings:
+		return CheckResult(
+			check_id=check_id,
+			status=Status.FAILED,
+			summary=f"{label} assets exceed the configured size budget",
+			findings=tuple(findings),
+			recovery_action="reduce the staged assets or review and declare a justified limit",
+		)
+	return CheckResult(
+		check_id=check_id,
+		status=Status.PASSED,
+		summary=f"{len(sizes)} {label} asset(s), {total_size} bytes, within budget",
+	)
+
+
+def web_budget_results(root: Path, manifest: Manifest) -> tuple[CheckResult, ...]:
+	return tuple(
+		result
+		for index, component in enumerate(manifest.web, start=1)
+		for result in (
+			_web_budget_result(root, component, index, language="javascript"),
+			_web_budget_result(root, component, index, language="css"),
+		)
+	)
 
 
 def validate(root: Path | None = None) -> None:
@@ -1301,6 +1509,7 @@ def _check_snapshot(
 	]
 	results = [contract_result, *repository_results]
 	results.append(lessons_result(actual_root, is_complete_required=mode == "audit"))
+	results.extend(web_budget_results(actual_root, manifest))
 	try:
 		components = load_components(actual_root)
 		prepared = prepare(

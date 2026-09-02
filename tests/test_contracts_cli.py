@@ -19,6 +19,7 @@ from quality_gate.contracts import (
 	Status,
 	Verdict,
 	fingerprint_secret,
+	load_manifest,
 )
 from quality_gate.distribution import PolicyCache
 
@@ -149,8 +150,19 @@ The incident is recorded.
 	_init_and_stage(root, "quality-gate.toml", "AGENTS.md", "lessons/incident.md")
 
 
-def _manifest(*, python: bool = False, documents: list[str] | None = None, waiver: str = "") -> str:
-	domains = '["repository", "python"]' if python else '["repository"]'
+def _manifest(
+	*,
+	python: bool = False,
+	web: str = "",
+	documents: list[str] | None = None,
+	waiver: str = "",
+) -> str:
+	domains = ["repository"]
+	if python:
+		domains.append("python")
+	if web:
+		domains.append("web")
+	domain_literal = json.dumps(domains)
 	document_literal = json.dumps(documents or ["AGENTS.md"])
 	waiver_root = "" if waiver else "waivers = []\n\n"
 	component = (
@@ -174,7 +186,7 @@ policy_release = "v2.0.0"
 
 [repository]
 name = "fixture"
-domains = {domains}
+domains = {domain_literal}
 required_documents = {document_literal}
 
 [repository.limits]
@@ -184,7 +196,27 @@ max_blob_size_mib = 5
 command_timeout_seconds = 120
 test_timeout_seconds = 300
 gate_timeout_seconds = 600
-{component}{waiver}"""
+{component}{web}{waiver}"""
+
+
+def _web_component(
+	*,
+	name: str = "frontend",
+	root: str = "assets",
+	javascript: str = '["js/**/*.js"]',
+	css: str = '["css/**/*.css"]',
+	exclude: str = "[]",
+	limits: str = "",
+) -> str:
+	return f"""
+[[web]]
+name = "{name}"
+root = "{root}"
+javascript = {javascript}
+css = {css}
+exclude = {exclude}
+{limits}
+"""
 
 
 def test_validate_accepts_non_python_manifest(tmp_path: Path) -> None:
@@ -207,6 +239,130 @@ def test_validate_accepts_python_manifest(tmp_path: Path) -> None:
 	result = _run(tmp_path, "validate")
 
 	assert result.returncode == 0
+
+
+def test_validate_accepts_web_manifest_with_default_asset_budgets(tmp_path: Path) -> None:
+	(tmp_path / "quality-gate.toml").write_text(
+		_manifest(web=_web_component()), encoding="utf-8"
+	)
+
+	result = _run(tmp_path, "validate")
+	component = load_manifest(tmp_path).web[0]
+
+	assert result.returncode == 0
+	assert component.javascript_file_kib == 100
+	assert component.css_file_kib == 50
+	assert component.javascript_total_kib == 250
+	assert component.css_total_kib == 100
+
+
+def test_validate_rejects_unsafe_web_paths_patterns_and_duplicate_names(tmp_path: Path) -> None:
+	unsafe_manifests = (
+		_manifest(web=_web_component(root="..")),
+		_manifest(web=_web_component(root="../assets")),
+		_manifest(web=_web_component(root="assets/..")),
+		_manifest(web=_web_component(root="C:assets")),
+		_manifest(web=_web_component(root="C:/assets")),
+		_manifest(web=_web_component(root="assets:part")),
+		_manifest(web=_web_component(root="assets\x00part")),
+		_manifest(web=_web_component(javascript='["../outside/*.js"]')),
+		_manifest(web=_web_component(javascript='["js/[broken.js"]')),
+		_manifest(web=_web_component() + _web_component()),
+	)
+
+	for manifest in unsafe_manifests:
+		(tmp_path / "quality-gate.toml").write_text(manifest, encoding="utf-8")
+		result = _run(tmp_path, "validate")
+		assert result.returncode == EXIT_UNCHECKED
+
+
+def test_check_measures_staged_web_assets_and_reports_portable_paths(tmp_path: Path) -> None:
+	web = _web_component(javascript='["js\\\\**\\\\*.js"]', css="[]")
+	(tmp_path / "quality-gate.toml").write_text(_manifest(web=web), encoding="utf-8")
+	(tmp_path / "AGENTS.md").write_text("contract\n", encoding="utf-8")
+	asset = tmp_path / "assets" / "js" / "app.js"
+	asset.parent.mkdir(parents=True)
+	asset.write_bytes(b"x" * (100 * 1024 + 1))
+	_init_and_stage(tmp_path, "quality-gate.toml", "AGENTS.md", "assets/js/app.js")
+	asset.write_bytes(b"x")
+
+	result = _run(tmp_path, "check", "--verbose")
+
+	assert result.returncode == EXIT_QUALITY_FAILURE
+	assert "web.component_1.javascript_budget: failed" in result.stdout
+	assert "assets/js/app.js" in result.stdout
+	assert "assets\\js\\app.js" not in result.stdout
+
+
+def test_check_enforces_default_web_file_and_total_boundaries(tmp_path: Path) -> None:
+	web = _web_component(javascript='["js/*.js"]', css='["css/*.css"]')
+	(tmp_path / "quality-gate.toml").write_text(_manifest(web=web), encoding="utf-8")
+	(tmp_path / "AGENTS.md").write_text("contract\n", encoding="utf-8")
+	assets = {
+		"assets/js/one.js": 100 * 1024,
+		"assets/js/two.js": 100 * 1024,
+		"assets/js/three.js": 50 * 1024,
+		"assets/css/one.css": 50 * 1024,
+		"assets/css/two.css": 25 * 1024,
+		"assets/css/three.css": 25 * 1024,
+	}
+	for relative, size in assets.items():
+		path = tmp_path / relative
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_bytes(b"x" * size)
+	_init_and_stage(tmp_path, "quality-gate.toml", "AGENTS.md", *assets)
+
+	boundary = _run(tmp_path, "check")
+	assert boundary.returncode == 0
+	assert "web.component_1.javascript_budget: passed" in boundary.stdout
+	assert "web.component_1.css_budget: passed" in boundary.stdout
+
+	(tmp_path / "assets" / "js" / "three.js").write_bytes(b"x" * (50 * 1024 + 1))
+	(tmp_path / "assets" / "css" / "one.css").write_bytes(b"x" * (50 * 1024 + 1))
+	assert _git(tmp_path, "add", "assets/js/three.js", "assets/css/one.css").returncode == 0
+
+	above = _run(tmp_path, "check", "--verbose")
+	assert above.returncode == EXIT_QUALITY_FAILURE
+	assert "total JavaScript size 256001 bytes exceeds 256000 bytes" in above.stdout
+	assert "total CSS size 102401 bytes exceeds 102400 bytes" in above.stdout
+	assert "CSS file size 51201 bytes exceeds 51200 bytes" in above.stdout
+
+
+def test_check_excludes_oversized_web_assets_only_when_explicitly_configured(
+	tmp_path: Path,
+) -> None:
+	web = _web_component(
+		javascript='["**/*.js"]', css="[]", exclude='["vendor/**"]'
+	)
+	(tmp_path / "quality-gate.toml").write_text(_manifest(web=web), encoding="utf-8")
+	(tmp_path / "AGENTS.md").write_text("contract\n", encoding="utf-8")
+	owned = tmp_path / "assets" / "app.js"
+	vendor = tmp_path / "assets" / "vendor" / "library.js"
+	owned.parent.mkdir(parents=True)
+	vendor.parent.mkdir(parents=True)
+	owned.write_bytes(b"x")
+	vendor.write_bytes(b"x" * (100 * 1024 + 1))
+	_init_and_stage(
+		tmp_path,
+		"quality-gate.toml",
+		"AGENTS.md",
+		"assets/app.js",
+		"assets/vendor/library.js",
+	)
+
+	excluded = _run(tmp_path, "check", "--verbose")
+	assert excluded.returncode == 0
+	assert "assets/vendor/library.js" not in excluded.stdout
+
+	(tmp_path / "quality-gate.toml").write_text(
+		_manifest(web=_web_component(javascript='["**/*.js"]', css="[]")),
+		encoding="utf-8",
+	)
+	assert _git(tmp_path, "add", "quality-gate.toml").returncode == 0
+
+	included = _run(tmp_path, "check", "--verbose")
+	assert included.returncode == EXIT_QUALITY_FAILURE
+	assert "assets/vendor/library.js" in included.stdout
 
 
 def test_format_cli_requires_explicit_paths(tmp_path: Path) -> None:

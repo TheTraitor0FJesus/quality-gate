@@ -21,3 +21,18 @@ gate_timeout_seconds = 600
 # Paths describe component layout; they do not override shared quality rules.
 # The consumer's GitHub workflow must call the reusable workflow at a full commit SHA.
 # Its optional python-version input may override the versions declared by the components.
+
+# Add one [[web]] table for each project-owned JavaScript/CSS asset boundary when needed.
+# Asset patterns and exclusions are relative to root. Limits are KiB and default to the values below.
+# [[web]]
+# name = "frontend"
+# root = "static"
+# javascript = ["js/**/*.js"]
+# css = ["css/**/*.css"]
+# exclude = ["vendor/**", "generated/**"]
+#
+# [web.limits]
+# javascript_file_kib = 100
+# css_file_kib = 50
+# javascript_total_kib = 250
+# css_total_kib = 100
