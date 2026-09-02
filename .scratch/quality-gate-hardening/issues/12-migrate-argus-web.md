@@ -1,16 +1,16 @@
 ---
-id: "11"
+id: "12"
 title: "Migrate ARGUS_WEB to the unified gate"
 state: todo
 blocked_by:
-  - "06"
+  - "07"
 ---
 
-# 11 — Migrate ARGUS_WEB to the unified gate
+# 12 — Migrate ARGUS_WEB to the unified gate
 
 **What to build:** Move ARGUS_WEB to the unified release, declare its static web assets, and remediate both Python and web findings without weakening the shared contract.
 
-**Blocked by:** 06 — Publish the unified immutable policy release.
+**Blocked by:** 07 — Publish the unified immutable policy release.
 
 **Implementation uncertainty:** Low — the project contains one known Python component and one bounded set of static web assets.
 

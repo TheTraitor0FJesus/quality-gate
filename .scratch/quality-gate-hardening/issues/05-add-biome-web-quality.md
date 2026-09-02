@@ -8,7 +8,7 @@ blocked_by:
 
 # 05 — Add Biome web quality checks
 
-**What to build:** Lint and verify formatting for every declared JavaScript and CSS asset with one pinned standalone Biome policy that does not require Node.js. This ticket owns the source contract and candidate inventory inputs; ticket 06 owns final platform artifacts and release-backed parity.
+**What to build:** Lint and verify formatting for every declared JavaScript and CSS asset with one pinned standalone Biome policy that does not require Node.js. This ticket owns the source contract and candidate inventory inputs; ticket 07 owns final platform artifacts and release-backed parity.
 
 **Blocked by:** 04 — Add web components and static asset budgets.
 
@@ -19,4 +19,4 @@ blocked_by:
 - [ ] Nursery, experimental language, SCSS, and embedded-language checks remain disabled.
 - [ ] Candidate inventory inputs pin the Windows and Linux binaries and their reviewed digests exactly.
 - [ ] Missing or corrupt Biome produces `unchecked` in focused contract tests.
-- [ ] Ticket 06 packages the pinned binaries and proves their released local/CI and Windows/Linux parity.
+- [ ] Ticket 07 packages the pinned binaries and proves their released local/CI and Windows/Linux parity.

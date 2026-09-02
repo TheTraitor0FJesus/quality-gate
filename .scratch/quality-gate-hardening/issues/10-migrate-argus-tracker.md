@@ -1,16 +1,16 @@
 ---
-id: "09"
+id: "10"
 title: "Migrate ARGUS_tracker_multiuser to the unified gate"
 state: todo
 blocked_by:
-  - "06"
+  - "07"
 ---
 
-# 09 — Migrate ARGUS_tracker_multiuser to the unified gate
+# 10 — Migrate ARGUS_tracker_multiuser to the unified gate
 
 **What to build:** Move ARGUS_tracker_multiuser to the unified release, declare its web assets, and remediate both Python and web findings without weakening the shared contract.
 
-**Blocked by:** 06 — Publish the unified immutable policy release.
+**Blocked by:** 07 — Publish the unified immutable policy release.
 
 **Implementation uncertainty:** Low — the component boundaries and verification seam are known; initial Biome formatting will create a deliberate asset diff.
 

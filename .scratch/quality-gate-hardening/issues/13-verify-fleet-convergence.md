@@ -1,20 +1,20 @@
 ---
-id: "12"
+id: "13"
 title: "Verify fleet-wide policy convergence"
 state: todo
 blocked_by:
-  - "07"
   - "08"
   - "09"
   - "10"
   - "11"
+  - "12"
 ---
 
-# 12 — Verify fleet-wide policy convergence
+# 13 — Verify fleet-wide policy convergence
 
 **What to build:** Demonstrate that every consumer repository uses the same immutable policy release and matching reusable workflow revision and that the complete fleet is green under that contract.
 
-**Blocked by:** 07 — Migrate ARGUS_BRAIN; 08 — Migrate ARGUS_TG; 09 — Migrate ARGUS_tracker_multiuser; 10 — Migrate ARGUS_TRADING; 11 — Migrate ARGUS_WEB.
+**Blocked by:** 08 — Migrate ARGUS_BRAIN; 09 — Migrate ARGUS_TG; 10 — Migrate ARGUS_tracker_multiuser; 11 — Migrate ARGUS_TRADING; 12 — Migrate ARGUS_WEB.
 
 **Implementation uncertainty:** Low — this ticket verifies convergence rather than introducing another policy behavior.
 
