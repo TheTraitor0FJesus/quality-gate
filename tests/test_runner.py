@@ -180,6 +180,92 @@ def test_load_components_rejects_path_outside_repository() -> None:
 		runner.load_components(root)
 
 
+def test_web_budget_is_unchecked_when_component_root_cannot_be_resolved(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	manifest_path = tmp_path / "quality-gate.toml"
+	manifest_path.write_text(
+		"""waivers = []
+
+[quality]
+schema = 2
+policy_release = "v2.0.0"
+
+[repository]
+name = "fixture"
+domains = ["repository", "web"]
+required_documents = ["AGENTS.md"]
+
+[[web]]
+name = "frontend"
+root = "assets"
+javascript = ["*.js"]
+css = []
+exclude = []
+""",
+		encoding="utf-8",
+	)
+	assets = tmp_path / "assets"
+	assets.mkdir()
+	(assets / "app.js").write_bytes(b"x")
+	manifest = runner.load_manifest(tmp_path)
+	original_resolve = Path.resolve
+
+	def fail_component_resolve(path: Path, *, strict: bool = False) -> Path:
+		if path == assets:
+			raise OSError("unreadable boundary")
+		return original_resolve(path, strict=strict)
+
+	monkeypatch.setattr(Path, "resolve", fail_component_resolve)
+
+	result = runner.web_budget_results(tmp_path, manifest)[0]
+
+	assert result.status is runner.Status.UNCHECKED
+	assert result.check_id == "web.component_1.javascript_budget"
+	assert result.findings[0].path == "assets"
+
+
+def test_web_budget_does_not_measure_an_asset_through_an_external_link(
+	tmp_path: Path,
+) -> None:
+	(tmp_path / "quality-gate.toml").write_text(
+		"""waivers = []
+
+[quality]
+schema = 2
+policy_release = "v2.0.0"
+
+[repository]
+name = "fixture"
+domains = ["repository", "web"]
+required_documents = ["AGENTS.md"]
+
+[[web]]
+name = "frontend"
+root = "assets"
+javascript = ["linked/**/*.js"]
+css = []
+exclude = []
+""",
+		encoding="utf-8",
+	)
+	assets = tmp_path / "assets"
+	outside = tmp_path / "outside"
+	assets.mkdir()
+	outside.mkdir()
+	(outside / "escaped.js").write_bytes(b"x")
+	try:
+		(assets / "linked").symlink_to(outside, target_is_directory=True)
+	except OSError:
+		pytest.skip("directory symbolic links are unavailable on this platform")
+
+	result = runner.web_budget_results(tmp_path, runner.load_manifest(tmp_path))[0]
+
+	assert result.status is runner.Status.UNCHECKED
+	assert result.findings[0].path == "assets/linked/escaped.js"
+	assert "outside or traverses" in result.findings[0].message
+
+
 def test_check_sets_a_writable_temporary_directory(monkeypatch: pytest.MonkeyPatch) -> None:
 	root = FIXTURES / "valid"
 	calls: list[tuple[list[str], dict[str, str]]] = []
