@@ -118,7 +118,7 @@ target = "fixtures/example.txt:1"
 reason = "synthetic fixture"
 approved_by = "Human Reviewer"
 reviewed_on = "2026-08-01"
-expires_on = "2026-09-01"
+expires_on = "2099-12-31"
 fingerprint = "{fingerprint_secret(secret)}"
 """
 

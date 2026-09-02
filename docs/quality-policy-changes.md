@@ -47,6 +47,8 @@ release. It must not import mutable source from this repository or depend on Cod
 
 Each project may declare Python component paths, existing test directories, and dependency files in `quality-gate.toml`.
 
+Each Python component with dependency inputs receives one `python.component_N.deptry` result. Deptry compares imports with the declared runtime and development dependencies. Custom requirements file names must be classified by `tool.deptry.requirements_files` or `tool.deptry.requirements_files_dev`; an unclassified input is `unchecked`. A component must use either one `pyproject.toml` or classified requirements files because deptry does not analyze both formats together; mixed formats are `unchecked`. A waiver target uses the exact `<path>::<DEP-code>::<module>` form so that dynamic, plugin, entry-point, and configuration-driven dependencies do not suppress unrelated findings. Native deptry ignore, per-rule-ignore, exclude, and inline-ignore mechanisms are rejected because the typed manifest waiver is the only suppression contract. Jupyter notebooks are explicitly outside this Python source contract and are not scanned. Missing tools, missing metadata, and invalid deptry reports are `unchecked`.
+
 Projects may keep pytest markers, test discovery, package metadata, and dependency configuration that describe their own code. They must not keep separate Ruff or mypy policies, or CI jobs that rerun the shared quality tools independently.
 
 ## Ruff policy selection

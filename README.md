@@ -87,6 +87,7 @@ Quality Gate checks only these objective documentation properties. It does not g
 - Ruff checks each declared component for lint violations using the policy release configuration.
 - Ruff checks formatting without changing files.
 - mypy checks types in every declared component.
+- deptry compares imports with declared runtime and development dependencies for components that declare dependency inputs.
 - pytest runs the declared test paths sequentially and treats collection errors, failures, and timeouts as blocking results.
 - Coverage is report-only and never blocks the verdict. It runs only when the selected policy release includes a pinned coverage provider.
 - Each component runs with its declared Python version in an isolated, fingerprinted runtime built from its dependency inputs and pinned policy tools.
