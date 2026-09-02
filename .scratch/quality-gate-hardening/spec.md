@@ -8,7 +8,7 @@ Adding every available metric or scanner would not solve the problem. Redundant 
 
 ## Solution
 
-Deliver one unified Quality Gate policy for the current repository fleet. Refresh the existing pinned Python toolchain, extend Ruff with calibrated high-signal Bugbear, Ruff-native, and security rules, retain explicit function complexity budgets, and add dependency hygiene through deptry. Extend the manifest with web components that identify project-owned JavaScript and CSS assets, enforce per-file and component-wide size budgets, and run stable Biome lint and formatting checks through verified standalone binaries.
+Deliver one unified Quality Gate policy for the current repository fleet. Refresh the existing pinned Python toolchain, extend Ruff with calibrated high-signal Bugbear, Ruff-native, and security rules, retain explicit function complexity budgets, and add dependency hygiene through deptry. Extend the manifest with web components that identify project-owned JavaScript and CSS assets, enforce per-file and component-wide size budgets, and run stable Biome lint and formatting checks through verified standalone binaries. Let repositories declare strict supplemental functional tests that remain outside Quality Gate execution while one final test-runner scope combines them with the staged gate without rerunning tests already owned by the gate.
 
 Package the complete policy as one immutable cross-platform release. Migrate each consumer independently to the new policy release and its matching reusable workflow revision, remediate genuine findings without weakening the shared policy, and finish with a fleet-wide convergence audit.
 
@@ -56,6 +56,9 @@ The gate guarantees concrete machine-verifiable invariants. It does not claim to
 38. As the fleet owner, I want a final convergence audit, so that no active project remains on an older or mismatched policy pair.
 39. As a reviewer, I want every policy exclusion to include a concrete rationale, so that convenience does not silently become shared policy.
 40. As a future maintainer, I want the supported and excluded checks documented, so that later maintenance starts from the decisions made in this program.
+41. As a coding agent, I want one final verification scope, so that repository tests and the staged gate run without duplicate suites or orchestration branches.
+42. As a repository maintainer, I want supplemental tests declared in the existing manifest, so that test ownership remains discoverable in one place.
+43. As a policy maintainer, I want supplemental declarations validated but not executed by Quality Gate, so that repository-specific functional tests remain owned by their repository and CI.
 
 ## Implementation Decisions
 
@@ -80,6 +83,11 @@ The gate guarantees concrete machine-verifiable invariants. It does not claim to
 - Only stable Biome JavaScript and CSS capabilities are enabled. Nursery rules, experimental language support, SCSS, and embedded-language checks are excluded.
 - The runner emits stable component-scoped check identifiers for dependency hygiene, web asset budgets, Biome lint, and Biome formatting.
 - Local hooks and CI consume the same immutable policy release and expose the same verdict semantics.
+- The manifest may declare supplemental tests through strict runner types and repository-relative targets. It does not accept arbitrary commands.
+- Quality Gate validates supplemental declarations but does not execute them during `check`, `audit`, hooks, or the reusable workflow.
+- The initial supplemental runner set contains only `node-test`; another runner requires a demonstrated repository need and a contract change.
+- The typed test-runner treats `scope: full` as complete repository verification: with a Quality Gate manifest it runs declared supplemental tests and then the staged gate, and without a manifest it runs the discovered complete suite.
+- Repository CI remains the enforcement owner for supplemental tests outside the agent workflow.
 - The release inventory includes exact versions and digests for every wheel, policy file, and platform binary.
 - The complete policy is published as one new immutable release after Python and web slices pass their own verification.
 - Each consumer migration updates the policy release and matching reusable workflow revision together.
@@ -89,18 +97,19 @@ The gate guarantees concrete machine-verifiable invariants. It does not claim to
 
 ## Testing Decisions
 
-- Tickets 01 through 05 verify source behavior, exact source pins, candidate inventory inputs, and platform-neutral contracts with focused tests and the full suite. They do not claim parity for an unpublished release.
-- Ticket 06 is the single owner of final release assembly, immutable publication, exact released tool inventory, and release-backed Windows/Linux parity. Earlier tickets must name this deferred boundary instead of requiring the current published release to contain their changes.
+- Tickets 01 through 06 verify source behavior, exact source pins, candidate inventory inputs, and platform-neutral contracts with focused tests and the full suite. They do not claim parity for an unpublished release.
+- Ticket 07 is the single owner of final release assembly, immutable publication, exact released tool inventory, and release-backed Windows/Linux parity. Earlier tickets must name this deferred boundary instead of requiring the current published release to contain their changes.
 - Tests assert external behavior and verdicts rather than command construction or private helper structure.
 - The primary seam is the public Quality Gate command operating on staged fixture repositories. A deliberately invalid candidate must fail with the expected stable result, and a corrected candidate must pass.
 - Manifest fixtures cover valid web components, invalid roots and patterns, duplicate identities, explicit exclusions, default budgets, and boundary values at and above each budget.
 - Python fixtures cover the selected Ruff findings, valid test-only exceptions, preserved complexity thresholds, each supported dependency-hygiene finding, dynamic-dependency waivers, and unavailable-tool outcomes.
 - Web fixtures cover JavaScript lint failures, CSS lint failures, formatting failures, clean assets, explicit exclusions, per-file budget failures, total budget failures, and unavailable or corrupt Biome binaries.
 - Existing runner and CLI contract tests are the prior art for stable check identifiers, verdict aggregation, timeout behavior, redaction, and `unchecked` semantics.
+- Supplemental manifest fixtures cover valid `node-test` targets, duplicate identities, unknown runners, unsafe paths, and empty matches. Test-runner contract tests prove that every supplemental result is collected before the staged gate and that repositories without a manifest retain ordinary full-suite behavior.
 - Existing release and distribution tests are the prior art for inventory validation, digest verification, safe extraction, corrupt artifact handling, and immutable release selection.
 - The release seam validates the exact candidate with the release controller and compares the complete check surface, tool inventory, verdicts, and redaction behavior on Windows and Linux.
 - Each implementation slice runs its smallest safe affected suite before the final full suite.
-- The unified release is eligible for publication only after one successful full suite, one staged Quality Gate run, audit, and release validation on the final candidate. After immutable publication, the matching release-backed Windows/Linux parity run must pass before ticket 06 is complete or consumer migration begins.
+- The unified release is eligible for publication only after one successful full suite, one staged Quality Gate run, audit, and release validation on the final candidate. After immutable publication, the matching release-backed Windows/Linux parity run must pass before ticket 07 is complete or consumer migration begins.
 - The fleet seam runs setup, doctor, full verification, and audit independently in every consumer after migration.
 - The final fleet result records the verified policy release, workflow revision, platforms, and repository set.
 
@@ -112,7 +121,7 @@ The gate guarantees concrete machine-verifiable invariants. It does not claim to
 - A separate Bandit execution.
 - Ruff SIM and C4 rule families.
 - Preview or unstable Ruff rules.
-- Node.js, npm, package-manager lockfiles, and bundler execution.
+- Node.js, npm, package-manager lockfiles, and bundler execution inside Quality Gate. Explicit repository-owned `node:test` remains supplemental.
 - Production bundle generation, compressed transfer-size budgets, and runtime performance budgets.
 - TypeScript, SCSS, Sass, Less, Vue, Svelte, Astro, and embedded-language analysis.
 - Automatic proof of architecture quality, functional correctness, or complete security.
@@ -123,5 +132,5 @@ The gate guarantees concrete machine-verifiable invariants. It does not claim to
 - The current consumer fleet contains five repositories. Three contain raw project-owned JavaScript and CSS without a package manifest or bundler configuration.
 - Current observed web assets fit within the selected default budgets: the largest JavaScript file is approximately 81 KiB, the largest CSS file approximately 37 KiB, and the largest component JavaScript total approximately 165 KiB.
 - Several current JavaScript and CSS assets are stored as one physical line. Biome formatting is expected to create deliberate migration diffs before the web checks become green.
-- The local issue tracker contains twelve vertical-slice tickets. Policy implementation can proceed on independent unblocked slices; consumer migrations begin only after the unified immutable release is published.
+- The local issue tracker contains thirteen vertical-slice tickets. Policy implementation can proceed on independent unblocked slices; consumer migrations begin only after the unified immutable release is published.
 - Future gate work is triggered by a material platform or stack change, such as a new Python version, a new frontend language, a bundler-based application, a supported-platform change, or a security-tool maintenance requirement.

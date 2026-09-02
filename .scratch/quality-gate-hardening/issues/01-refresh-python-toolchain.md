@@ -17,4 +17,4 @@ blocked_by: []
 - [ ] The source dependency groups resolve one identical exact version for every duplicated policy-tool declaration.
 - [ ] The existing check surface and verdict semantics remain unchanged.
 - [ ] Focused compatibility tests and the full suite pass with the refreshed tools.
-- [ ] Ticket 06 explicitly owns packaging these exact versions and proving the resulting Windows/Linux inventory and verdict parity.
+- [ ] Ticket 07 explicitly owns packaging these exact versions and proving the resulting Windows/Linux inventory and verdict parity.

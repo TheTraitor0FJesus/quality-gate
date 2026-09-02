@@ -1,23 +1,24 @@
 ---
-id: "06"
+id: "07"
 title: "Publish the unified immutable policy release"
 state: todo
 blocked_by:
   - "02"
   - "03"
   - "05"
+  - "06"
 ---
 
-# 06 — Publish the unified immutable policy release
+# 07 — Publish the unified immutable policy release
 
-**What to build:** Package and publish one immutable Quality Gate release that delivers the refreshed Python toolchain, dependency hygiene, web asset budgets, and Biome checks through the same verified local and CI contract. This is the only implementation ticket that claims release-backed Windows/Linux parity.
+**What to build:** Package and publish one immutable Quality Gate release that delivers the refreshed Python toolchain, dependency hygiene, web asset budgets, Biome checks, and supplemental test declarations through the same verified local and CI contract. This is the only implementation ticket that claims release-backed Windows/Linux parity.
 
-**Blocked by:** 02 — Enable the high-signal Ruff policy; 03 — Add dependency hygiene checks; 05 — Add Biome web quality checks.
+**Blocked by:** 02 — Enable the high-signal Ruff policy; 03 — Add dependency hygiene checks; 05 — Add Biome web quality checks; 06 — Add supplemental test declarations and unified final verification.
 
 **Implementation uncertainty:** Low — the repository already defines the release controller, immutable inventory, self-host validation, and human-reviewed publication procedure.
 
 - [ ] The release inventory contains the exact source-pinned versions from tickets 01, 03, and 05 plus every required policy file, wheel, external binary, and digest for Windows and Linux.
-- [ ] Templates and user-facing documentation describe the final Python and web component contracts.
+- [ ] Templates and user-facing documentation describe the final Python, web, and supplemental test contracts.
 - [ ] Self-host validation, the full suite, audit, and release validation pass on the exact candidate before publication.
 - [ ] The release tag and assets are immutable and correspond to the reviewed source revision.
 - [ ] The gate repository selects the published release through its staged manifest and matching reusable workflow revision.

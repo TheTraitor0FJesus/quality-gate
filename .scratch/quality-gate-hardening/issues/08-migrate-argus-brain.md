@@ -1,16 +1,16 @@
 ---
 id: "08"
-title: "Migrate ARGUS_TG to the unified gate"
+title: "Migrate ARGUS_BRAIN to the unified gate"
 state: todo
 blocked_by:
-  - "06"
+  - "07"
 ---
 
-# 08 — Migrate ARGUS_TG to the unified gate
+# 08 — Migrate ARGUS_BRAIN to the unified gate
 
-**What to build:** Move ARGUS_TG to the unified policy release and resolve its Python policy and dependency-hygiene findings without weakening the shared contract.
+**What to build:** Move ARGUS_BRAIN to the unified policy release and resolve its Python policy and dependency-hygiene findings without weakening the shared contract.
 
-**Blocked by:** 06 — Publish the unified immutable policy release.
+**Blocked by:** 07 — Publish the unified immutable policy release.
 
 **Implementation uncertainty:** Low — the target release, migration boundary, and highest verification seam are known even though the first run determines the remediation volume.
 
