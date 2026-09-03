@@ -1,7 +1,7 @@
 ---
 id: "04"
 title: "Add web components and static asset budgets"
-state: todo
+state: done
 blocked_by: []
 ---
 
