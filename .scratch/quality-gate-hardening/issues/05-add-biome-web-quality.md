@@ -1,7 +1,7 @@
 ---
 id: "05"
 title: "Add Biome web quality checks"
-state: todo
+state: done
 blocked_by:
   - "04"
 ---
@@ -14,9 +14,9 @@ blocked_by:
 
 **Implementation uncertainty:** Low — the release already distributes verified platform-specific external tools, and the web component defines the file boundary.
 
-- [ ] Stable Biome JavaScript and CSS lint rules block violations for declared web assets.
-- [ ] Biome formatting is checked without modifying the staged candidate.
-- [ ] Nursery, experimental language, SCSS, and embedded-language checks remain disabled.
-- [ ] Candidate inventory inputs pin the Windows and Linux binaries and their reviewed digests exactly.
-- [ ] Missing or corrupt Biome produces `unchecked` in focused contract tests.
+- [x] Stable Biome JavaScript and CSS lint rules block violations for declared web assets.
+- [x] Biome formatting is checked without modifying the staged candidate.
+- [x] Nursery, experimental language, SCSS, and embedded-language checks remain disabled.
+- [x] Candidate inventory inputs pin the Windows and Linux binaries and their reviewed digests exactly.
+- [x] Missing or corrupt Biome produces `unchecked` in focused contract tests.
 - [ ] Ticket 07 packages the pinned binaries and proves their released local/CI and Windows/Linux parity.

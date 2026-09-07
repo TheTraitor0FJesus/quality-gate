@@ -15,6 +15,8 @@ The source tree must satisfy all of these conditions:
 - The complete supported-platform and failure-injection test suite passes on the release source.
 - The artifact contains a policy wheel, every declared policy or dependency file, and every
   declared external tool with its SHA-256 digest in `release.toml`.
+- The Biome inventory in `quality_gate/policy/biome.toml` pins version 2.2.6 and exact Windows
+  and Linux standalone binary digests; each platform archive includes its matching entry.
 
 The source must not contain a real credential. Rotate or revoke a real credential before release;
 do not hide it with a baseline or waiver.

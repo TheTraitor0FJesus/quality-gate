@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import locale
@@ -49,6 +50,9 @@ MAX_DEPTRY_REPORT_BYTES = 1024 * 1024
 MAX_DEPTRY_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_DEPTRY_TEXT_CHARS = 1000
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
+BIOME_POLICY = "biome.toml"
+BIOME_CONFIG = "biome.json"
+BIOME_MAX_FILE_BYTES = 5 * 1024 * 1024
 _DEPTRY_MODULE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$")
 _DEPTRY_INLINE_IGNORE = re.compile(r"#\s*deptry:\s*ignore(?:\s*\[[A-Z0-9,\s]+\])?(?=\s|$)")
 _DEPTRY_SUPPRESSION_KEYS = {
@@ -113,6 +117,13 @@ class PythonComponent:
 	missing_test_paths: tuple[Path, ...] = ()
 	path_exists: bool = True
 	dependency_inputs: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class BiomeBinary:
+	version: str
+	path: str
+	sha256: str
 
 
 def _manifest_error(error: ValidationError) -> QualityGateError:
@@ -408,6 +419,287 @@ def web_budget_results(root: Path, manifest: Manifest) -> tuple[CheckResult, ...
 	)
 
 
+def _biome_unchecked_results(
+	component_index: int,
+	message: str,
+	*,
+	findings: tuple[Finding, ...] = (),
+	recovery_action: str = (
+		"restore the Biome policy and declared web assets, then retry the quality gate"
+	),
+) -> list[CheckResult]:
+	return [
+		CheckResult(
+			check_id=f"web.component_{component_index}.biome_{check}",
+			status=Status.UNCHECKED,
+			summary=message,
+			findings=findings,
+			recovery_action=recovery_action,
+		)
+		for check in ("lint", "format")
+	]
+
+
+def _biome_inventory(policy_root: Path) -> BiomeBinary:
+	"""Return the pinned Biome version, platform path, and digest."""
+	try:
+		raw = tomllib.loads(
+			(policy_root / "quality_gate" / "policy" / BIOME_POLICY).read_text(encoding="utf-8")
+		)
+	except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+		raise QualityGateError(
+			"Biome inventory is missing or invalid",
+			check_id="runtime.policy",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="restore the pinned Biome inventory and retry the quality gate",
+		) from error
+	biome = raw.get("biome")
+	platform = "windows-x64" if os.name == "nt" else "linux-x64"
+	if not isinstance(biome, dict) or not isinstance(biome.get("version"), str):
+		raise QualityGateError(
+			"Biome inventory has no pinned version",
+			check_id="runtime.policy",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="restore the pinned Biome inventory and retry the quality gate",
+		)
+	platforms = biome.get("platforms")
+	entry = platforms.get(platform) if isinstance(platforms, dict) else None
+	expected_path = {
+		"linux-x64": "biome-linux-x64",
+		"windows-x64": "biome-win32-x64.exe",
+	}[platform]
+	path = entry.get("path") if isinstance(entry, dict) else None
+	digest = entry.get("sha256") if isinstance(entry, dict) else None
+	if (
+		not isinstance(path, str)
+		or not path.strip()
+		or path != expected_path
+		or not isinstance(digest, str)
+		or not re.fullmatch(r"[0-9a-f]{64}", digest)
+	):
+		raise QualityGateError(
+			f"Biome inventory has no usable {platform} binary pin",
+			check_id="runtime.policy",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="restore the pinned Biome inventory and retry the quality gate",
+		)
+	return BiomeBinary(biome["version"], path, digest)
+
+
+def _biome_command(prepared: PreparedEnvironment) -> list[str]:
+	pinned = _biome_inventory(prepared.policy_root)
+	release_manifest = getattr(prepared, "release_manifest", None)
+	tools = getattr(release_manifest, "tools", ())
+	tool = next((item for item in tools if item.name == "biome"), None)
+	if tool is None or (
+		tool.version != pinned.version
+		or tool.path.replace("\\", "/") != pinned.path
+		or tool.sha256 != pinned.sha256
+	):
+		raise QualityGateError(
+			"selected release does not contain the pinned Biome binary",
+			check_id="runtime.policy",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="sync the release with the exact pinned Biome inventory and retry",
+		)
+	config = prepared.policy_root / "quality_gate" / "policy" / BIOME_CONFIG
+	if not config.is_file():
+		raise QualityGateError(
+			"Biome configuration is unavailable",
+			check_id="runtime.policy",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="restore the pinned Biome configuration and retry the quality gate",
+		)
+	binary = prepared.policy_root / tool.path
+	try:
+		if not binary.is_file() or hashlib.sha256(binary.read_bytes()).hexdigest() != tool.sha256:
+			raise OSError("Biome binary is missing or corrupt")
+	except OSError as error:
+		raise QualityGateError(
+			"Biome binary is missing or corrupt",
+			check_id="runtime.policy",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="sync the exact pinned Biome binary and retry the quality gate",
+		) from error
+	return [str(binary), "ci", "--config-path", str(config)]
+
+
+def _biome_asset_paths(root: Path, component: WebComponent, component_index: int) -> list[str]:
+	budget_results: list[CheckResult] = []
+	if component.javascript:
+		budget_results.append(
+			_web_budget_result(root, component, component_index, language="javascript")
+		)
+	if component.css:
+		budget_results.append(_web_budget_result(root, component, component_index, language="css"))
+	if any(result.status is Status.UNCHECKED for result in budget_results):
+		raise QualityGateError(
+			"Biome asset inputs are unavailable",
+			check_id="runtime.policy",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="restore readable declared web assets and retry the quality gate",
+		)
+	assets: set[Path] = set()
+	for patterns in (component.javascript, component.css):
+		matched, unsafe = _web_assets(root, component, patterns)
+		if unsafe:
+			raise QualityGateError(
+				"Biome asset boundary contains an unsafe file",
+				check_id="runtime.policy",
+				exit_code=EXIT_UNCHECKED,
+				recovery_action=(
+					"replace linked or external assets with project-owned regular files"
+				),
+			)
+		assets.update(matched)
+	if not assets:
+		raise QualityGateError(
+			"declared Biome patterns match no project-owned assets",
+			check_id="runtime.policy",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="correct the declared web patterns and retry the quality gate",
+		)
+	if any(asset.stat().st_size > BIOME_MAX_FILE_BYTES for asset in assets):
+		raise QualityGateError(
+			"declared Biome asset exceeds the policy file-size limit",
+			check_id="runtime.policy",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action=(
+				"reduce the declared asset below the Biome policy file-size limit and retry"
+			),
+		)
+	return [asset.relative_to(root).as_posix() for asset in sorted(assets)]
+
+
+def _biome_component_commands(
+	component_index: int,
+	command: list[str],
+	paths: list[str],
+	timeout: int,
+) -> tuple[tuple[str, list[str], int], tuple[str, list[str], int]]:
+	return (
+		(
+			f"web.component_{component_index}.biome_lint",
+			[
+				*command,
+				"--formatter-enabled=false",
+				"--linter-enabled=true",
+				"--assist-enabled=false",
+				*paths,
+			],
+			timeout,
+		),
+		(
+			f"web.component_{component_index}.biome_format",
+			[
+				*command,
+				"--formatter-enabled=true",
+				"--linter-enabled=false",
+				"--assist-enabled=false",
+				*paths,
+			],
+			timeout,
+		),
+	)
+
+
+def _run_web_checks(
+	actual_root: Path,
+	manifest: Manifest,
+	prepared: PreparedEnvironment,
+	*,
+	deadline: float,
+) -> list[CheckResult]:
+	if not manifest.web:
+		return []
+	commands: list[tuple[str, list[str], int]] = []
+	pre_results: list[CheckResult] = []
+	for component_index, component in enumerate(manifest.web, start=1):
+		try:
+			paths = _biome_asset_paths(actual_root, component, component_index)
+			command = _biome_command(prepared)
+		except (OSError, QualityGateError) as error:
+			quality_error = (
+				error
+				if isinstance(error, QualityGateError)
+				else QualityGateError(
+					str(error),
+					check_id="runtime.policy",
+					exit_code=EXIT_UNCHECKED,
+					recovery_action=(
+						"restore the pinned Biome policy and web assets, "
+						"then retry the quality gate"
+					),
+				)
+			)
+			pre_results.extend(
+				_biome_unchecked_results(
+					component_index,
+					str(quality_error),
+					recovery_action=quality_error.recovery_action,
+				)
+			)
+			continue
+		commands.extend(
+			_biome_component_commands(
+				component_index, command, paths, manifest.repository.command_timeout_seconds
+			)
+		)
+	with temporary_directory(actual_root) as temporary_path:
+		executed, errors, _ = _execute_commands(
+			actual_root,
+			_safe_environment(temporary_path),
+			commands,
+			manifest.repository.command_timeout_seconds,
+			deadline,
+		)
+	return [*pre_results, *_command_results(executed, errors, {})]
+
+
+def _web_check_results(
+	actual_root: Path,
+	manifest: Manifest,
+	prepared: PreparedEnvironment,
+	results: list[CheckResult],
+	*,
+	deadline: float,
+) -> list[CheckResult]:
+	try:
+		return _run_web_checks(actual_root, manifest, prepared, deadline=deadline)
+	except (QualityGateError, DistributionError, RuntimeUnavailable, OSError) as error:
+		existing_biome_ids = {result.check_id for result in results if ".biome_" in result.check_id}
+		fallback: list[CheckResult] = []
+		for component_index in range(1, len(manifest.web) + 1):
+			for result in _biome_unchecked_results(
+				component_index,
+				redact(str(error)),
+				recovery_action="restore the pinned Biome policy and retry the quality gate",
+			):
+				if result.check_id not in existing_biome_ids:
+					fallback.append(result)
+					existing_biome_ids.add(result.check_id)
+		return fallback
+
+
+def _run_python_snapshot_checks(
+	actual_root: Path,
+	manifest: Manifest,
+	components: list[PythonComponent],
+	prepared: PreparedEnvironment,
+	*,
+	deadline: float,
+) -> list[CheckResult]:
+	policy_path = prepared.policy_root / "quality_gate" / "policy"
+	if not policy_path.is_dir():
+		raise QualityGateError(
+			"cached policy release has no policy directory",
+			check_id="runtime.policy",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="sync a complete policy release and retry the quality gate",
+		)
+	return _run_python_checks(actual_root, manifest, components, prepared, deadline=deadline)
+
+
 def validate(root: Path | None = None) -> None:
 	actual_root = repository_root(root)
 	load_manifest(actual_root)
@@ -548,7 +840,7 @@ def run(
 		lower_detail = detail.casefold()
 		missing_tool = any(
 			f"no module named {tool_name}" in lower_detail
-			for tool_name in ("ruff", "mypy", "pytest")
+			for tool_name in ("ruff", "mypy", "pytest", "biome")
 		)
 		pytest_collection_error = "pytest" in " ".join(command).casefold() and any(
 			marker in lower_detail
@@ -1270,8 +1562,9 @@ def _run_python_checks(
 	manifest: Manifest,
 	components: list[PythonComponent],
 	prepared: PreparedEnvironment,
+	*,
+	deadline: float,
 ) -> list[CheckResult]:
-	deadline = time.monotonic() + manifest.repository.gate_timeout_seconds
 	results: list[CheckResult] = []
 	with temporary_directory(actual_root) as temporary_path:
 		environment = _safe_environment(temporary_path)
@@ -1540,6 +1833,16 @@ def _check_snapshot(
 				head=history_head,
 			)
 		)
+	gate_deadline = time.monotonic() + manifest.repository.gate_timeout_seconds
+	results.extend(
+		_web_check_results(
+			actual_root,
+			manifest,
+			prepared,
+			results,
+			deadline=gate_deadline,
+		)
+	)
 	if not components:
 		results.append(
 			CheckResult(
@@ -1551,15 +1854,13 @@ def _check_snapshot(
 		)
 	else:
 		try:
-			policy_path = prepared.policy_root / "quality_gate" / "policy"
-			if not policy_path.is_dir():
-				raise QualityGateError(
-					"cached policy release has no policy directory",
-					check_id="runtime.policy",
-					exit_code=EXIT_UNCHECKED,
-					recovery_action="sync a complete policy release and retry the quality gate",
-				)
-			run_results = _run_python_checks(actual_root, manifest, components, prepared)
+			run_results = _run_python_snapshot_checks(
+				actual_root,
+				manifest,
+				components,
+				prepared,
+				deadline=gate_deadline,
+			)
 		except QualityGateError as error:
 			return Verdict((*results, _error_result(error)))
 		except (DistributionError, RuntimeUnavailable, OSError) as error:

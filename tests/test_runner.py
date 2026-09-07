@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import os
+import shutil
 import subprocess
 import sys
+import tomllib
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -527,3 +531,317 @@ def test_component_runtime_failure_does_not_hide_other_components(
 		result.check_id == "python.component_2.ruff" and result.status is runner.Status.PASSED
 		for result in verdict.results
 	)
+
+
+def _web_manifest(*, javascript: bool = True, css: bool = True) -> str:
+	javascript_declaration = 'javascript = ["js/**/*.js"]\n' if javascript else ""
+	css_declaration = 'css = ["css/**/*.css"]\n' if css else ""
+	return f"""waivers = []
+
+[quality]
+schema = 2
+policy_release = "v2.0.0"
+
+[repository]
+name = "fixture"
+domains = ["repository", "web"]
+required_documents = ["AGENTS.md"]
+
+[[web]]
+name = "frontend"
+root = "assets"
+{javascript_declaration}{css_declaration}exclude = []
+"""
+
+
+def _web_policy(tmp_path: Path, *, binary: bytes | None = None) -> Path:
+	policy_root = tmp_path / "policy-root"
+	policy_dir = policy_root / "quality_gate" / "policy"
+	shutil.copytree(runner.POLICY_DIR, policy_dir, copy_function=shutil.copyfile)
+	if binary is not None:
+		inventory = tomllib.loads((policy_dir / "biome.toml").read_text())
+		platform = "windows-x64" if os.name == "nt" else "linux-x64"
+		entry = inventory["biome"]["platforms"][platform]
+		binary_path = policy_root / entry["path"]
+		binary_path.write_bytes(binary)
+		inventory_text = (policy_dir / "biome.toml").read_text()
+		(policy_dir / "biome.toml").write_text(
+			inventory_text.replace(entry["sha256"], hashlib.sha256(binary).hexdigest())
+		)
+	return policy_root
+
+
+def _web_fixture(
+	tmp_path: Path,
+	*,
+	binary: bytes | None = b"standalone biome",
+	javascript: bool = True,
+	css: bool = True,
+) -> Path:
+	(tmp_path / "quality-gate.toml").write_text(
+		_web_manifest(javascript=javascript, css=css), encoding="utf-8"
+	)
+	(tmp_path / "AGENTS.md").write_text("contract\n", encoding="utf-8")
+	for relative in ("assets/js/app.js", "assets/css/app.css"):
+		asset = tmp_path / relative
+		asset.parent.mkdir(parents=True, exist_ok=True)
+		content = "const value = 1;\n" if relative.endswith(".js") else "body { color: red; }\n"
+		asset.write_text(content, encoding="utf-8")
+	return _web_policy(tmp_path, binary=binary)
+
+
+def _fake_biome_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+	script = tmp_path / "fake_biome.py"
+	config = tmp_path / "fake-biome.json"
+	config.write_text("{}\n", encoding="utf-8")
+	script.write_text(
+		"""from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if not args or args[0] != "ci" or "--config-path" not in args:
+    raise SystemExit(90)
+if "--write" in args or "--fix" in args:
+    raise SystemExit(91)
+asset_paths = [Path(value) for value in args if value.endswith((".js", ".css"))]
+if any(path.name == "undeclared.js" for path in asset_paths):
+    raise SystemExit(92)
+for path in asset_paths:
+    content = path.read_text(encoding="utf-8")
+    if "--linter-enabled=true" in args and ("unused" in content or "lint-error" in content):
+        print("lint finding")
+        raise SystemExit(1)
+    if "--formatter-enabled=true" in args and "bad-format" in content:
+        print("format finding")
+        raise SystemExit(1)
+""",
+		encoding="utf-8",
+	)
+	monkeypatch.setattr(
+		runner,
+		"_biome_command",
+		lambda _prepared: [sys.executable, str(script), "ci", "--config-path", str(config)],
+	)
+
+
+def _web_prepared(policy_root: Path) -> SimpleNamespace:
+	policy = tomllib.loads((policy_root / "quality_gate" / "policy" / "biome.toml").read_text())[
+		"biome"
+	]
+	platform = "windows-x64" if os.name == "nt" else "linux-x64"
+	binary = policy["platforms"][platform]
+	return SimpleNamespace(
+		policy_root=policy_root,
+		release_manifest=ReleaseManifest(
+			"v2.0.0",
+			(ReleaseFile("quality_gate.whl", "a" * 64),),
+			(ExternalTool("biome", policy["version"], binary["path"], binary["sha256"]),),
+		),
+		runtimes=(),
+	)
+
+
+def test_check_runs_read_only_biome_lint_and_format_for_declared_assets(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	policy_root = _web_fixture(tmp_path)
+	prepared = _web_prepared(policy_root)
+	_fake_biome_command(tmp_path, monkeypatch)
+	(tmp_path / "assets/other/undeclared.js").parent.mkdir(parents=True, exist_ok=True)
+	(tmp_path / "assets/other/undeclared.js").write_text("const unused = 1;\n", encoding="utf-8")
+	before = {
+		relative: (tmp_path / relative).read_bytes()
+		for relative in ("assets/js/app.js", "assets/css/app.css", "assets/other/undeclared.js")
+	}
+
+	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
+	monkeypatch.setattr(runner, "prepare", lambda *args, **kwargs: prepared)
+
+	verdict = runner.check(tmp_path)
+
+	assert [result.check_id for result in verdict.results if ".biome_" in result.check_id] == [
+		"web.component_1.biome_lint",
+		"web.component_1.biome_format",
+	]
+	assert all(
+		result.status is runner.Status.PASSED
+		for result in verdict.results
+		if ".biome_" in result.check_id
+	)
+	assert {relative: (tmp_path / relative).read_bytes() for relative in before} == before
+
+
+@pytest.mark.parametrize(
+	("javascript", "css"),
+	((True, False), (False, True)),
+)
+def test_check_runs_biome_for_components_with_one_declared_web_language(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	javascript: bool,
+	css: bool,
+) -> None:
+	policy_root = _web_fixture(tmp_path, javascript=javascript, css=css)
+	_fake_biome_command(tmp_path, monkeypatch)
+	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
+	monkeypatch.setattr(runner, "prepare", lambda *args, **kwargs: _web_prepared(policy_root))
+
+	verdict = runner.check(tmp_path)
+
+	biome_results = [result for result in verdict.results if ".biome_" in result.check_id]
+	assert [result.status for result in biome_results] == [runner.Status.PASSED] * 2
+
+
+def test_biome_policy_is_version_locked_to_stable_raw_asset_checks() -> None:
+	config = json.loads((runner.POLICY_DIR / "biome.json").read_text(encoding="utf-8"))
+	inventory = tomllib.loads((runner.POLICY_DIR / "biome.toml").read_text(encoding="utf-8"))
+
+	assert config["$schema"].endswith("/2.2.6/schema.json")
+	assert config["linter"] == {"enabled": True, "rules": {"recommended": True}}
+	assert config["assist"] == {"enabled": False}
+	assert config["css"] == {"formatter": {"enabled": True}}
+	assert config["files"] == {"maxSize": 5 * 1024 * 1024}
+	assert inventory["biome"] == {
+		"version": "2.2.6",
+		"platforms": {
+			"linux-x64": {
+				"path": "biome-linux-x64",
+				"url": "https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.2.6/biome-linux-x64",
+				"sha256": "ad989034fff59c9b4e45a55d0d71cbfbd5bc673cfb7193ee01268773e1eb84a7",
+			},
+			"windows-x64": {
+				"path": "biome-win32-x64.exe",
+				"url": "https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.2.6/biome-win32-x64.exe",
+				"sha256": "157039ed9aa4817595be54c7d929acab354a3284fbd05e78218e69fa5773e92b",
+			},
+		},
+	}
+
+
+def test_check_marks_biome_unchecked_when_asset_exceeds_policy_file_limit(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	policy_root = _web_fixture(tmp_path)
+	prepared = _web_prepared(policy_root)
+	(tmp_path / "assets/js/app.js").write_bytes(b"x" * (5 * 1024 * 1024 + 1))
+	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
+	monkeypatch.setattr(runner, "prepare", lambda *args, **kwargs: prepared)
+
+	verdict = runner.check(tmp_path)
+
+	biome_results = [result for result in verdict.results if ".biome_" in result.check_id]
+	assert [result.status for result in biome_results] == [runner.Status.UNCHECKED] * 2
+
+
+def test_check_marks_biome_unchecked_when_standalone_binary_is_missing(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	policy_root = _web_fixture(tmp_path, binary=None)
+	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
+	monkeypatch.setattr(runner, "prepare", lambda *args, **kwargs: _web_prepared(policy_root))
+
+	verdict = runner.check(tmp_path)
+
+	biome_results = [result for result in verdict.results if ".biome_" in result.check_id]
+	assert [result.status for result in biome_results] == [runner.Status.UNCHECKED] * 2
+	assert verdict.exit_code == runner.EXIT_UNCHECKED
+
+
+def test_check_marks_biome_unchecked_when_standalone_binary_is_corrupt(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	policy_root = _web_fixture(tmp_path)
+	platform = "windows-x64" if os.name == "nt" else "linux-x64"
+	entry = tomllib.loads((policy_root / "quality_gate" / "policy" / "biome.toml").read_text())[
+		"biome"
+	]["platforms"][platform]
+	(policy_root / entry["path"]).write_bytes(b"corrupt biome")
+
+	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
+	monkeypatch.setattr(runner, "prepare", lambda *args, **kwargs: _web_prepared(policy_root))
+
+	verdict = runner.check(tmp_path)
+
+	biome_results = [result for result in verdict.results if ".biome_" in result.check_id]
+	assert [result.status for result in biome_results] == [runner.Status.UNCHECKED] * 2
+
+
+def test_check_does_not_duplicate_biome_results_after_partial_web_failure(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	policy_root = _web_fixture(tmp_path)
+	(tmp_path / "quality-gate.toml").write_text(
+		_web_manifest()
+		+ '\n[[web]]\nname = "second"\nroot = "assets"\n'
+		+ 'javascript = ["js/**/*.js"]\ncss = []\nexclude = []\n',
+		encoding="utf-8",
+	)
+	prepared = _web_prepared(policy_root)
+	command_calls = 0
+
+	def fail_first_biome_command(_prepared: object) -> list[str]:
+		nonlocal command_calls
+		command_calls += 1
+		if command_calls == 1:
+			raise runner.QualityGateError(
+				"first Biome component is unavailable",
+				exit_code=runner.EXIT_UNCHECKED,
+				recovery_action="restore Biome",
+			)
+		return ["unused"]
+
+	def fail_temporary_directory(_root: Path) -> object:
+		raise OSError("temporary directory unavailable")
+
+	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
+	monkeypatch.setattr(runner, "prepare", lambda *args, **kwargs: prepared)
+	monkeypatch.setattr(runner, "_biome_command", fail_first_biome_command)
+	monkeypatch.setattr(runner, "temporary_directory", fail_temporary_directory)
+
+	verdict = runner.check(tmp_path)
+
+	biome_ids = [result.check_id for result in verdict.results if ".biome_" in result.check_id]
+	assert biome_ids == [
+		"web.component_1.biome_lint",
+		"web.component_1.biome_format",
+		"web.component_2.biome_lint",
+		"web.component_2.biome_format",
+	]
+	assert all(
+		result.status is runner.Status.UNCHECKED
+		for result in verdict.results
+		if ".biome_" in result.check_id
+	)
+
+
+@pytest.mark.parametrize(
+	("relative", "content", "failed_check"),
+	(
+		("assets/js/app.js", "const unused = 1;\n", "web.component_1.biome_lint"),
+		("assets/css/app.css", "a { lint-error: true; }\n", "web.component_1.biome_lint"),
+		("assets/css/app.css", "a{bad-format}\n", "web.component_1.biome_format"),
+	),
+)
+def test_check_reports_biome_findings_for_invalid_staged_content(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	relative: str,
+	content: str,
+	failed_check: str,
+) -> None:
+	policy_root = _web_fixture(tmp_path)
+	prepared = _web_prepared(policy_root)
+	_fake_biome_command(tmp_path, monkeypatch)
+	(tmp_path / relative).write_text(content, encoding="utf-8")
+
+	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
+	monkeypatch.setattr(runner, "prepare", lambda *args, **kwargs: prepared)
+
+	verdict = runner.check(tmp_path)
+
+	biome_results = {
+		result.check_id: result.status for result in verdict.results if ".biome_" in result.check_id
+	}
+	assert biome_results[failed_check] is runner.Status.FAILED
+	other_check = next(check_id for check_id in biome_results if check_id != failed_check)
+	assert biome_results[other_check] is runner.Status.PASSED

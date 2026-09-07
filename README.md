@@ -110,6 +110,8 @@ Quality Gate checks only these objective documentation properties. It does not g
 - Each component declares a bounded root and JavaScript and/or CSS asset patterns.
 - Generated and vendor assets remain in scope unless an explicit component exclusion matches them.
 - Staged file bytes are checked against per-file and component-total budgets.
+- The pinned standalone Biome binary lints and checks formatting for every declared asset without Node.js.
+- Biome uses only stable JavaScript and CSS rules; nursery, experimental, SCSS, and embedded-language checks are excluded.
 - Findings use repository-relative forward-slash paths on every supported platform.
 
 ### Escaped-defect lessons
