@@ -1,0 +1,25 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.2.6/schema.json",
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "tab",
+    "lineWidth": 100
+  },
+  "css": {
+    "formatter": {
+      "enabled": true
+    }
+  },
+  "files": {
+    "maxSize": 5242880
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true
+    }
+  },
+  "assist": {
+    "enabled": false
+  }
+}

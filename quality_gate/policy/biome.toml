@@ -1,0 +1,12 @@
+[biome]
+version = "2.2.6"
+
+[biome.platforms.linux-x64]
+path = "biome-linux-x64"
+url = "https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.2.6/biome-linux-x64"
+sha256 = "ad989034fff59c9b4e45a55d0d71cbfbd5bc673cfb7193ee01268773e1eb84a7"
+
+[biome.platforms.windows-x64]
+path = "biome-win32-x64.exe"
+url = "https://github.com/biomejs/biome/releases/download/%40biomejs/biome%402.2.6/biome-win32-x64.exe"
+sha256 = "157039ed9aa4817595be54c7d929acab354a3284fbd05e78218e69fa5773e92b"

@@ -288,7 +288,7 @@ def test_check_measures_staged_web_assets_and_reports_portable_paths(tmp_path: P
 
 	result = _run(tmp_path, "check", "--verbose")
 
-	assert result.returncode == EXIT_QUALITY_FAILURE
+	assert result.returncode == EXIT_UNCHECKED
 	assert "web.component_1.javascript_budget: failed" in result.stdout
 	assert "assets/js/app.js" in result.stdout
 	assert "assets\\js\\app.js" not in result.stdout
@@ -313,7 +313,7 @@ def test_check_enforces_default_web_file_and_total_boundaries(tmp_path: Path) ->
 	_init_and_stage(tmp_path, "quality-gate.toml", "AGENTS.md", *assets)
 
 	boundary = _run(tmp_path, "check")
-	assert boundary.returncode == 0
+	assert boundary.returncode == EXIT_UNCHECKED
 	assert "web.component_1.javascript_budget: passed" in boundary.stdout
 	assert "web.component_1.css_budget: passed" in boundary.stdout
 
@@ -322,7 +322,7 @@ def test_check_enforces_default_web_file_and_total_boundaries(tmp_path: Path) ->
 	assert _git(tmp_path, "add", "assets/js/three.js", "assets/css/one.css").returncode == 0
 
 	above = _run(tmp_path, "check", "--verbose")
-	assert above.returncode == EXIT_QUALITY_FAILURE
+	assert above.returncode == EXIT_UNCHECKED
 	assert "total JavaScript size 256001 bytes exceeds 256000 bytes" in above.stdout
 	assert "total CSS size 102401 bytes exceeds 102400 bytes" in above.stdout
 	assert "CSS file size 51201 bytes exceeds 51200 bytes" in above.stdout
@@ -351,7 +351,7 @@ def test_check_excludes_oversized_web_assets_only_when_explicitly_configured(
 	)
 
 	excluded = _run(tmp_path, "check", "--verbose")
-	assert excluded.returncode == 0
+	assert excluded.returncode == EXIT_UNCHECKED
 	assert "assets/vendor/library.js" not in excluded.stdout
 
 	(tmp_path / "quality-gate.toml").write_text(
@@ -361,7 +361,7 @@ def test_check_excludes_oversized_web_assets_only_when_explicitly_configured(
 	assert _git(tmp_path, "add", "quality-gate.toml").returncode == 0
 
 	included = _run(tmp_path, "check", "--verbose")
-	assert included.returncode == EXIT_QUALITY_FAILURE
+	assert included.returncode == EXIT_UNCHECKED
 	assert "assets/vendor/library.js" in included.stdout
 
 

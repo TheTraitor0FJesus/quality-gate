@@ -36,3 +36,4 @@ gate_timeout_seconds = 600
 # css_file_kib = 50
 # javascript_total_kib = 250
 # css_total_kib = 100
+# Biome lint and formatting use the release-pinned standalone binary and policy.
