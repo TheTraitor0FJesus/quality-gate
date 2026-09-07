@@ -38,7 +38,7 @@ release. It must not import mutable source from this repository or depend on Cod
 1. Identify whether the change affects a shared policy, the runner, the manifest contract, or CI behavior.
 2. Update the source of truth in this repository. Do not add a project-local override to weaken a shared rule.
 3. Update focused tests when runner behavior or manifest handling changes.
-4. Run the relevant tests and `quality-gate check` from this repository.
+4. Run the relevant tests and the current-source `quality-gate check` from this repository.
 5. Run `quality-gate audit` and the release controller before publishing a policy release.
 6. Inspect the diff for unintended changes to the shared policy or CI workflow.
 7. Commit and push to `main` only after the checks pass.
