@@ -24,6 +24,13 @@ DEFAULT_JAVASCRIPT_TOTAL_KIB = 250
 DEFAULT_CSS_TOTAL_KIB = 100
 MAX_FINDINGS_PER_CHECK = 20
 MAX_FINDINGS_TOTAL = 100
+MAX_SUPPLEMENTAL_TESTS = 32
+MAX_SUPPLEMENTAL_TARGET_PATTERNS = 32
+MAX_SUPPLEMENTAL_TARGET_LENGTH = 256
+MAX_SUPPLEMENTAL_TARGET_MATCHES = 1024
+MAX_SUPPLEMENTAL_TARGET_BYTES = 64 * 1024
+MAX_SUPPLEMENTAL_TOTAL_MATCHES = 4096
+MAX_SUPPLEMENTAL_TOTAL_BYTES = 256 * 1024
 _CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 _FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 _WILDCARD = re.compile(r"[*?\[\]{}]")
@@ -78,6 +85,12 @@ def _string(value: object, path: str) -> str:
 
 def _list(value: object, path: str) -> list[object]:
 	return cast(list[object], _type(value, list, path))
+
+
+def _ensure_unique(values: Iterable[str], path: str, message: str) -> None:
+	values = tuple(values)
+	if len(set(values)) != len(values):
+		raise ValidationError(path, message)
 
 
 def _relative_path(value: object, path: str) -> str:
@@ -147,6 +160,13 @@ class WebComponent:
 
 
 @dataclass(frozen=True, slots=True)
+class SupplementalTest:
+	name: str
+	runner: str
+	targets: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Waiver:
 	kind: str
 	check_id: str
@@ -173,6 +193,7 @@ class Manifest:
 	repository: RepositoryContract
 	python: tuple[PythonComponent, ...]
 	web: tuple[WebComponent, ...]
+	supplemental_tests: tuple[SupplementalTest, ...]
 	waivers: tuple[Waiver, ...]
 
 	def resolve_waiver(
@@ -329,6 +350,48 @@ def _pattern_list(value: object, path: str, suffix: str | None = None) -> tuple[
 	return patterns
 
 
+def _test_target(value: object, path: str) -> str:
+	target = _asset_pattern(value, path)
+	if len(target.encode("utf-8")) > MAX_SUPPLEMENTAL_TARGET_LENGTH:
+		raise ValidationError(
+			path, f"must use at most {MAX_SUPPLEMENTAL_TARGET_LENGTH} UTF-8 bytes"
+		)
+	if target.startswith("-"):
+		raise ValidationError(path, "must not begin with a command-line option")
+	return target
+
+
+def _test_target_list(value: object, path: str) -> tuple[str, ...]:
+	targets = tuple(
+		_test_target(item, f"{path}[{index}]") for index, item in enumerate(_list(value, path))
+	)
+	if not targets:
+		raise ValidationError(path, "must declare at least one target")
+	if len(targets) > MAX_SUPPLEMENTAL_TARGET_PATTERNS:
+		raise ValidationError(
+			path, f"must contain at most {MAX_SUPPLEMENTAL_TARGET_PATTERNS} targets"
+		)
+	_ensure_unique(targets, path, "must contain unique targets")
+	return targets
+
+
+def _parse_supplemental_test(value: object, index: int) -> SupplementalTest:
+	path = f"supplemental_tests[{index}]"
+	table = _table(value, path)
+	_keys(table, {"name", "runner", "targets"}, path)
+	name = _string(table.get("name"), f"{path}.name")
+	if not _CHECK_ID.fullmatch(name):
+		raise ValidationError(f"{path}.name", "must be a stable lowercase identifier")
+	runner = _string(table.get("runner"), f"{path}.runner")
+	if runner != "node-test":
+		raise ValidationError(f"{path}.runner", "must be 'node-test'")
+	return SupplementalTest(
+		name,
+		runner,
+		_test_target_list(table.get("targets"), f"{path}.targets"),
+	)
+
+
 def _parse_web_component(value: object, index: int) -> WebComponent:
 	path = f"web[{index}]"
 	table = _table(value, path)
@@ -437,9 +500,32 @@ def _parse_waiver(value: object, index: int) -> Waiver:
 	)
 
 
+def _parse_supplemental_tests(root: Mapping[str, object]) -> tuple[SupplementalTest, ...]:
+	supplemental_tests = tuple(
+		_parse_supplemental_test(value, index)
+		for index, value in enumerate(
+			_list(root.get("supplemental_tests", []), "supplemental_tests")
+		)
+	)
+	if len(supplemental_tests) > MAX_SUPPLEMENTAL_TESTS:
+		raise ValidationError(
+			"supplemental_tests", f"must contain at most {MAX_SUPPLEMENTAL_TESTS} declarations"
+		)
+	_ensure_unique(
+		(item.name.casefold() for item in supplemental_tests),
+		"supplemental_tests",
+		"duplicate test name",
+	)
+	return supplemental_tests
+
+
 def _load_table(raw: Mapping[str, object]) -> Manifest:
 	root = _table(raw, "manifest")
-	_keys(root, {"quality", "repository", "python", "web", "waivers"}, "manifest")
+	_keys(
+		root,
+		{"quality", "repository", "python", "web", "supplemental_tests", "waivers"},
+		"manifest",
+	)
 	quality = _table(root.get("quality"), "quality")
 	if quality.get("schema") != SCHEMA_VERSION:
 		raise ValidationError(
@@ -514,9 +600,12 @@ def _load_table(raw: Mapping[str, object]) -> Manifest:
 	)
 	if ("web" in domains) != bool(web_components):
 		raise ValidationError("repository.domains", "web domain must match the component list")
-	web_names = [component.name.casefold() for component in web_components]
-	if len(set(web_names)) != len(web_names):
-		raise ValidationError("web", "duplicate component name")
+	_ensure_unique(
+		(component.name.casefold() for component in web_components),
+		"web",
+		"duplicate component name",
+	)
+	supplemental_tests = _parse_supplemental_tests(root)
 	waivers = tuple(
 		_parse_waiver(value, index)
 		for index, value in enumerate(_list(root.get("waivers", []), "waivers"))
@@ -524,7 +613,68 @@ def _load_table(raw: Mapping[str, object]) -> Manifest:
 	keys = [(item.kind, item.check_id, item.target, item.fingerprint) for item in waivers]
 	if len(set(keys)) != len(keys):
 		raise ValidationError("waivers", "duplicate waiver")
-	return Manifest(policy_release, contract, components, web_components, waivers)
+	return Manifest(
+		policy_release, contract, components, web_components, supplemental_tests, waivers
+	)
+
+
+def _validate_supplemental_match(match: Path, root: Path, path: str) -> int:
+	try:
+		resolved_match = match.resolve()
+	except OSError as exc:
+		raise ValidationError(path, "must resolve inside the repository") from exc
+	if resolved_match != root and root not in resolved_match.parents:
+		raise ValidationError(path, "must match only paths inside the repository")
+	return len(resolved_match.relative_to(root).as_posix().encode("utf-8"))
+
+
+def _validate_supplemental_target(root: Path, target: str, path: str) -> tuple[int, int]:
+	try:
+		matches: list[Path] = []
+		for match in root.glob(target):
+			if len(matches) >= MAX_SUPPLEMENTAL_TARGET_MATCHES:
+				raise ValidationError(
+					path,
+					f"must match at most {MAX_SUPPLEMENTAL_TARGET_MATCHES} repository paths",
+				)
+			matches.append(match)
+	except ValidationError:
+		raise
+	except (OSError, ValueError) as exc:
+		raise ValidationError(path, "must be a valid repository-relative target") from exc
+	if not matches:
+		raise ValidationError(path, "must match at least one repository path")
+	matched_bytes = sum(_validate_supplemental_match(match, root, path) for match in matches)
+	if matched_bytes > MAX_SUPPLEMENTAL_TARGET_BYTES:
+		raise ValidationError(
+			path, f"matched paths must use at most {MAX_SUPPLEMENTAL_TARGET_BYTES} bytes"
+		)
+	return len(matches), matched_bytes
+
+
+def _validate_supplemental_targets(root: Path, tests: tuple[SupplementalTest, ...]) -> None:
+	try:
+		resolved_root = root.resolve()
+	except OSError as exc:
+		raise ValidationError("manifest", "repository root cannot be resolved") from exc
+	total_matches = 0
+	total_bytes = 0
+	for test_index, supplemental_test in enumerate(tests):
+		for target_index, target in enumerate(supplemental_test.targets):
+			path = f"supplemental_tests[{test_index}].targets[{target_index}]"
+			match_count, matched_bytes = _validate_supplemental_target(resolved_root, target, path)
+			total_matches += match_count
+			total_bytes += matched_bytes
+			if total_matches > MAX_SUPPLEMENTAL_TOTAL_MATCHES:
+				raise ValidationError(
+					path,
+					f"all targets must match at most {MAX_SUPPLEMENTAL_TOTAL_MATCHES} paths",
+				)
+			if total_bytes > MAX_SUPPLEMENTAL_TOTAL_BYTES:
+				raise ValidationError(
+					path,
+					f"all matched paths must use at most {MAX_SUPPLEMENTAL_TOTAL_BYTES} bytes",
+				)
 
 
 def load_manifest(root: Path | str = ".", manifest_name: str = MANIFEST_NAME) -> Manifest:
@@ -533,7 +683,9 @@ def load_manifest(root: Path | str = ".", manifest_name: str = MANIFEST_NAME) ->
 		raw = tomllib.loads(path.read_text(encoding="utf-8"))
 	except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
 		raise ValidationError("manifest", "cannot read valid UTF-8 TOML") from exc
-	return _load_table(raw)
+	manifest = _load_table(raw)
+	_validate_supplemental_targets(path.parent, manifest.supplemental_tests)
+	return manifest
 
 
 def fingerprint_secret(value: str) -> str:

@@ -46,6 +46,11 @@ release. It must not import mutable source from this repository or depend on Cod
 ## Project-specific behavior
 
 Each project may declare Python component paths, existing test directories, and dependency files in `quality-gate.toml`.
+It may also declare repository-owned supplemental tests with `[[supplemental_tests]]` entries using
+the `node-test` runner and repository-relative targets. The manifest validator checks their
+identities, matches, and bounded expansion size; the Quality Gate never executes them. The typed
+test-runner expands validated targets without shell expansion and executes concrete paths as part
+of its `scope: full` orchestration. Repository CI remains responsible for their normal enforcement.
 
 Each Python component with dependency inputs receives one `python.component_N.deptry` result. Deptry compares imports with the declared runtime and development dependencies. Custom requirements file names must be classified by `tool.deptry.requirements_files` or `tool.deptry.requirements_files_dev`; an unclassified input is `unchecked`. A component must use either one `pyproject.toml` or classified requirements files because deptry does not analyze both formats together; mixed formats are `unchecked`. A waiver target uses the exact `<path>::<DEP-code>::<module>` form so that dynamic, plugin, entry-point, and configuration-driven dependencies do not suppress unrelated findings. Native deptry ignore, per-rule-ignore, exclude, and inline-ignore mechanisms are rejected because the typed manifest waiver is the only suppression contract. Jupyter notebooks are explicitly outside this Python source contract and are not scanned. Missing tools, missing metadata, and invalid deptry reports are `unchecked`.
 

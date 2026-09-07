@@ -13,6 +13,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from quality_gate.contracts import (
+	MAX_SUPPLEMENTAL_TARGET_MATCHES,
+	MAX_SUPPLEMENTAL_TESTS,
 	SCHEMA_VERSION,
 	CheckResult,
 	Finding,
@@ -219,6 +221,20 @@ exclude = {exclude}
 """
 
 
+def _supplemental_test(
+	*,
+	name: str = "node-functional",
+	runner: str = "node-test",
+	targets: str = '["tests/node/**/*.test.js"]',
+) -> str:
+	return f'''
+[[supplemental_tests]]
+name = "{name}"
+runner = "{runner}"
+targets = {targets}
+'''
+
+
 def test_validate_accepts_non_python_manifest(tmp_path: Path) -> None:
 	(tmp_path / "quality-gate.toml").write_text(_manifest(), encoding="utf-8")
 	result = _run(tmp_path, "validate")
@@ -242,9 +258,7 @@ def test_validate_accepts_python_manifest(tmp_path: Path) -> None:
 
 
 def test_validate_accepts_web_manifest_with_default_asset_budgets(tmp_path: Path) -> None:
-	(tmp_path / "quality-gate.toml").write_text(
-		_manifest(web=_web_component()), encoding="utf-8"
-	)
+	(tmp_path / "quality-gate.toml").write_text(_manifest(web=_web_component()), encoding="utf-8")
 
 	result = _run(tmp_path, "validate")
 	component = load_manifest(tmp_path).web[0]
@@ -254,6 +268,92 @@ def test_validate_accepts_web_manifest_with_default_asset_budgets(tmp_path: Path
 	assert component.css_file_kib == 50
 	assert component.javascript_total_kib == 250
 	assert component.css_total_kib == 100
+
+
+def test_validate_accepts_supplemental_node_tests(tmp_path: Path) -> None:
+	target = tmp_path / "tests" / "node" / "smoke.test.js"
+	target.parent.mkdir(parents=True)
+	target.write_text("test('smoke', () => {});\n", encoding="utf-8")
+	(tmp_path / "quality-gate.toml").write_text(
+		_manifest() + _supplemental_test(), encoding="utf-8"
+	)
+
+	result = _run(tmp_path, "validate")
+	supplemental = load_manifest(tmp_path).supplemental_tests
+
+	assert result.returncode == 0
+	assert supplemental[0].name == "node-functional"
+	assert supplemental[0].runner == "node-test"
+	assert supplemental[0].targets == ("tests/node/**/*.test.js",)
+
+
+def test_validate_rejects_invalid_supplemental_declarations(tmp_path: Path) -> None:
+	valid_target = tmp_path / "tests" / "node" / "smoke.test.js"
+	valid_target.parent.mkdir(parents=True)
+	valid_target.write_text("test('smoke', () => {});\n", encoding="utf-8")
+	invalid_manifests = (
+		_manifest() + _supplemental_test(runner="arbitrary-command"),
+		_manifest() + _supplemental_test(name="INVALID NAME"),
+		_manifest() + _supplemental_test() + _supplemental_test(),
+		_manifest() + _supplemental_test(targets="[]"),
+		_manifest() + _supplemental_test(targets='["../outside.test.js"]'),
+		_manifest() + _supplemental_test(targets='["tests/node/missing.test.js"]'),
+		_manifest() + _supplemental_test(targets='[""]'),
+	)
+
+	for manifest in invalid_manifests:
+		(tmp_path / "quality-gate.toml").write_text(manifest, encoding="utf-8")
+		result = _run(tmp_path, "validate")
+		assert result.returncode == EXIT_UNCHECKED
+
+
+def test_validate_rejects_unbounded_supplemental_target_matches(tmp_path: Path) -> None:
+	target_root = tmp_path / "tests" / "node"
+	target_root.mkdir(parents=True)
+	for index in range(MAX_SUPPLEMENTAL_TARGET_MATCHES + 1):
+		(target_root / f"case-{index}.test.js").write_text("\n", encoding="utf-8")
+	(tmp_path / "quality-gate.toml").write_text(
+		_manifest() + _supplemental_test(targets='["tests/node/*.test.js"]'), encoding="utf-8"
+	)
+
+	result = _run(tmp_path, "validate")
+
+	assert result.returncode == EXIT_UNCHECKED
+
+
+def test_validate_rejects_unbounded_supplemental_declarations(tmp_path: Path) -> None:
+	target = tmp_path / "tests" / "node" / "smoke.test.js"
+	target.parent.mkdir(parents=True)
+	target.write_text("\n", encoding="utf-8")
+	declarations = "".join(
+		_supplemental_test(name=f"node-functional-{index}")
+		for index in range(MAX_SUPPLEMENTAL_TESTS + 1)
+	)
+	(tmp_path / "quality-gate.toml").write_text(_manifest() + declarations, encoding="utf-8")
+
+	result = _run(tmp_path, "validate")
+
+	assert result.returncode == EXIT_UNCHECKED
+
+
+def test_check_validates_but_does_not_execute_supplemental_tests(tmp_path: Path) -> None:
+	(tmp_path / "quality-gate.toml").write_text(
+		_manifest() + _supplemental_test(targets='["tests/node/supplemental.test.js"]'),
+		encoding="utf-8",
+	)
+	(tmp_path / "AGENTS.md").write_text("contract\n", encoding="utf-8")
+	target = tmp_path / "tests" / "node" / "supplemental.test.js"
+	target.parent.mkdir(parents=True)
+	target.write_text(
+		"test('supplemental tests stay outside Quality Gate', () => { throw new Error('must not run'); });\n",
+		encoding="utf-8",
+	)
+	_init_and_stage(tmp_path, "quality-gate.toml", "AGENTS.md", "tests/node/supplemental.test.js")
+
+	result = _run(tmp_path, "check")
+
+	assert result.returncode == 0
+	assert "must not run" not in result.stdout
 
 
 def test_validate_rejects_unsafe_web_paths_patterns_and_duplicate_names(tmp_path: Path) -> None:
@@ -331,9 +431,7 @@ def test_check_enforces_default_web_file_and_total_boundaries(tmp_path: Path) ->
 def test_check_excludes_oversized_web_assets_only_when_explicitly_configured(
 	tmp_path: Path,
 ) -> None:
-	web = _web_component(
-		javascript='["**/*.js"]', css="[]", exclude='["vendor/**"]'
-	)
+	web = _web_component(javascript='["**/*.js"]', css="[]", exclude='["vendor/**"]')
 	(tmp_path / "quality-gate.toml").write_text(_manifest(web=web), encoding="utf-8")
 	(tmp_path / "AGENTS.md").write_text("contract\n", encoding="utf-8")
 	owned = tmp_path / "assets" / "app.js"
