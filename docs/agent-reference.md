@@ -22,10 +22,13 @@ explicit mutation commands.
 
 1. Run `quality-gate validate` after editing `quality-gate.toml`.
 2. Run `quality-gate doctor` to inspect the selected release and component runtimes.
-3. Run `quality-gate check` before committing. Use `--verbose` only when the compact report is
-   not sufficient.
-4. Use `quality-gate format <explicit-path>...`, stage the result, and run `check` again when
-   source formatting needs correction.
+3. For changes to this repository's source or policy, run the current-source `quality-gate check`
+   before committing. For a consumer implementation, complete staged verification through its
+   active workflow; its commit-hook Quality Gate satisfies this step. For standalone verification,
+   run `quality-gate check` directly. Use `--verbose` only when the compact report is not sufficient.
+4. Use `quality-gate format <explicit-path>...`, stage the result, and rerun the current-source
+   `quality-gate check`
+   for Quality Gate changes or return to the active workflow for consumer changes.
 5. Use `quality-gate version` to confirm which installed policy engine is executing.
 
 The native pre-commit wrapper reads the staged manifest, verifies its exact cached v2 wheel, and
@@ -88,7 +91,9 @@ release-only gate.
 ## Troubleshooting and security
 
 - Use `validate` for a manifest contract error and `doctor` for a release or runtime error.
-- Repair a failed finding, then rerun the same command and the complete `check`.
+- Repair a failed finding. For Quality Gate source changes, rerun the current-source check; for
+  standalone verification, rerun the failed command; for consumer implementations, return to the
+  active workflow.
 - Restore an `unchecked` prerequisite, then rerun the command; do not add a waiver for missing
   verification.
 - Add a typed waiver only for one reviewed current finding. Keep its exact check ID and target,
