@@ -14,6 +14,9 @@ place and uses pointers here instead of copying configuration rules.
 - `quality_gate/contracts.py` is the source of truth for schema 2, verdicts, and waivers.
 - `quality-gate.toml` declares this repository's policy release, documents, components, and limits.
 
+This page is the single manifest-maintenance guide. Read it before changing declared components,
+test paths, dependency inputs, required documents, workflows, waivers, or supplemental tests.
+
 ## Normal operation
 
 Run commands from the repository root. `check`, `audit`, `validate`, `doctor`, and `version` do
@@ -34,6 +37,30 @@ explicit mutation commands.
 The native pre-commit wrapper reads the staged manifest, verifies its exact cached v2 wheel, and
 calls the release-backed gate without importing mutable repository source. The native pre-push
 wrapper blocks updates and deletion of the remote default branch when Git can prove its name.
+
+## Manifest maintenance
+
+Schema 2 accepts optional repository-owned supplemental tests in the canonical template:
+
+```toml
+[[supplemental_tests]]
+name = "node-functional"
+runner = "node-test"
+targets = ["tests/node/**/*.test.js"]
+```
+
+The declaration has one unique name, the only supported runner is `node-test`, and every target is
+a safe repository-relative path or glob that matches at least one path. Validation bounds the
+manifest to 32 declarations, 32 target patterns per declaration, 1,024 matches per target, 4,096
+matches total, and 256 KiB of matched path names. Arbitrary commands are not part of the manifest
+contract. Quality Gate validates these declarations during `validate`, `check`, `audit`, native
+hooks, and the reusable workflow, but does not execute them. The typed test-runner expands
+validated globs without shell expansion, passes concrete paths to Node, and owns their execution
+during `scope: full`; repository CI remains the enforcement owner.
+
+After every `quality-gate.toml` edit, run `quality-gate validate`. Use
+[templates/quality-gate.toml](../templates/quality-gate.toml) as the canonical shape; do not create
+a project-local manifest copy in an agent skill.
 
 ## Setup and unavailable verification
 
@@ -66,10 +93,12 @@ Then change these two independent pins in one feature-branch candidate:
    reusable `.github/workflows/quality.yml`. This selects the CI implementation. Obtain the SHA
    from the verified release tag or publication record; do not use a tag or branch in the caller.
 
-Run `validate`, `setup`, and `doctor`, then stage the manifest and workflow together. Run the
-consumer's complete ordinary test suite and the staged `quality-gate check`. Commit only after
-both pass; the native commit hook repeats the staged gate. Push the feature branch, require the
-single `Quality Gate` pull-request status, and leave approval and merge to a human.
+Run `validate`, `setup`, and `doctor`, then stage the manifest and workflow together. Use one
+typed test-runner `scope: full` request: it runs every declared supplemental test and then the
+staged `quality-gate check`, while a repository without a manifest keeps ordinary complete-suite
+discovery. Commit only after it passes; the native commit hook repeats the staged gate. Push the
+feature branch, require the single `Quality Gate` pull-request status, and leave approval and merge
+to a human.
 
 For rollback, restore both pins to the last known-good pair in a new feature-branch candidate,
 then run `doctor`, the complete tests, and the staged gate again. `quality-gate sync --rollback`

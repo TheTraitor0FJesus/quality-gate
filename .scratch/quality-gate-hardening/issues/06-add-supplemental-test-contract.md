@@ -1,7 +1,7 @@
 ---
 id: "06"
 title: "Add supplemental test declarations and unified final verification"
-state: todo
+state: done
 blocked_by: []
 ---
 

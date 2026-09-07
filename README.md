@@ -39,9 +39,10 @@ Quality Gate applies the same versioned quality contract to the staged Git candi
 
    Optional `[web.limits]` values are expressed in KiB. Defaults are 100 per JavaScript file, 50 per CSS file, 250 total JavaScript, and 100 total CSS.
 
-5. Copy [templates/quality.yml](templates/quality.yml) to `.github/workflows/quality.yml` and replace `<40-character-commit-sha>` with the exact commit SHA of the reusable workflow.
-6. Copy [templates/dependabot.yml](templates/dependabot.yml) to `.github/dependabot.yml`.
-7. Synchronize the release named by `quality.policy_release`, prepare its isolated runtimes, and verify the repository.
+5. Optionally add `[[supplemental_tests]]` declarations for repository-owned functional tests. The only supported runner is `node-test`, and each declaration must list one or more matching repository-relative targets. Quality Gate validates these entries but leaves their execution to the typed test-runner and repository CI; see [the agent reference](docs/agent-reference.md) for the manifest contract.
+6. Copy [templates/quality.yml](templates/quality.yml) to `.github/workflows/quality.yml` and replace `<40-character-commit-sha>` with the exact commit SHA of the reusable workflow.
+7. Copy [templates/dependabot.yml](templates/dependabot.yml) to `.github/dependabot.yml`.
+8. Synchronize the release named by `quality.policy_release`, prepare its isolated runtimes, and verify the repository.
 
    ```powershell
    quality-gate sync --url "<release-asset-url>" --version <release>
