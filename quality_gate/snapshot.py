@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, cast
 
-from quality_gate.contracts import (
+from .contracts import (
 	DEFAULT_COMMAND_TIMEOUT_SECONDS,
 	DEFAULT_MAX_BLOB_SIZE_MIB,
 )

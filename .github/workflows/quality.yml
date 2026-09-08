@@ -87,7 +87,9 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .quality-gate-ci
-          sparse-checkout: quality_gate/ci_release.py
+          sparse-checkout: |
+            quality_gate/ci_release.py
+            quality_gate/release_contract.py
           sparse-checkout-cone-mode: false
 
       - name: Sync the manifest's immutable Quality Gate release

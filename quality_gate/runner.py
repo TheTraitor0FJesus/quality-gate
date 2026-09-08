@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from quality_gate.contracts import (
+from .contracts import (
 	CheckResult,
 	Finding,
 	Manifest,
@@ -31,14 +31,14 @@ from quality_gate.contracts import (
 	load_manifest,
 	redact,
 )
-from quality_gate.distribution import DistributionError
-from quality_gate.integrity import documentation_results, git_integrity_results, workflow_result
-from quality_gate.launcher import PreparedEnvironment, prepare
-from quality_gate.lessons import lessons_result
-from quality_gate.reporting import render
-from quality_gate.runtime import RuntimeUnavailable
-from quality_gate.secrets import secret_audit_result, secret_candidate_result, secret_history_result
-from quality_gate.snapshot import SnapshotError, candidate_snapshot
+from .distribution import DistributionError
+from .integrity import documentation_results, git_integrity_results, workflow_result
+from .launcher import PreparedEnvironment, prepare
+from .lessons import lessons_result
+from .reporting import render
+from .runtime import RuntimeUnavailable
+from .secrets import secret_audit_result, secret_candidate_result, secret_history_result
+from .snapshot import SnapshotError, candidate_snapshot
 
 _LOGGER = logging.getLogger(__name__)
 MANIFEST_NAME = "quality-gate.toml"

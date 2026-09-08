@@ -14,7 +14,7 @@ waivers = []
 
 [quality]
 schema = 2
-policy_release = "v2.0.4"
+policy_release = "v2.0.5"
 
 [repository]
 name = "native-hook-test"

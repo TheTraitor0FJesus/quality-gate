@@ -15,6 +15,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from .contracts import load_manifest
 from .distribution import PolicyCache, ReleaseManifest, load_release_manifest
 
 RESULT_LINE = re.compile(
@@ -23,6 +24,30 @@ RESULT_LINE = re.compile(
 	re.MULTILINE,
 )
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+EXPECTED_PARITY_STATUSES = {
+	"lessons.learning": "passed",
+	"manifest.documents": "passed",
+	"python.component_1.coverage": "not_applicable",
+	"python.component_1.deptry": "passed",
+	"python.component_1.format": "passed",
+	"python.component_1.mypy": "passed",
+	"python.component_1.pytest": "passed",
+	"python.component_1.ruff": "passed",
+	"repository.documentation.components": "passed",
+	"repository.documentation.links": "passed",
+	"repository.git.case_collisions": "passed",
+	"repository.git.conflict_markers": "passed",
+	"repository.git.large_blobs": "passed",
+	"repository.git.tracked_junk": "passed",
+	"repository.git.unsafe_symlinks": "passed",
+	"repository.workflow": "passed",
+	"secrets.candidate": "passed",
+	"secrets.history": "failed",
+	"web.component_1.biome_format": "passed",
+	"web.component_1.biome_lint": "passed",
+	"web.component_1.css_budget": "passed",
+	"web.component_1.javascript_budget": "passed",
+}
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -55,6 +80,22 @@ def _gate(
 	)
 
 
+def _setup(environment: dict[str, str], root: Path) -> None:
+	executable = shutil.which("quality-gate", path=environment.get("PATH"))
+	if executable is None:
+		raise RuntimeError("the installed quality-gate executable is unavailable")
+	result = subprocess.run(
+		[executable, "--root", str(root), "setup"],
+		cwd=root,
+		env=environment,
+		capture_output=True,
+		text=True,
+		check=False,
+	)
+	if result.returncode:
+		raise RuntimeError(result.stdout + result.stderr)
+
+
 def _surface(output: str) -> dict[str, str]:
 	return {
 		match.group("check_id"): match.group("status") for match in RESULT_LINE.finditer(output)
@@ -64,6 +105,8 @@ def _surface(output: str) -> dict[str, str]:
 def _environment(cache_base: Path) -> dict[str, str]:
 	environment = os.environ.copy()
 	environment.pop("PYTHONPATH", None)
+	environment["PYTHONDONTWRITEBYTECODE"] = "1"
+	environment["PYTHONPYCACHEPREFIX"] = str(cache_base / "pycache")
 	environment["LOCALAPPDATA"] = str(cache_base)
 	environment["XDG_CACHE_HOME"] = str(cache_base)
 	return environment
@@ -71,7 +114,11 @@ def _environment(cache_base: Path) -> dict[str, str]:
 
 def _fixture(root: Path) -> tuple[Path, str, str]:
 	fixture = root / "fixture"
-	shutil.copytree(PROJECT_ROOT / "tests" / "fixtures" / "no-python", fixture)
+	shutil.copytree(
+		PROJECT_ROOT / "tests" / "fixtures" / "release-parity",
+		fixture,
+		ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+	)
 	workflow = fixture / ".github" / "workflows" / "quality.yml"
 	workflow.parent.mkdir(parents=True)
 	shutil.copy2(PROJECT_ROOT / ".github" / "workflows" / "quality.yml", workflow)
@@ -161,18 +208,44 @@ def build_result() -> dict[str, Any]:
 		selected = PolicyCache().select(version)
 		release = load_release_manifest(selected)
 		fixture, base, credential = _fixture(temporary_root)
+		fixture_manifest = load_manifest(fixture)
 		environment = _environment(PolicyCache().root.parent)
+		_setup(environment, fixture)
 		pr = _gate(environment, fixture, "--base", base, "--head", "HEAD")
 		combined_output = pr.stdout + pr.stderr
 		pr_surface = _surface(pr.stdout)
+		missing_checks = EXPECTED_PARITY_STATUSES.keys() - pr_surface.keys()
+		extra_checks = pr_surface.keys() - EXPECTED_PARITY_STATUSES.keys()
+		if missing_checks or extra_checks:
+			raise RuntimeError(
+				"parity fixture check surface mismatch: "
+				f"missing={sorted(missing_checks)}, extra={sorted(extra_checks)}"
+			)
+		unexpected_statuses = {
+			check_id: status
+			for check_id, status in pr_surface.items()
+			if EXPECTED_PARITY_STATUSES[check_id] != status
+		}
+		if unexpected_statuses:
+			raise RuntimeError(f"parity fixture has unexpected verdicts: {unexpected_statuses}")
 		if pr_surface.get("secrets.history") != "failed":
 			raise RuntimeError("release-backed fixture did not run the history scanner")
 		shallow = _shallow_result(fixture, temporary_root, environment, base)
 		broken_cache = _unavailable_cache(selected, release, temporary_root)
-		unavailable = _gate(_environment(broken_cache), fixture, "--base", "HEAD", "--head", "HEAD")
+		broken_environment = _environment(broken_cache)
+		_setup(broken_environment, fixture)
+		unavailable = _gate(broken_environment, fixture, "--base", "HEAD", "--head", "HEAD")
 		return {
 			"policy_release": release.version,
 			"tool_names_versions": [[tool.name, tool.version] for tool in release.tools],
+			"supplemental_tests": [
+				{
+					"name": test.name,
+					"runner": test.runner,
+					"targets": list(test.targets),
+				}
+				for test in fixture_manifest.supplemental_tests
+			],
 			"check_surface": pr_surface,
 			"pr_history_verdict": pr_surface["secrets.history"],
 			"redaction": {
@@ -196,6 +269,7 @@ def compare_results(left_path: Path, right_path: Path) -> None:
 	keys = (
 		"policy_release",
 		"tool_names_versions",
+		"supplemental_tests",
 		"check_surface",
 		"pr_history_verdict",
 		"redaction",

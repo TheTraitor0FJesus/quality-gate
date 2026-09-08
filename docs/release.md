@@ -54,8 +54,11 @@ Publish the already-validated artifacts to one immutable GitHub Release. Do not 
 under an existing version. A release version change requires a new semantic version, a new source
 manifest identity, a rebuilt artifact, and a new controller run.
 
-The first v2 release is `v2.0.1`. Its Linux and Windows assets are immutable and are selected by
-the reusable workflow from `quality.policy_release`. Consumer workflows must pin the reusable
+The first v2 release was `v2.0.1`; the unified hardening candidate is `v2.0.5`. Its Linux and
+Windows assets are immutable and are selected by the reusable workflow from
+`quality.policy_release`. The candidate inventory must contain Ruff `0.16.4`, mypy `2.3.1`,
+pytest `9.1.1`, deptry `0.25.1`, Biome `2.2.6`, and Gitleaks `8.30.1`, together with the
+wheel dependencies required by the isolated runtime. Consumer workflows must pin the reusable
 workflow to a full commit SHA and must not use a mutable branch reference.
 
 ## Public branch protection
