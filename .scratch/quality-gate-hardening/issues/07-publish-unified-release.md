@@ -1,7 +1,7 @@
 ---
 id: "07"
 title: "Publish the unified immutable policy release"
-state: in_progress
+state: done
 blocked_by:
   - "02"
   - "03"
@@ -17,9 +17,9 @@ blocked_by:
 
 **Implementation uncertainty:** Low — the repository already defines the release controller, immutable inventory, self-host validation, and human-reviewed publication procedure.
 
-- [ ] The release inventory contains the exact source-pinned versions from tickets 01, 03, and 05 plus every required policy file, wheel, external binary, and digest for Windows and Linux.
-- [ ] Templates and user-facing documentation describe the final Python, web, and supplemental test contracts.
-- [ ] Self-host validation, the full suite, audit, and release validation pass on the exact candidate before publication.
-- [ ] The release tag and assets are immutable and correspond to the reviewed source revision.
-- [ ] The gate repository selects the published release through its staged manifest and matching reusable workflow revision.
-- [ ] Release-backed jobs on Windows and Linux report the expected exact tool inventory and identical check surface, verdicts, redaction, history, and `unchecked` behavior, and the comparison job passes.
+- [x] The release inventory contains the exact source-pinned versions from tickets 01, 03, and 05 plus every required policy file, wheel, external binary, and digest for Windows and Linux.
+- [x] Templates and user-facing documentation describe the final Python, web, and supplemental test contracts.
+- [x] Self-host validation, the full suite, audit, and release validation pass on the exact candidate before publication.
+- [x] The release tag and assets are immutable and correspond to the reviewed source revision.
+- [x] The gate repository selects the published release through its staged manifest and matching reusable workflow revision.
+- [x] Release-backed jobs on Windows and Linux report the expected exact tool inventory and identical check surface, verdicts, redaction, history, and `unchecked` behavior, and the comparison job passes.
