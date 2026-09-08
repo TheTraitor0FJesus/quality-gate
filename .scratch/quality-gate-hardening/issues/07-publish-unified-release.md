@@ -1,7 +1,7 @@
 ---
 id: "07"
 title: "Publish the unified immutable policy release"
-state: todo
+state: in_progress
 blocked_by:
   - "02"
   - "03"

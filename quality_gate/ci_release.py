@@ -13,6 +13,15 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+if __package__ in {None, ""}:
+	sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+	__package__ = "quality_gate"
+
+from .release_contract import (  # noqa: E402
+	ReleaseInventoryError,
+	validate_release_inventory,
+)
+
 MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 10_000
 SHA256_DIGEST = re.compile(r"sha256:([0-9a-f]{64})")
@@ -85,11 +94,12 @@ def _target_path(target: Path, parts: tuple[str, ...], context: str) -> Path:
 	return resolved
 
 
-def _validate_members(archive: zipfile.ZipFile, target: Path) -> None:
+def _validate_members(archive: zipfile.ZipFile, target: Path) -> tuple[str, ...]:
 	members = archive.infolist()
 	if len(members) > MAX_ARCHIVE_ENTRIES:
 		raise CiReleaseError("release archive exceeds the entry limit")
 	total_size = 0
+	paths: list[str] = []
 	for member in members:
 		total_size += member.file_size
 		if total_size > MAX_ARCHIVE_BYTES:
@@ -99,6 +109,12 @@ def _validate_members(archive: zipfile.ZipFile, target: Path) -> None:
 			continue
 		parts = _safe_relative_path(member_name, "release archive member")
 		_target_path(target, parts, "release archive member")
+		if not member.is_dir() and not member.filename.endswith("/"):
+			path = "/".join(parts)
+			if path in paths:
+				raise CiReleaseError("release archive contains duplicate file paths")
+			paths.append(path)
+	return tuple(paths)
 
 
 def _manifest_inventory(
@@ -126,11 +142,11 @@ def _manifest_inventory(
 
 
 def _extract_verified_archive(
-	archive_path: Path, target: Path, expected_release: str
+	archive_path: Path, target: Path, expected_release: str, platform: str | None
 ) -> tuple[dict[str, Any], str]:
 	try:
 		with zipfile.ZipFile(archive_path) as archive:
-			_validate_members(archive, target)
+			archive_paths = _validate_members(archive, target)
 			release = _object(
 				tomllib.loads(archive.read("release.toml").decode())["release"],
 				"release manifest",
@@ -159,6 +175,31 @@ def _extract_verified_archive(
 						else f"release file checksum mismatch: {path}"
 					)
 					raise CiReleaseError(message)
+			file_entries = [
+				(
+					"/".join(_safe_relative_path(item.get("path"), "release file path")),
+					item.get("kind", "artifact"),
+				)
+				for item in declared_files
+			]
+			tool_entries = [
+				(
+					str(item.get("name")),
+					str(item.get("version")),
+					"/".join(_safe_relative_path(item.get("path"), "release tool path")),
+				)
+				for item in declared_tools
+			]
+			try:
+				validate_release_inventory(
+					expected_release,
+					file_entries,
+					tool_entries,
+					platform=platform,
+					actual_paths=archive_paths,
+				)
+			except ReleaseInventoryError as error:
+				raise CiReleaseError(str(error)) from error
 			archive.extractall(target)
 	except (KeyError, OSError, UnicodeError, tomllib.TOMLDecodeError, zipfile.BadZipFile) as error:
 		raise CiReleaseError("release archive is unreadable") from error
@@ -203,7 +244,16 @@ def verify_release_asset(
 		raise CiReleaseError("release archive is unreadable") from error
 	if actual_digest != expected_digest:
 		raise CiReleaseError("immutable release archive digest mismatch")
-	release, wheel_path = _extract_verified_archive(archive_path, target, expected_release)
+	platform = (
+		"linux"
+		if expected_name.endswith("-Linux.zip")
+		else "windows"
+		if expected_name.endswith("-Windows.zip")
+		else None
+	)
+	release, wheel_path = _extract_verified_archive(
+		archive_path, target, expected_release, platform
+	)
 	_prepare_tools(release, target)
 	return target / wheel_path
 

@@ -247,7 +247,23 @@ def test_version_cli_reports_the_installed_quality_gate_version(tmp_path: Path) 
 	result = _run(tmp_path, "version")
 
 	assert result.returncode == 0
-	assert result.stdout.strip() == "quality-gate 2.0.4"
+	assert result.stdout.strip() == "quality-gate 2.0.5"
+
+
+def test_direct_cli_script_invocation_keeps_the_package_bootstrap(tmp_path: Path) -> None:
+	environment = os.environ.copy()
+	environment.pop("PYTHONPATH", None)
+	result = subprocess.run(
+		[sys.executable, str(REPOSITORY / "quality_gate" / "cli.py"), "version"],
+		cwd=tmp_path,
+		env=environment,
+		capture_output=True,
+		text=True,
+		check=False,
+	)
+
+	assert result.returncode == 0, result.stderr
+	assert result.stdout.strip() == "quality-gate 2.0.5"
 
 
 def test_validate_accepts_python_manifest(tmp_path: Path) -> None:

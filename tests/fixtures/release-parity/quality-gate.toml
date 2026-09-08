@@ -1,0 +1,38 @@
+waivers = []
+
+[quality]
+schema = 2
+policy_release = "v2.0.5"
+
+[repository]
+name = "release-parity"
+domains = ["repository", "python", "web"]
+required_documents = ["AGENTS.md", "quality-gate.toml"]
+
+[repository.limits]
+max_blob_size_mib = 5
+
+[repository.defaults]
+command_timeout_seconds = 120
+test_timeout_seconds = 300
+gate_timeout_seconds = 600
+
+[[python]]
+name = "app"
+path = "app"
+python_version = "3.12"
+dependency_inputs = ["requirements.txt"]
+test_paths = ["tests"]
+tests_applicable = true
+timeout_seconds = 300
+
+[[web]]
+name = "assets"
+root = "web"
+javascript = ["**/*.js"]
+css = ["**/*.css"]
+
+[[supplemental_tests]]
+name = "node-smoke"
+runner = "node-test"
+targets = ["tests/supplemental.test.js"]

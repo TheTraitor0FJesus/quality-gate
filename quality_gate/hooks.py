@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from quality_gate.contracts import load_manifest
+from .contracts import load_manifest
 
 _LOGGER = logging.getLogger(__name__)
 PUSH_FIELD_COUNT = 4

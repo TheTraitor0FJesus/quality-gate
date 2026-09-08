@@ -27,7 +27,8 @@ PARITY_WORKFLOW = REPOSITORY / ".github" / "workflows" / "parity.yml"
 PARITY_SCRIPT = REPOSITORY / "quality_gate" / "ci_parity.py"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXPECTED_CI_CHECK_INVOCATIONS = 2
-POLICY_RELEASE = "v2.0.4"
+POLICY_RELEASE = "v2.0.5"
+LEGACY_TEST_RELEASE = "v2.0.0"
 RESULT_LINE = re.compile(
 	r"^(?P<check_id>[a-z0-9_.]+): "
 	r"(?P<status>passed|failed|unchecked|not_applicable|waived)(?: - |$)",
@@ -184,7 +185,7 @@ def _release_gate(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]
 
 
 def _write_release(release: Path, scanner: Path | bytes, wheel: Path) -> None:
-	"""Write a release fixture with the wheel that the test installs."""
+	"""Write a historical release fixture for generic CI contract tests."""
 
 	release.mkdir()
 	shutil.copy2(wheel, release / wheel.name)
@@ -198,7 +199,7 @@ def _write_release(release: Path, scanner: Path | bytes, wheel: Path) -> None:
 	}
 	(release / "release.toml").write_text(
 		f'''[release]
-version = "{POLICY_RELEASE}"
+version = "{LEGACY_TEST_RELEASE}"
 
 [[release.files]]
 path = "{wheel.name}"
@@ -210,6 +211,16 @@ version = "8.30.1"
 path = "gitleaks.exe"
 sha256 = "{digests["gitleaks.exe"]}"
 ''',
+		encoding="utf-8",
+	)
+
+
+def _copy_legacy_no_python_fixture(root: Path) -> None:
+	shutil.copytree(REPOSITORY / "tests" / "fixtures" / "no-python", root)
+	_make_writable(root)
+	manifest = root / "quality-gate.toml"
+	manifest.write_text(
+		manifest.read_text(encoding="utf-8").replace(POLICY_RELEASE, LEGACY_TEST_RELEASE),
 		encoding="utf-8",
 	)
 
@@ -254,6 +265,7 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert "@main" not in workflow
 	assert "fetch-depth: 0" in workflow
 	assert "quality-gate sync --source" in workflow
+	assert "quality_gate/release_contract.py" in workflow
 	assert "curl --fail --location" in workflow
 	assert "github.workflow_sha" not in workflow
 	assert "repository: ${{ job.workflow_repository }}" in workflow
@@ -276,7 +288,7 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert 'QUALITY_GATE_WHEEL="$(python .quality-gate-ci/quality_gate/ci_release.py' in workflow
 	assert "manifest_python.outputs.versions" in workflow
 	assert 'default: "3.12"' not in workflow
-	assert manifest["quality"]["policy_release"] == "v2.0.4"
+	assert manifest["quality"]["policy_release"] == "v2.0.5"
 
 
 def test_workflow_bootstraps_before_reading_a_multicomponent_manifest(tmp_path: Path) -> None:
@@ -457,7 +469,7 @@ def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(
 	assert scanner is not None, "the active policy release must provide Gitleaks"
 	gate, wheel = _release_gate
 	root = tmp_path / "repository"
-	shutil.copytree(REPOSITORY / "tests" / "fixtures" / "no-python", root)
+	_copy_legacy_no_python_fixture(root)
 	_make_writable(root)
 	workflow = root / ".github" / "workflows" / "quality.yml"
 	workflow.parent.mkdir(parents=True)
@@ -510,7 +522,7 @@ def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(
 	for cache_base in cache_bases:
 		cache = PolicyCache(cache_base / "quality-gate")
 		cache.sync(release)
-		selected = cache.select(POLICY_RELEASE)
+		selected = cache.select(LEGACY_TEST_RELEASE)
 		selected_releases.append(
 			tomllib.loads((selected / "release.toml").read_text(encoding="utf-8"))["release"]
 		)
@@ -531,7 +543,10 @@ def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(
 	assert _result_surface(local.stdout) == _result_surface(ci.stdout)
 	assert _result_surface(local.stdout)
 	assert _result_surface(local.stdout)["secrets.history"] == "failed"
-	assert [release["version"] for release in selected_releases] == [POLICY_RELEASE, POLICY_RELEASE]
+	assert [release["version"] for release in selected_releases] == [
+		LEGACY_TEST_RELEASE,
+		LEGACY_TEST_RELEASE,
+	]
 	assert [
 		[(tool["name"], tool["version"]) for tool in release["tools"]]
 		for release in selected_releases
@@ -554,7 +569,7 @@ def test_ci_reports_an_unavailable_release_scanner_as_unchecked(
 	"""Verify an unusable release tool cannot produce a clean CI verdict."""
 
 	root = tmp_path / "repository"
-	shutil.copytree(REPOSITORY / "tests" / "fixtures" / "no-python", root)
+	_copy_legacy_no_python_fixture(root)
 	_make_writable(root)
 	_git(root, "init")
 	_git(root, "add", ".")

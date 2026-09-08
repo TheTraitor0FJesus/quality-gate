@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import urlparse
 
+from .release_contract import ReleaseInventoryError, validate_release_inventory
+
 RELEASE_VERSION = re.compile(r"^v\d+\.\d+\.\d+$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 DEFAULT_LOCK_TIMEOUT_SECONDS = 60
@@ -181,9 +183,25 @@ def _sha256(path: Path) -> str:
 	return digest.hexdigest()
 
 
+def _release_platform() -> str:
+	return "windows" if os.name == "nt" else "linux"
+
+
 def verify_release(path: Path, manifest: ReleaseManifest | None = None) -> ReleaseManifest:
 	"""Verify every declared release artifact and external tool."""
 	validated = manifest or load_release_manifest(path)
+	root = path.resolve()
+	actual_paths = [item.relative_to(root).as_posix() for item in root.rglob("*") if item.is_file()]
+	try:
+		validate_release_inventory(
+			validated.version,
+			[(item.path, item.kind) for item in validated.files],
+			[(item.name, item.version, item.path) for item in validated.tools],
+			platform=_release_platform(),
+			actual_paths=actual_paths,
+		)
+	except ReleaseInventoryError as error:
+		raise DistributionError(str(error)) from error
 	tool_files = tuple(ReleaseFile(tool.path, tool.sha256, "tool") for tool in validated.tools)
 	for item in (*validated.files, *tool_files):
 		file_path = path / item.path
@@ -346,10 +364,16 @@ class PolicyCache:
 			target.mkdir(parents=True)
 			with zipfile.ZipFile(source) as archive:
 				total_size = 0
+				members: set[str] = set()
 				for member in archive.infolist():
 					total_size += member.file_size
 					if total_size > MAX_RELEASE_BYTES:
 						raise DistributionError("release archive exceeds the size limit")
+					member_name = member.filename.rstrip("/").replace("\\", "/")
+					if member_name and member_name in members:
+						raise DistributionError("release archive contains duplicate file paths")
+					if member_name:
+						members.add(member_name)
 					member_path = (target / member.filename).resolve()
 					release_root = target.resolve()
 					if release_root not in member_path.parents and member_path != release_root:

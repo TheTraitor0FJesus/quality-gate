@@ -6,13 +6,18 @@ import argparse
 import sys
 from pathlib import Path
 
-from quality_gate import __version__
-from quality_gate.contracts import ValidationError, Verdict, load_manifest
-from quality_gate.distribution import DistributionError, PolicyCache
-from quality_gate.launcher import prepare
-from quality_gate.migration import migration_proposal
-from quality_gate.reporting import render
-from quality_gate.runner import (
+# Keep the documented script entry point usable while the package uses relative imports.
+if __package__ in {None, ""}:
+	sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+	__package__ = "quality_gate"
+
+from . import __version__  # noqa: E402
+from .contracts import ValidationError, Verdict, load_manifest  # noqa: E402
+from .distribution import DistributionError, PolicyCache  # noqa: E402
+from .launcher import prepare  # noqa: E402
+from .migration import migration_proposal  # noqa: E402
+from .reporting import render  # noqa: E402
+from .runner import (  # noqa: E402
 	QualityGateError,
 	_error_result,
 	audit,
@@ -20,7 +25,7 @@ from quality_gate.runner import (
 	format_paths,
 	validate,
 )
-from quality_gate.runtime import RuntimeManager, RuntimeUnavailable, runtime_identity
+from .runtime import RuntimeManager, RuntimeUnavailable, runtime_identity  # noqa: E402
 
 
 def parser() -> argparse.ArgumentParser:
@@ -89,7 +94,7 @@ def _sync(arguments: argparse.Namespace) -> None:
 def _doctor(root: Path | None, cache_dir: Path | None) -> int:
 	actual_root = root.resolve() if root is not None else None
 	try:
-		from quality_gate.runner import repository_root
+		from .runner import repository_root
 
 		actual_root = repository_root(actual_root)
 		manifest = load_manifest(actual_root)
@@ -115,7 +120,7 @@ def _doctor(root: Path | None, cache_dir: Path | None) -> int:
 
 
 def _setup(root: Path | None, cache_dir: Path | None) -> None:
-	from quality_gate.runner import repository_root
+	from .runner import repository_root
 
 	actual_root = repository_root(root)
 	environment = prepare(actual_root, cache_dir=cache_dir, create_runtimes=True)
