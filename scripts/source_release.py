@@ -33,6 +33,7 @@ ARTIFACT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_API_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
+GITHUB_API_VERSION = "2022-11-28"
 # ponytail: cap history at 10,000 releases; switch to an indexed baseline endpoint if growth reaches this ceiling.
 MAX_RELEASE_PAGES = 100
 REQUIRED_NOTE_HEADINGS = (
@@ -214,7 +215,7 @@ class HttpGitHubApi:
 			body = content
 		request = Request(url, data=body, method=method)
 		request.add_header("Accept", "application/vnd.github+json")
-		request.add_header("X-GitHub-Api-Version", "2026-03-10")
+		request.add_header("X-GitHub-Api-Version", GITHUB_API_VERSION)
 		request.add_header("Authorization", f"Bearer {self.token}")
 		request.add_header("Content-Type", content_type)
 		try:
@@ -475,7 +476,8 @@ def validate_version_projections(root: Path | str) -> VersionProjection:
 
 
 def _release_section(body: str) -> str:
-	match = re.search(r"(?ms)^##\s+Release\s*$([\s\S]*?)(?=^##\s+|\Z)", body)
+	normalized_body = body.replace("\r\n", "\n").replace("\r", "\n")
+	match = re.search(r"(?ms)^##\s+Release\s*$([\s\S]*?)(?=^##\s+|\Z)", normalized_body)
 	if match is None:
 		raise ReleaseError("merged PR has no Release section")
 	return match.group(1)
