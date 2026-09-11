@@ -123,7 +123,11 @@ def _setup(root: Path | None, cache_dir: Path | None) -> None:
 	from .runner import repository_root
 
 	actual_root = repository_root(root)
-	environment = prepare(actual_root, cache_dir=cache_dir, create_runtimes=True)
+	environment = prepare(
+		actual_root,
+		cache_dir=cache_dir,
+		create_runtimes=True,
+	)
 	sys.stdout.write(f"setup: ready - {environment.manifest.policy_release}\n")
 
 

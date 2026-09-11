@@ -1,88 +1,43 @@
 # Quality Gate release procedure
 
-This document defines the release boundary for the public Quality Gate repository. The release
-controller is `python -m quality_gate.release`; it is separate from the consumer `sync` command.
+This repository implements the shared owner-merged release policy described in the [shared release policy](C:/Users/Traitor/.codex/skills/git/references/release-policy.md). This page is the local contract; it records the Quality Gate adapter and points to the policy instead of redefining it.
 
-## Preconditions
+## Version authority
 
-The source tree must satisfy all of these conditions:
+`.release/version.toml` contains exactly one top-level `version` string in plain `MAJOR.MINOR.PATCH` form. It is the only product-version authority. The native package version in `pyproject.toml`, runtime `quality_gate.__version__`, `quality-gate.toml`'s `quality.policy_release`, the consumer template, the reusable workflow's policy selection, and the unified distribution inventory are validated projections.
 
-- `quality-gate.toml` uses schema 2 and its `quality.policy_release` matches the package version
-  in `pyproject.toml`.
-- Every required document is present and non-empty.
-- `quality-gate audit` passes, including full reachable-history secret scanning and lesson
-  completion.
-- The complete supported-platform and failure-injection test suite passes on the release source.
-- The artifact contains a policy wheel, every declared policy or dependency file, and every
-  declared external tool with its SHA-256 digest in `release.toml`.
-- The Biome inventory in `quality_gate/policy/biome.toml` pins version 2.2.6 and exact Windows
-  and Linux standalone binary digests; each platform archive includes its matching entry.
+The CLI compatibility boundary is the existing schema 2 `quality-gate` command surface and v2 native-hook/runtime contract. A patch release keeps that public surface compatible. The policy/manifest boundary is the immutable `quality.policy_release` selection and its exact release inventory. The reusable-workflow boundary is the caller's full commit SHA; this repository's post-merge workflow does not change consumer triggers or pins. The distribution boundary is the existing platform-specific ZIP containing the policy wheel, dependencies, policy files, and pinned tools.
 
-The source must not contain a real credential. Rotate or revoke a real credential before release;
-do not hide it with a baseline or waiver.
+## Release intent and notes
 
-## Candidate validation
+`.release/notes.md` is the reviewed release intent. It must declare the authoritative version, impact (`MAJOR`, `MINOR`, `PATCH`, or `NONE`), user-visible changes, required adaptation, and the common compatibility headings in this order: `Interface`, `Integrations`, `Configuration`, `Persisted data`, and `Delivery/runtime`. For `NONE`, the merged PR contains one reasoned `No release:` line and the post-merge workflow verifies the decision without publishing an artifact. A release PR body repeats the exact version and impact, includes the user-visible changes and required adaptation in the policy's `Changes:` line, and states that owner merge authorizes publication after the merged commit passes the required checks.
 
-Build the platform-specific release directory or archive with the exact wheel and tool inventory
-that will be published. The controller accepts either form. Run it after the audit and tests:
+Opening or approving a PR never creates a tag or release. For a release intent, the controller accepts only a merged PR targeting the default branch, merged by the repository owner, whose declared version matches the source-controlled intent and whose merge SHA is the source being released. A `NONE` intent accepts the owner's matching no-release declaration and leaves the published baseline unchanged.
 
-```text
-python -m quality_gate.release --root . --artifact <release-directory-or-zip> --version vMAJOR.MINOR.PATCH
-```
+## Required checks
 
-The controller checks the schema 2 manifest, package version, required documents, and release
-lessons. It then installs the candidate into a temporary policy cache through the same locked,
-integrity-checked distribution path used by consumers. The exact wheel is installed into one
-disposable workspace, and the installed wheel runs both `setup` and `audit` from its isolated
-environment. The workspace never uses the user's active policy cache. Windows chooses a writable
-workspace with a verified final path and reserved path-length headroom; Linux uses the normal
-system temporary directory. If automatic Windows selection is unavailable, pass an existing short
-directory explicitly as `--workspace-parent D:\qgtmp`. An unsuitable parent is an unchecked
-release condition. The controller rejects a missing, malformed, mismatched, corrupt, or
-non-executable artifact and leaves the user cache unchanged. A successful result is:
+`.github/workflows/release.yml` first verifies the exact merged SHA's owner authorization and required `Quality Gate` check, then runs the complete repository test suite and `quality-gate audit` on both Linux and Windows through `scripts/release_adapter.py` when the reviewed intent is a release. A `NONE` intent verifies owner authorization and required checks, then exits successfully without building or publishing an artifact. The adapter calls the existing `quality_gate.release` controller for wheel installation, isolated runtime setup, audit, unified inventory, checksums, and failure-injection coverage. An absent, failed, stale, or source-unbound result is unchecked and prevents publication.
 
-```text
-release: ready - vMAJOR.MINOR.PATCH
-```
+The build consumes the tracked `.release/release-requirements.txt` hash lock with binary-only installation. `.release/release-tools.toml` also owns the bounded GitHub API, download, subprocess, required-check wait, and required-check poll timeouts. Its explicit `bootstrap.policy_release` is used only when this repository's own not-yet-published policy asset is absent; the reusable workflow then runs the current checkout's CLI against that previous immutable release. The adapter verifies the policy-pinned Biome digest and the SHA-256 digest recorded for the pinned Gitleaks asset before either tool enters a package.
 
-The artifact is not ready for publication when the controller returns `unchecked`.
+The common controller is `scripts/source_release.py`. Its `verify --source-sha <SHA> --authorization-only` command performs the pre-build authorization, version/baseline, projection, and check validation without publishing. Its `verify --source-sha <SHA> --artifact-manifest <PATH>` command repeats those validations and adds artifact content/readiness validation without publishing; a `NONE` intent may omit the manifest and returns `no-release` after authorization and checks. Its `publish --source-sha <SHA> --artifact-manifest <PATH>` command repeats those validations and requires the adapter-produced identities for both supported platforms. The adapter's private bootstrap commands select `bootstrap.policy_release` only for this repository; the normal consumer CLI has no policy override and policy selection remains the manifest's immutable release.
 
-## Human publication boundary
+## Publisher
 
-A human reviews the controller output, the exact archive names and digests, and the release notes.
-Publish the already-validated artifacts to one immutable GitHub Release. Do not replace an asset
-under an existing version. A release version change requires a new semantic version, a new source
-manifest identity, a rebuilt artifact, and a new controller run.
+The only publisher is `.github/workflows/release.yml` after the owner-merged PR has passed the required checks. It invokes `source_release.py publish` through an injected GitHub API boundary. The workflow is serialized per release unit and has a manual retry input for the exact source SHA of an unpublished attempt. It never publishes from an open PR, PR head, synthetic merge, unrelated direct push, or a moving branch tip.
 
-The first v2 release was `v2.0.1`; the unified hardening candidate is `v2.0.5`. Its Linux and
-Windows assets are immutable and are selected by the reusable workflow from
-`quality.policy_release`. The candidate inventory must contain Ruff `0.16.4`, mypy `2.3.1`,
-pytest `9.1.1`, deptry `0.25.1`, Biome `2.2.6`, and Gitleaks `8.30.1`, together with the
-wheel dependencies required by the isolated runtime. Consumer workflows must pin the reusable
-workflow to a full commit SHA and must not use a mutable branch reference.
+Before creating or resuming a draft, the controller checks GitHub's immutable-releases repository setting and fails closed when it is unavailable or disabled. The setting must be enabled by repository administration before the first publication.
 
-## Public branch protection
+## Artifacts and source identity
 
-The public repository's `main` branch requires an active GitHub ruleset with these observable
-controls:
+`scripts/release_adapter.py` is the only Quality Gate-specific seam. It builds the existing Linux and Windows ZIP assets, preserves wheel installation and the unified inventory, and returns the common identity shape: source SHA, plain version, platform, asset name, and SHA-256 digest. `verify` and `runtime-check` run the existing release controller against that exact source and artifact. Fixed Gitleaks URLs/digests are recorded in `.release/release-tools.toml`; the publisher records the merged source SHA and both platform asset digests in the immutable GitHub Release.
 
-- pull requests are required;
-- at least one human approval is required;
-- the unique required status is `Quality Gate`;
-- force-push and branch deletion are disabled.
+## Retry and conflict rules
 
-The ruleset is GitHub repository configuration, not a consumer manifest setting. Verify it after
-any repository administration change. Private GitHub Free consumers retain the documented
-pre-push and CI detection limitation.
+Tags and published assets are never replaced. A matching completed immutable release is verified and returned as `already-complete`. A draft or otherwise unpublished attempt may upload only missing assets whose names and digests match the verified adapter output; an existing conflicting asset, tag, source SHA, version, check result, or release notes body fails closed. A stale version proposal requires a corrective PR. A missing platform result prevents completion.
 
-## Rollback and retention
+The release controller and tests cover no-release intent handling, unauthorized or unmerged PRs, source/version mismatch, failed or missing checks, artifact/source mismatch, stale versions, conflicting publications, matching reruns, and recoverable unpublished attempts through the mocked GitHub API boundary. No real release is deleted or overwritten to exercise these failures.
 
-The distribution cache keeps the active release and preceding releases. A consumer selects its
-local policy through `quality.policy_release` and its CI implementation through the full
-reusable-workflow commit SHA. Restore both pins to the last known-good pair in a reviewed
-feature-branch change, then run `doctor`, the complete tests, and the staged gate.
+## Deployment and data boundaries
 
-`quality-gate sync --rollback [VERSION]` changes cache state only. It does not override either
-consumer pin and is not a consumer rollback by itself. Preview old entries with
-`quality-gate sync --prune`; confirmed pruning is a separate maintenance action and never runs as
-part of a commit.
+This package release does not deploy services, alter consumer workflow pins, change runtime rollout or rollback behavior, migrate persistent data, or replace backups. The existing local policy-cache retention and consumer synchronization procedures remain authoritative. Required package assets remain attached to the immutable release for the supported recovery lifetime.

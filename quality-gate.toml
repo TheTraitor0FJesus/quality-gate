@@ -9,13 +9,17 @@ expires_on = "2027-08-26"
 
 [quality]
 schema = 2
-policy_release = "v2.0.5"
+policy_release = "v2.0.6"
 
 [repository]
 name = "quality-gate"
 domains = ["repository", "python"]
 required_documents = [
     "AGENTS.md",
+    ".release/release-tools.toml",
+    ".release/release-requirements.txt",
+    ".release/version.toml",
+    ".release/notes.md",
     "README.md",
     "docs/agent-reference.md",
     "docs/architecture.md",
@@ -23,6 +27,9 @@ required_documents = [
     "docs/lessons.md",
     "docs/quality-policy-changes.md",
     "docs/release.md",
+    ".github/workflows/release.yml",
+    "scripts/source_release.py",
+    "scripts/release_adapter.py",
     "quality-gate.toml",
 ]
 

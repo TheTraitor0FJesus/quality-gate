@@ -9,7 +9,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-
 from quality_gate import ci_release, runner
 from quality_gate.release_contract import (
 	UNIFIED_RELEASE_DEPENDENCIES,
@@ -85,9 +84,9 @@ def _write_metadata(path: Path, value: dict[str, object]) -> None:
 
 
 def _unified_archive(path: Path, *, extra_member: bool = False) -> None:
-	version = "v2.0.5"
+	version = "v2.0.6"
 	files = [
-		("quality_gate-2.0.5-py3-none-any.whl", "artifact"),
+		("quality_gate-2.0.6-py3-none-any.whl", "artifact"),
 		*(
 			(f"{name}-{dependency_version}-py3-none-any.whl", "dependency")
 			for name, dependency_version in UNIFIED_RELEASE_DEPENDENCIES.items()
@@ -135,31 +134,31 @@ def _unified_archive(path: Path, *, extra_member: bool = False) -> None:
 
 
 def test_ci_release_verifier_accepts_an_exact_unified_inventory(tmp_path: Path) -> None:
-	archive = tmp_path / "quality-gate-v2.0.5-Windows.zip"
+	archive = tmp_path / "quality-gate-v2.0.6-Windows.zip"
 	metadata = tmp_path / "release.json"
 	target = tmp_path / "verified"
 	_unified_archive(archive)
 	asset = archive.name
-	_write_metadata(metadata, _metadata(archive, release="v2.0.5", asset=asset))
+	_write_metadata(metadata, _metadata(archive, release="v2.0.6", asset=asset))
 
 	wheel = ci_release.verify_release_asset(
 		metadata,
 		archive,
 		target,
-		expected_release="v2.0.5",
+		expected_release="v2.0.6",
 		expected_name=asset,
 	)
 
-	assert wheel == target / "quality_gate-2.0.5-py3-none-any.whl"
+	assert wheel == target / "quality_gate-2.0.6-py3-none-any.whl"
 
 
 def test_ci_release_verifier_rejects_an_unexpected_unified_file(tmp_path: Path) -> None:
-	archive = tmp_path / "quality-gate-v2.0.5-Windows.zip"
+	archive = tmp_path / "quality-gate-v2.0.6-Windows.zip"
 	metadata = tmp_path / "release.json"
 	target = tmp_path / "unexpected"
 	_unified_archive(archive, extra_member=True)
 	asset = archive.name
-	_write_metadata(metadata, _metadata(archive, release="v2.0.5", asset=asset))
+	_write_metadata(metadata, _metadata(archive, release="v2.0.6", asset=asset))
 
 	result = ci_release.main(
 		[
@@ -170,7 +169,7 @@ def test_ci_release_verifier_rejects_an_unexpected_unified_file(tmp_path: Path) 
 			"--target",
 			str(target),
 			"--release",
-			"v2.0.5",
+			"v2.0.6",
 			"--asset-name",
 			asset,
 		]
@@ -206,13 +205,13 @@ def test_ci_release_verifier_extracts_only_a_trusted_immutable_asset(tmp_path: P
 def test_ci_release_verifier_rejects_an_incomplete_unified_inventory(tmp_path: Path) -> None:
 	"""The unified release cannot fall back to the historical minimal inventory."""
 
-	archive = tmp_path / "quality-gate-v2.0.5-Windows.zip"
+	archive = tmp_path / "quality-gate-v2.0.6-Windows.zip"
 	metadata = tmp_path / "release.json"
 	target = tmp_path / "incomplete"
 	wheel_name, wheel_content = _wheel_fixture()
-	_archive(archive, wheel_name, wheel_content, manifest_version="v2.0.5")
+	_archive(archive, wheel_name, wheel_content, manifest_version="v2.0.6")
 	asset = archive.name
-	_write_metadata(metadata, _metadata(archive, release="v2.0.5", asset=asset))
+	_write_metadata(metadata, _metadata(archive, release="v2.0.6", asset=asset))
 
 	result = ci_release.main(
 		[
@@ -223,7 +222,7 @@ def test_ci_release_verifier_rejects_an_incomplete_unified_inventory(tmp_path: P
 			"--target",
 			str(target),
 			"--release",
-			"v2.0.5",
+			"v2.0.6",
 			"--asset-name",
 			asset,
 		]

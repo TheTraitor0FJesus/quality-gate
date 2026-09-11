@@ -8,11 +8,11 @@ import zipfile
 from pathlib import Path
 
 import pytest
-
 import quality_gate.distribution as distribution
 from quality_gate.cli import main
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import DistributionError, PolicyCache
+from quality_gate.launcher import prepare_bootstrap
 from quality_gate.runner import EXIT_UNCHECKED
 from quality_gate.runtime import (
 	RuntimeManager,
@@ -23,14 +23,15 @@ from quality_gate.runtime import (
 
 
 def _release(source: Path, version: str = "v2.0.0") -> None:
-	(source / "quality_gate-2.0.0-py3-none-any.whl").write_bytes(b"wheel")
+	wheel_name = f"quality_gate-{version.removeprefix('v')}-py3-none-any.whl"
+	(source / wheel_name).write_bytes(b"wheel")
 	(source / "policy.txt").write_text("shared policy\n", encoding="utf-8")
 	(source / "ruff.exe").write_bytes(b"ruff")
 
 	def digest(name: str) -> str:
 		return hashlib.sha256((source / name).read_bytes()).hexdigest()
 
-	wheel_digest = digest("quality_gate-2.0.0-py3-none-any.whl")
+	wheel_digest = digest(wheel_name)
 	policy_digest = digest("policy.txt")
 	ruff_digest = digest("ruff.exe")
 	(source / "release.toml").write_text(
@@ -38,7 +39,7 @@ def _release(source: Path, version: str = "v2.0.0") -> None:
 version = "{version}"
 
 [[release.files]]
-path = "quality_gate-2.0.0-py3-none-any.whl"
+path = "{wheel_name}"
 sha256 = "{wheel_digest}"
 
 [[release.files]]
@@ -427,6 +428,30 @@ def test_sync_cli_requires_an_explicit_source_and_installs_release(
 
 	assert main() == 0
 	assert "policy release synced: v2.0.0" in capsys.readouterr().out
+
+
+def test_prepare_can_select_an_explicit_self_hosting_bootstrap_release(tmp_path: Path) -> None:
+	source = tmp_path / "source"
+	source.mkdir()
+	_release(source)
+	cache = PolicyCache(tmp_path / "cache")
+	cache.sync(source)
+
+	prepared = prepare_bootstrap(
+		Path(__file__).parent / "fixtures" / "no-python",
+		cache_dir=cache.root,
+		policy_release="v2.0.0",
+	)
+
+	assert prepared.manifest.policy_release == "v2.0.0"
+	assert prepared.release_manifest.version == "v2.0.0"
+
+	with pytest.raises(DistributionError, match="vMAJOR.MINOR.PATCH"):
+		prepare_bootstrap(
+			Path(__file__).parent / "fixtures" / "no-python",
+			cache_dir=cache.root,
+			policy_release="not-a-release",
+		)
 
 
 def test_doctor_blocks_when_declared_policy_is_not_cached(

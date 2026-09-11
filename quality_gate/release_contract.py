@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-UNIFIED_RELEASE = "v2.0.5"
-UNIFIED_RELEASE_PACKAGE_VERSION = "2.0.5"
+UNIFIED_RELEASE = "v2.0.6"
+UNIFIED_RELEASE_PACKAGE_VERSION = "2.0.6"
+UNIFIED_RELEASE_PACKAGE_VERSIONS = {
+	"v2.0.5": "2.0.5",
+	"v2.0.6": "2.0.6",
+}
 WHEEL_IDENTITY_PARTS = 3
 UNIFIED_RELEASE_TOOLS = {
 	"deptry": "0.25.1",
@@ -82,13 +86,13 @@ def _validate_identity_set(
 	raise ReleaseInventoryError(f"release {label} mismatch: " + "; ".join(details))
 
 
-def _file_identity(path: str, kind: str) -> tuple[str, str]:
+def _file_identity(path: str, kind: str, package_version: str) -> tuple[str, str]:
 	if path in UNIFIED_RELEASE_POLICY_FILES:
 		if kind != "policy":
 			raise ReleaseInventoryError(f"release policy file has the wrong kind: {path}")
 		return "policy", path
 	wheel = _wheel_identity(path)
-	if wheel == ("quality_gate", UNIFIED_RELEASE_PACKAGE_VERSION):
+	if wheel == ("quality_gate", package_version):
 		if kind != "artifact":
 			raise ReleaseInventoryError(f"release policy wheel has the wrong kind: {path}")
 		return "wheel", path
@@ -104,11 +108,11 @@ def _file_identity(path: str, kind: str) -> tuple[str, str]:
 	raise ReleaseInventoryError(f"release contains an unexpected file: {path}")
 
 
-def _validate_files(files: Sequence[tuple[str, str]]) -> None:
+def _validate_files(files: Sequence[tuple[str, str]], package_version: str) -> None:
 	seen: set[tuple[str, str]] = set()
 	policy_wheels: list[str] = []
 	for path, kind in files:
-		identity = _file_identity(path, kind)
+		identity = _file_identity(path, kind, package_version)
 		if identity[0] == "wheel":
 			policy_wheels.append(path)
 		if identity in seen:
@@ -193,9 +197,15 @@ def validate_release_inventory(
 	actual_paths: Sequence[str] | None = None,
 ) -> None:
 	"""Require the exact cross-platform inventory for the unified release."""
-	if version != UNIFIED_RELEASE:
+	package_version = UNIFIED_RELEASE_PACKAGE_VERSIONS.get(version)
+	if package_version is None:
 		return
-	_validate_files(files)
+	_validate_files(files, package_version)
 	_validate_tools(tools, platform)
 	if actual_paths is not None:
 		_validate_paths(files, tools, actual_paths)
+
+
+def supports_unified_inventory(version: str) -> bool:
+	"""Return whether a product version has the exact package inventory contract."""
+	return version in UNIFIED_RELEASE_PACKAGE_VERSIONS

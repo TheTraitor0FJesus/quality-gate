@@ -15,7 +15,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from quality_gate import runner
 from quality_gate.contracts import CheckResult, Status
 from quality_gate.distribution import DistributionError, PolicyCache
@@ -27,7 +26,8 @@ PARITY_WORKFLOW = REPOSITORY / ".github" / "workflows" / "parity.yml"
 PARITY_SCRIPT = REPOSITORY / "quality_gate" / "ci_parity.py"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 EXPECTED_CI_CHECK_INVOCATIONS = 2
-POLICY_RELEASE = "v2.0.5"
+POLICY_RELEASE = "v2.0.6"
+SCANNER_RELEASE = "v2.0.5"
 LEGACY_TEST_RELEASE = "v2.0.0"
 RESULT_LINE = re.compile(
 	r"^(?P<check_id>[a-z0-9_.]+): "
@@ -88,7 +88,7 @@ def _policy_root() -> Path | None:
 
 def _cached_policy_root() -> Path | None:
 	try:
-		return PolicyCache().select(POLICY_RELEASE)
+		return PolicyCache().select(SCANNER_RELEASE)
 	except (DistributionError, FileNotFoundError, OSError, ValueError):
 		return None
 
@@ -265,6 +265,11 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert "@main" not in workflow
 	assert "fetch-depth: 0" in workflow
 	assert "quality-gate sync --source" in workflow
+	assert "release-tools.toml" in workflow
+	assert "GITHUB_REPOSITORY" in workflow
+	assert '["bootstrap"]["policy_release"]' in workflow
+	assert "scripts/release_adapter.py bootstrap-setup" in workflow
+	assert "scripts/release_adapter.py bootstrap-check" in workflow
 	assert "quality_gate/release_contract.py" in workflow
 	assert "curl --fail --location" in workflow
 	assert "github.workflow_sha" not in workflow
@@ -288,7 +293,7 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert 'QUALITY_GATE_WHEEL="$(python .quality-gate-ci/quality_gate/ci_release.py' in workflow
 	assert "manifest_python.outputs.versions" in workflow
 	assert 'default: "3.12"' not in workflow
-	assert manifest["quality"]["policy_release"] == "v2.0.5"
+	assert manifest["quality"]["policy_release"] == "v2.0.6"
 
 
 def test_workflow_bootstraps_before_reading_a_multicomponent_manifest(tmp_path: Path) -> None:

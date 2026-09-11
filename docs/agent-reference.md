@@ -148,16 +148,18 @@ Cover malformed input and injected failures at the public CLI, native Git, or CI
 the change. Preserve secret redaction in normal, verbose, hook, CI, audit, and migration output.
 Update the architecture map when a module, flow, or search route changes. Release shared behavior
 only as a new immutable version, then update each consumer's synchronized release and CI SHA as one
-reviewed change; release publication and merge remain human decisions.
+reviewed change. Owner merge authorizes the post-merge publisher; consumer activation, rollback,
+and external rule changes remain human-reviewed decisions.
 
 ## Release and rollback route
 
 Run the complete test suite and `quality-gate audit` before building the exact platform artifacts.
-Then run the release controller described in [Release procedure](release.md). It validates the
-self-host manifest and lessons and verifies every declared artifact in a temporary cache before a
-human publishes the immutable GitHub Release.
+Then run the release controller described in [Release procedure](release.md). The owner-merged
+post-merge workflow validates the exact source, checks, self-host manifest, lessons, and every
+declared artifact in a temporary cache before publishing the immutable GitHub Release.
 
 Retain the active and preceding policy releases. To recover a bad activation, run
 the consumer rollback procedure above: restore the manifest release and reusable-workflow SHA,
-then verify the complete candidate. Release publication, ruleset changes, and policy updates
-remain human-reviewed operations.
+then verify the complete candidate. Ruleset changes, consumer pin updates, and rollback remain
+human-reviewed operations; an unpublished release attempt is retried only for its exact source
+SHA.

@@ -9,12 +9,42 @@ import zipfile
 from pathlib import Path
 
 import pytest
-
 from quality_gate.release import ReleaseControllerError, verify_release_candidate
 
 
 def _source(root: Path, version: str = "2.0.0") -> None:
 	(root / "AGENTS.md").write_text("contract\n", encoding="utf-8")
+	(root / ".release").mkdir()
+	(root / ".release" / "version.toml").write_text(f'version = "{version}"\n', encoding="utf-8")
+	(root / ".release" / "notes.md").write_text(
+		f"""# Quality Gate v{version}
+
+Version: {version}
+Impact: MAJOR
+Changes: release controller fixture.
+Required adaptation: fixture only.
+
+## Interface
+fixture
+
+## Integrations
+fixture
+
+## Configuration
+fixture
+
+## Persisted data
+fixture
+
+## Delivery/runtime
+fixture
+""",
+		encoding="utf-8",
+	)
+	(root / "quality_gate").mkdir()
+	(root / "quality_gate" / "__init__.py").write_text(
+		f'__version__ = "{version}"\n', encoding="utf-8"
+	)
 	(root / "pyproject.toml").write_text(
 		f'[project]\nname = "quality-gate"\nversion = "{version}"\n',
 		encoding="utf-8",
@@ -27,7 +57,7 @@ policy_release = "v{version}"
 [repository]
 name = "quality-gate"
 domains = ["repository"]
-required_documents = ["AGENTS.md"]
+required_documents = ["AGENTS.md", ".release/version.toml", ".release/notes.md"]
 """,
 		encoding="utf-8",
 	)
