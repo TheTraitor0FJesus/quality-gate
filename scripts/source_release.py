@@ -42,6 +42,9 @@ REQUIRED_NOTE_HEADINGS = (
 	"Persisted data",
 	"Delivery/runtime",
 )
+PUBLICATION_DECLARATION = (
+	"Publication: owner merge authorizes publication after the merged commit passes the required release checks."
+)
 DEFAULT_REQUIRED_CHECKS = frozenset({"Quality Gate"})
 RELEASE_TIMEOUT_KEYS = frozenset(
 	{
@@ -521,7 +524,7 @@ def validate_owner_merge(
 		if notes_adaptation is not None and notes_adaptation.group(1).casefold() not in changes_match.group(1).casefold():
 			raise ReleaseError("merged PR does not state required adaptation in its changes summary")
 		if re.search(
-			r"(?m)^-\s+Publication:\s+owner merge authorizes publication after the merged commit passes the required release checks\.?$",
+			rf"(?m)^-\s+{re.escape(PUBLICATION_DECLARATION)}$",
 			section,
 		) is None:
 			raise ReleaseError("merged PR does not declare owner-merge publication authorization")
