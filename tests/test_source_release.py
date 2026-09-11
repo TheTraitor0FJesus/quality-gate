@@ -545,6 +545,28 @@ def test_controller_rejects_a_checkout_bound_to_another_source(tmp_path: Path) -
 		controller.verify(SOURCE_SHA)
 
 
+def test_controller_hydrates_merge_authorization_from_full_pull_request(tmp_path: Path) -> None:
+	_root(tmp_path)
+	commit_pull = _pull_request(source_sha=SOURCE_SHA)
+	commit_pull["merged_by"] = None
+	api = FakeGitHub(
+		{
+			f"/repos/o/r/commits/{SOURCE_SHA}/pulls": [commit_pull],
+			"/repos/o/r/pulls/12": _pull_request(source_sha=SOURCE_SHA),
+			"/repos/o/r/releases?per_page=100": [
+				{"tag_name": "v2.0.5", "draft": False, "prerelease": False}
+			],
+			f"/repos/o/r/commits/{SOURCE_SHA}/check-runs?per_page=100": {
+				"check_runs": [
+					{"name": "Quality Gate", "status": "completed", "conclusion": "success"}
+				]
+			},
+		}
+	)
+
+	assert _controller(tmp_path, api).verify(SOURCE_SHA, authorization_only=True).status == "authorized"
+
+
 def test_missing_checks_and_artifact_source_mismatch_fail_closed(tmp_path: Path) -> None:
 	_root(tmp_path)
 	api = FakeGitHub(
