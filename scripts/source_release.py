@@ -816,6 +816,28 @@ class ReleaseController:
 		if actual_sha != source_sha:
 			raise ReleaseError("local source tree does not identify the reviewed source")
 
+	def _source_pull_requests(self, source_sha: str) -> list[dict[str, object]]:
+		"""Hydrate commit-associated pull requests with merge authorization details."""
+		pulls = _list(
+			self._get(f"{self.prefix}/commits/{source_sha}/pulls"),
+			"pull requests",
+		)
+		hydrated: list[dict[str, object]] = []
+		for pull_request in pulls:
+			if pull_request.get("merged_by") is not None:
+				hydrated.append(pull_request)
+				continue
+			number = pull_request.get("number")
+			if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+				hydrated.append(pull_request)
+				continue
+			detail = _object(
+				self._get(f"{self.prefix}/pulls/{number}"),
+				"pull request",
+			)
+			hydrated.append(detail)
+		return hydrated
+
 	def _upload_artifact(self, release: Mapping[str, object], artifact: ArtifactIdentity) -> None:
 		uploaded = self.api.upload(
 			str(release.get("upload_url") or ""),
@@ -903,9 +925,8 @@ class ReleaseController:
 		self._require_local_source(source_sha)
 		intent = load_release_intent(self.root)
 		validate_version_projections(self.root)
-		pulls = _list(self._get(f"{self.prefix}/commits/{source_sha}/pulls"), "pull requests")
 		validate_owner_merge(
-			pulls,
+			self._source_pull_requests(source_sha),
 			intent,
 			source_sha=source_sha,
 			owner=self.owner,
