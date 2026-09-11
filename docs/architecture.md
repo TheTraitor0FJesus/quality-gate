@@ -10,6 +10,7 @@ Use this map before non-trivial codebase questions, design work, or code changes
 - **CI integration** — `.github/workflows/quality.yml` is the reusable GitHub workflow boundary; it checks out `job.workflow_repository` at `job.workflow_sha`, bootstraps Python before reading component versions, selects a platform-specific immutable release asset, and uses `quality_gate/ci_release.py` plus `quality_gate/release_contract.py` to verify GitHub release immutability, the GitHub-reported asset digest, the exact unified inventory, every declared release file, and safe extraction paths; `.github/workflows/parity.yml` runs the release-backed Python/web/supplemental fixture on Windows and Linux from dispatch or schedule, uploads machine-readable results, and compares them in a separate job; every external Action is pinned to a full commit SHA, and pull requests pass explicit range refs to the same CLI gate.
 - **Project contract** — `quality_gate/contracts.py` is the source of truth for schema 2 repository, Python/web component, supplemental-test, verdict, and waiver models; `quality_gate/policy/biome.json` and `quality_gate/policy/biome.toml` are the pinned web-tool policy and platform inventory; `templates/quality-gate.toml` is the manifest shape and `templates/quality.yml` plus `templates/dependabot.yml` are the consumer CI shapes generated for a project by `$setup-repo`.
 - **Learning contract** — `docs/lessons.md` defines the English Markdown lesson format; `quality_gate/lessons.py` validates lessons and provides the audit and release readiness results.
+- **Release contract** — `.release/version.toml` is the only product-version authority and `.release/notes.md` is the reviewed compatibility intent; `scripts/source_release.py` owns merged-source authorization, required-check verification, immutable publication, and injected GitHub API behavior; `scripts/release_adapter.py` owns the existing Quality Gate package build, platform artifact identity, installation, and isolated runtime/audit check; `.github/workflows/release.yml` is the serialized post-merge entry point. When preparing a PR, changing a public contract, or configuring release setup, follow the local [release contract](release.md) and shared release policy.
 
 ## Flows
 
@@ -19,5 +20,10 @@ Use this map before non-trivial codebase questions, design work, or code changes
 - **Unified agent verification** — typed test-runner `scope: full` → repository-owned supplemental tests when declared → one staged Quality Gate; without a manifest, ordinary complete-suite discovery remains in use.
 - **Policy rollout** — validated `quality-gate` change → immutable release artifact → explicitly synchronized local and CI runtimes.
 - **Release control** — complete audit and full test suite → `quality_gate.release` source and
-  artifact validation in a disposable platform-safe workspace → human publication of an immutable
-  release → explicit consumer sync.
+  artifact validation in a disposable platform-safe workspace → serialized publication of an
+  immutable release → explicit consumer sync.
+- **Owner-merged publication** — default-branch merged source → `source_release.py verify` resolves
+  the owner-merged PR, reviewed `.release/` intent, latest stable baseline, and exact required
+  checks → the Linux/Windows adapter builds and verifies the existing ZIP inventory →
+  `source_release.py publish` creates or resumes one immutable release without replacing tags or
+  assets. A completed matching rerun verifies the release and does not upload again.

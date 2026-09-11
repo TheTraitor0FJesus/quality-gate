@@ -6,7 +6,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-
 import quality_gate.distribution as distribution
 from quality_gate.distribution import DistributionError, verify_release
 from quality_gate.release_contract import (
@@ -18,9 +17,9 @@ from quality_gate.release_contract import (
 )
 
 
-def _files() -> list[tuple[str, str]]:
+def _files(package_version: str = "2.0.6") -> list[tuple[str, str]]:
 	return [
-		("quality_gate-2.0.5-py3-none-any.whl", "artifact"),
+		(f"quality_gate-{package_version}-py3-none-any.whl", "artifact"),
 		*(
 			(f"{name}-{version}-py3-none-any.whl", "dependency")
 			for name, version in UNIFIED_RELEASE_DEPENDENCIES.items()
@@ -45,18 +44,18 @@ def _tools(platform: str = "linux") -> list[tuple[str, str, str]]:
 	]
 
 
-def _actual_paths(platform: str) -> list[str]:
+def _actual_paths(platform: str, package_version: str = "2.0.6") -> list[str]:
 	return [
 		"release.toml",
-		*(path for path, _kind in _files()),
+		*(path for path, _kind in _files(package_version)),
 		*(path for _name, _version, path in _tools(platform)),
 	]
 
 
-def _write_complete_release(root: Path, platform: str) -> None:
-	file_entries = _files()
+def _write_complete_release(root: Path, platform: str, package_version: str = "2.0.6") -> None:
+	file_entries = _files(package_version)
 	tool_entries = _tools(platform)
-	manifest = ["[release]", 'version = "v2.0.5"', ""]
+	manifest = ["[release]", f'version = "v{package_version}"', ""]
 	for path, kind in file_entries:
 		content = f"payload:{path}".encode()
 		file_path = root / path
@@ -92,7 +91,7 @@ def _write_complete_release(root: Path, platform: str) -> None:
 @pytest.mark.parametrize("platform", ["linux", "windows"])
 def test_unified_release_inventory_is_exact_for_each_platform(platform: str) -> None:
 	validate_release_inventory(
-		"v2.0.5",
+		"v2.0.6",
 		_files(),
 		_tools(platform),
 		platform=platform,
@@ -100,10 +99,21 @@ def test_unified_release_inventory_is_exact_for_each_platform(platform: str) -> 
 	)
 
 
+@pytest.mark.parametrize("platform", ["linux", "windows"])
+def test_previous_unified_release_inventory_remains_supported(platform: str) -> None:
+	validate_release_inventory(
+		"v2.0.5",
+		_files("2.0.5"),
+		_tools(platform),
+		platform=platform,
+		actual_paths=_actual_paths(platform, "2.0.5"),
+	)
+
+
 def test_unified_release_inventory_rejects_an_unexpected_actual_path() -> None:
 	with pytest.raises(ReleaseInventoryError, match="path inventory mismatch"):
 		validate_release_inventory(
-			"v2.0.5",
+			"v2.0.6",
 			_files(),
 			_tools("linux"),
 			platform="linux",
@@ -136,16 +146,16 @@ def test_unified_release_inventory_rejects_missing_or_mismatched_entries(
 	mutate(files, tools)
 
 	with pytest.raises(ReleaseInventoryError, match=message):
-		validate_release_inventory("v2.0.5", files, tools, platform="linux")
+		validate_release_inventory("v2.0.6", files, tools, platform="linux")
 
 
 def test_distribution_rejects_an_incomplete_unified_release(tmp_path: Path) -> None:
-	wheel = tmp_path / "quality_gate-2.0.5-py3-none-any.whl"
+	wheel = tmp_path / "quality_gate-2.0.6-py3-none-any.whl"
 	wheel.write_bytes(b"wheel")
 	digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
 	(tmp_path / "release.toml").write_text(
 		f'''[release]
-version = "v2.0.5"
+version = "v2.0.6"
 
 [[release.files]]
 path = "{wheel.name}"

@@ -1,0 +1,361 @@
+name: Quality Gate release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact merged source SHA to retry or publish."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+concurrency:
+  group: quality-gate-release
+  cancel-in-progress: false
+
+jobs:
+  resolve-source:
+    name: Resolve exact merged source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      release_required: ${{ steps.decision.outputs.release_required }}
+    steps:
+      - name: Resolve the exact source SHA
+        id: source
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+          PUSH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          source_sha="${SOURCE_SHA_INPUT:-$PUSH_SHA}"
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the exact source for the release decision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.source.outputs.source_sha }}
+
+      - name: Resolve whether publication is required
+        id: decision
+        shell: python
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          notes = Path(".release/notes.md").read_text(encoding="utf-8")
+          match = re.search(r"(?m)^Impact:\s*(MAJOR|MINOR|PATCH|NONE)\s*$", notes)
+          if match is None:
+              raise SystemExit("release: unchecked - release intent has no supported impact")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              print(f"release_required={str(match.group(1) != 'NONE').lower()}", file=output)
+
+  authorize-no-release:
+    name: Verify the no-release decision
+    needs: resolve-source
+    if: needs.resolve-source.outputs.release_required == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Check out the exact merged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify owner authorization and required checks
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+        shell: bash
+        run: python scripts/source_release.py verify --source-sha "$SOURCE_SHA" --wait-for-checks
+
+  authorize-release:
+    name: Verify release authorization and checks
+    needs: resolve-source
+    if: needs.resolve-source.outputs.release_required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Check out the exact merged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify owner authorization and required checks
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+        shell: bash
+        run: python scripts/source_release.py verify --source-sha "$SOURCE_SHA" --authorization-only --wait-for-checks
+
+  build-and-verify:
+    name: Verify ${{ matrix.platform }} package
+    needs: [resolve-source, authorize-release]
+    if: needs.resolve-source.outputs.release_required == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+          - platform: windows
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Check out the exact merged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
+
+      - name: Install the declared test and build dependencies
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build, verify, and prepare the existing package artifact
+        shell: python
+        env:
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          from scripts.source_release import load_release_timeout
+
+          root = Path.cwd()
+          subprocess_timeout = load_release_timeout(root, "subprocess_seconds")
+          output = Path(os.environ["RUNNER_TEMP"]) / "quality-gate-release" / os.environ["RELEASE_PLATFORM"]
+          output.mkdir(parents=True, exist_ok=True)
+          subprocess.run(
+              [sys.executable, "-m", "pip", "install", "--require-hashes", "--only-binary=:all:", "-r", ".release/release-requirements.txt"],
+              check=True,
+              timeout=subprocess_timeout,
+          )
+          subprocess.run(
+              [sys.executable, "-m", "pip", "install", "--no-build-isolation", "--no-deps", "-e", "."],
+              check=True,
+              timeout=subprocess_timeout,
+          )
+          build = subprocess.run(
+              [sys.executable, "scripts/release_adapter.py", "build", "--source-sha", os.environ["SOURCE_SHA"], "--platform", os.environ["RELEASE_PLATFORM"], "--output", str(output)],
+              check=True,
+              capture_output=True,
+              text=True,
+              timeout=subprocess_timeout,
+          )
+          identity = json.loads(build.stdout)
+          subprocess.run(
+              [sys.executable, "scripts/release_adapter.py", "runtime-check", "--source-sha", os.environ["SOURCE_SHA"], "--artifact", identity["path"]],
+              check=True,
+              timeout=subprocess_timeout,
+          )
+          cache = Path(os.environ["RUNNER_TEMP"]) / "quality-gate-cache" / "quality-gate"
+          subprocess.run(
+              [
+                  sys.executable,
+                  "-m",
+                  "quality_gate",
+                  "--root",
+                  str(root),
+                  "sync",
+                  "--source",
+                  identity["path"],
+                  "--version",
+                  f"v{identity['version']}",
+                  "--cache-dir",
+                  str(cache),
+              ],
+              check=True,
+              timeout=subprocess_timeout,
+          )
+          subprocess.run(
+              [sys.executable, "-m", "quality_gate", "--root", str(root), "setup", "--cache-dir", str(cache)],
+              check=True,
+              timeout=subprocess_timeout,
+          )
+          test_environment = os.environ.copy()
+          cache_variable = "LOCALAPPDATA" if os.name == "nt" else "XDG_CACHE_HOME"
+          test_environment[cache_variable] = str(cache.parent)
+          test_environment["QUALITY_GATE_POLICY_ROOT"] = str(cache / "releases" / f"v{identity['version']}")
+          subprocess.run(
+              [sys.executable, "-m", "pytest", "tests", "-p", "no:cacheprovider", "-q", "--tb=long", "-ra"],
+              check=True,
+              env=test_environment,
+              timeout=subprocess_timeout,
+          )
+          package = Path(identity["path"])
+          published_package = output / package.name
+          if package.resolve() != published_package.resolve():
+              import shutil
+              shutil.copy2(package, published_package)
+          identity["path"] = str(published_package)
+          (output / "artifact.json").write_text(json.dumps(identity) + "\n", encoding="utf-8")
+
+      - name: Upload the verified platform artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        with:
+          name: quality-gate-release-${{ matrix.platform }}
+          path: ${{ runner.temp }}/quality-gate-release/${{ matrix.platform }}
+          if-no-files-found: error
+
+  verify-source:
+    name: Verify merged source and artifacts
+    needs: [resolve-source, authorize-release, build-and-verify]
+    if: needs.resolve-source.outputs.release_required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Check out the exact merged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
+
+      - name: Download both verified platform artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: quality-gate-release-*
+          path: ${{ runner.temp }}/quality-gate-release
+          merge-multiple: false
+
+      - name: Verify owner authorization, version, baseline, checks, source, and artifacts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+        shell: python
+        run: |
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          from scripts.source_release import load_release_timeout
+
+          root = Path.cwd()
+          subprocess_timeout = load_release_timeout(root, "subprocess_seconds")
+          artifact_root = Path(os.environ["RUNNER_TEMP"]) / "quality-gate-release"
+          identities = []
+          for metadata in sorted(artifact_root.glob("quality-gate-release-*/artifact.json")):
+              identity = json.loads(metadata.read_text(encoding="utf-8"))
+              identity["path"] = str(metadata.parent / identity["name"])
+              identities.append(identity)
+          if len(identities) != 2:
+              raise SystemExit("release: unchecked - both platform artifact identities are required")
+          manifest = artifact_root / "artifacts.json"
+          manifest.write_text(json.dumps(identities) + "\n", encoding="utf-8")
+          subprocess.run(
+              [sys.executable, "scripts/source_release.py", "verify", "--source-sha", os.environ["SOURCE_SHA"], "--artifact-manifest", str(manifest), "--wait-for-checks"],
+              check=True,
+              timeout=subprocess_timeout,
+          )
+
+  publish:
+    name: Publish immutable release
+    needs: [resolve-source, authorize-release, verify-source]
+    if: needs.resolve-source.outputs.release_required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Check out the exact merged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
+
+      - name: Download both verified platform artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: quality-gate-release-*
+          path: ${{ runner.temp }}/quality-gate-release
+          merge-multiple: false
+
+      - name: Publish or resume the exact immutable release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+        shell: python
+        run: |
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          from scripts.source_release import load_release_timeout
+
+          root = Path.cwd()
+          subprocess_timeout = load_release_timeout(root, "subprocess_seconds")
+          artifact_root = Path(os.environ["RUNNER_TEMP"]) / "quality-gate-release"
+          identities = []
+          for metadata in sorted(artifact_root.glob("quality-gate-release-*/artifact.json")):
+              identity = json.loads(metadata.read_text(encoding="utf-8"))
+              identity["path"] = str(metadata.parent / identity["name"])
+              identities.append(identity)
+          if len(identities) != 2:
+              raise SystemExit("release: unchecked - both platform artifact identities are required")
+          manifest = artifact_root / "artifacts.json"
+          manifest.write_text(json.dumps(identities) + "\n", encoding="utf-8")
+          subprocess.run(
+              [sys.executable, "scripts/source_release.py", "publish", "--source-sha", os.environ["SOURCE_SHA"], "--artifact-manifest", str(manifest)],
+              check=True,
+              timeout=subprocess_timeout,
+          )

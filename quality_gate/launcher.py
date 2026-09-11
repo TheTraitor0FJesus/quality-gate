@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .contracts import Manifest, load_manifest
-from .distribution import PolicyCache, ReleaseManifest, load_release_manifest
+from .distribution import DistributionError, PolicyCache, ReleaseManifest, load_release_manifest
 from .runtime import RuntimeInspection, RuntimeManager, RuntimeUnavailable, runtime_identity
+
+_POLICY_RELEASE = re.compile(r"^v\d+\.\d+\.\d+$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,9 +32,48 @@ def prepare(
 	repository_root: Path | None = None,
 ) -> PreparedEnvironment:
 	"""Select the manifest release and optionally prepare every Python runtime."""
+	return _prepare(
+		root,
+		cache_dir=cache_dir,
+		create_runtimes=create_runtimes,
+		repository_root=repository_root,
+	)
+
+
+def prepare_bootstrap(
+	root: Path,
+	*,
+	policy_release: str,
+	cache_dir: Path | None = None,
+	create_runtimes: bool = False,
+	repository_root: Path | None = None,
+) -> PreparedEnvironment:
+	"""Prepare a previous immutable policy release for this repository's CI bootstrap."""
+	return _prepare(
+		root,
+		cache_dir=cache_dir,
+		create_runtimes=create_runtimes,
+		repository_root=repository_root,
+		policy_release=policy_release,
+	)
+
+
+def _prepare(
+	root: Path,
+	*,
+	cache_dir: Path | None,
+	create_runtimes: bool,
+	repository_root: Path | None,
+	policy_release: str | None = None,
+) -> PreparedEnvironment:
+	"""Prepare one selected policy release and optionally every Python runtime."""
 	actual_root = root.resolve()
 	identity_root = (repository_root or actual_root).resolve()
 	manifest = load_manifest(actual_root)
+	if policy_release is not None:
+		if _POLICY_RELEASE.fullmatch(policy_release) is None:
+			raise DistributionError("policy release override must use vMAJOR.MINOR.PATCH")
+		manifest = replace(manifest, policy_release=policy_release)
 	cache = PolicyCache(cache_dir)
 	policy_root = cache.select(manifest.policy_release)
 	release_manifest = load_release_manifest(policy_root)

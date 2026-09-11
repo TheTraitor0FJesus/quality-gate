@@ -1,0 +1,22 @@
+# Fixed external inputs used to build the platform package assets.
+
+[timeouts]
+github_api_seconds = 60
+external_download_seconds = 120
+subprocess_seconds = 900
+check_wait_seconds = 900
+check_poll_seconds = 10
+
+[bootstrap]
+policy_release = "v2.0.5"
+
+[gitleaks]
+version = "8.30.1"
+
+[gitleaks.platforms.linux]
+url = "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz"
+sha256 = "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+[gitleaks.platforms.windows]
+url = "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_windows_x64.zip"
+sha256 = "d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e"

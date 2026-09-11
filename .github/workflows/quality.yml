@@ -93,6 +93,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Sync the manifest's immutable Quality Gate release
+        id: policy_release
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -106,17 +107,42 @@ jobs:
           fi
           QUALITY_GATE_RELEASE_URL="https://github.com/TheTraitor0FJesus/quality-gate/releases/download/${QUALITY_GATE_RELEASE}"
           QUALITY_GATE_RELEASE_API="https://api.github.com/repos/TheTraitor0FJesus/quality-gate/releases/tags/${QUALITY_GATE_RELEASE}"
+          policy_bootstrap=false
           export QUALITY_GATE_ASSET_NAME="quality-gate-${QUALITY_GATE_RELEASE}-${RUNNER_OS}.zip"
           export QUALITY_GATE_RELEASE_DIR="$RUNNER_TEMP/quality-gate-release"
           export QUALITY_GATE_ARCHIVE="$RUNNER_TEMP/quality-gate-release.zip"
           export QUALITY_GATE_RELEASE_METADATA="$RUNNER_TEMP/quality-gate-release.json"
           mkdir -p "$QUALITY_GATE_RELEASE_DIR"
-          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 --max-filesize 1048576 \
+          api_status="$(curl --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 --max-filesize 1048576 \
             --header "Accept: application/vnd.github+json" \
             --header "Authorization: Bearer ${GITHUB_TOKEN}" \
             --header "X-GitHub-Api-Version: 2026-03-10" \
             "$QUALITY_GATE_RELEASE_API" \
-            --output "$QUALITY_GATE_RELEASE_METADATA"
+            --output "$QUALITY_GATE_RELEASE_METADATA" \
+            --write-out '%{http_code}')"
+          if [[ "$api_status" == "404" && "$GITHUB_REPOSITORY" == "TheTraitor0FJesus/quality-gate" ]]; then
+            QUALITY_GATE_RELEASE="$(python -c 'import tomllib; print(tomllib.load(open(".release/release-tools.toml", "rb"))["bootstrap"]["policy_release"])')"
+            if [[ ! "$QUALITY_GATE_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "invalid bootstrap policy release: $QUALITY_GATE_RELEASE" >&2
+              exit 2
+            fi
+            policy_bootstrap=true
+            export QUALITY_GATE_RELEASE
+            QUALITY_GATE_RELEASE_URL="https://github.com/TheTraitor0FJesus/quality-gate/releases/download/${QUALITY_GATE_RELEASE}"
+            QUALITY_GATE_RELEASE_API="https://api.github.com/repos/TheTraitor0FJesus/quality-gate/releases/tags/${QUALITY_GATE_RELEASE}"
+            export QUALITY_GATE_ASSET_NAME="quality-gate-${QUALITY_GATE_RELEASE}-${RUNNER_OS}.zip"
+            api_status="$(curl --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 --max-filesize 1048576 \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2026-03-10" \
+              "$QUALITY_GATE_RELEASE_API" \
+              --output "$QUALITY_GATE_RELEASE_METADATA" \
+              --write-out '%{http_code}')"
+          fi
+          if [[ "$api_status" != "200" ]]; then
+            echo "Quality Gate release metadata request returned HTTP $api_status" >&2
+            exit 2
+          fi
           curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 --max-filesize 104857600 \
             "${QUALITY_GATE_RELEASE_URL}/${QUALITY_GATE_ASSET_NAME}" \
             --output "$QUALITY_GATE_ARCHIVE"
@@ -129,7 +155,13 @@ jobs:
           test -f "$QUALITY_GATE_WHEEL"
           python -m pip install --no-deps "$QUALITY_GATE_WHEEL"
           quality-gate sync --source "$QUALITY_GATE_RELEASE_DIR" --version "$QUALITY_GATE_RELEASE"
-          quality-gate setup
+          echo "release=$QUALITY_GATE_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "bootstrap=$policy_bootstrap" >> "$GITHUB_OUTPUT"
+          if [[ "$policy_bootstrap" == "true" ]]; then
+            python scripts/release_adapter.py bootstrap-setup --policy-release "$QUALITY_GATE_RELEASE"
+          else
+            quality-gate setup
+          fi
 
       - name: Run the complete Quality Gate for a pull request range
         if: github.event_name == 'pull_request'
@@ -137,17 +169,30 @@ jobs:
         env:
           QUALITY_GATE_BASE: ${{ github.event.pull_request.base.sha }}
           QUALITY_GATE_HEAD: ${{ github.event.pull_request.head.sha }}
+          QUALITY_GATE_POLICY_RELEASE: ${{ steps.policy_release.outputs.release }}
+          QUALITY_GATE_POLICY_BOOTSTRAP: ${{ steps.policy_release.outputs.bootstrap }}
         run: |
           set -euo pipefail
-          quality-gate check --base "$QUALITY_GATE_BASE" --head "$QUALITY_GATE_HEAD"
+          if [[ "$QUALITY_GATE_POLICY_BOOTSTRAP" == "true" ]]; then
+            python scripts/release_adapter.py bootstrap-check --policy-release "$QUALITY_GATE_POLICY_RELEASE" --base "$QUALITY_GATE_BASE" --head "$QUALITY_GATE_HEAD"
+          else
+            quality-gate check --base "$QUALITY_GATE_BASE" --head "$QUALITY_GATE_HEAD"
+          fi
 
       - name: Repeat the gate and report direct default-branch pushes
         if: github.event_name == 'push'
         shell: bash
+        env:
+          QUALITY_GATE_POLICY_RELEASE: ${{ steps.policy_release.outputs.release }}
+          QUALITY_GATE_POLICY_BOOTSTRAP: ${{ steps.policy_release.outputs.bootstrap }}
         run: |
           set -euo pipefail
           echo "::notice title=Quality Gate::Default-branch pushes are detection-only on private GitHub Free repositories; local pre-push policy and pull requests remain required."
-          quality-gate check --head "$GITHUB_SHA"
+          if [[ "$QUALITY_GATE_POLICY_BOOTSTRAP" == "true" ]]; then
+            python scripts/release_adapter.py bootstrap-check --policy-release "$QUALITY_GATE_POLICY_RELEASE" --head "$GITHUB_SHA"
+          else
+            quality-gate check --head "$GITHUB_SHA"
+          fi
 
       - name: Run the release-backed parity fixture
         if: inputs.parity

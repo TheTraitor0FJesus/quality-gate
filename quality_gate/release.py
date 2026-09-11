@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import logging
 import os
 import re
@@ -22,6 +23,14 @@ from .lessons import ReleaseBlockedError, ensure_release_ready
 from .runner import required_documents_result
 
 RELEASE_VERSION = re.compile(r"^v\d+\.\d+\.\d+$")
+PACKAGE_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+RELEASE_NOTE_HEADINGS = (
+	"Interface",
+	"Integrations",
+	"Configuration",
+	"Persisted data",
+	"Delivery/runtime",
+)
 MAX_RELEASE_VERSION_LENGTH = 32
 MAX_RELEASE_VERSION_COMPONENT_LENGTH = 8
 WINDOWS_MAX_WORKSPACE_PATH_CHARS = 48
@@ -55,6 +64,58 @@ def _project_version(root: Path) -> str:
 	return version.strip()
 
 
+def _version_authority(root: Path) -> str:
+	try:
+		raw = tomllib.loads((root / ".release" / "version.toml").read_text(encoding="utf-8"))
+	except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+		raise ReleaseControllerError(".release/version.toml is missing or invalid") from error
+	if set(raw) != {"version"}:
+		raise ReleaseControllerError(
+			".release/version.toml must contain exactly one top-level version"
+		)
+	version = raw.get("version")
+	if not isinstance(version, str) or PACKAGE_VERSION.fullmatch(version) is None:
+		raise ReleaseControllerError(".release/version.toml version must use MAJOR.MINOR.PATCH")
+	return version
+
+
+def _runtime_version(root: Path) -> str:
+	try:
+		tree = ast.parse(
+			(root / "quality_gate" / "__init__.py").read_text(encoding="utf-8"),
+			filename="quality_gate/__init__.py",
+		)
+	except (OSError, UnicodeError, SyntaxError) as error:
+		raise ReleaseControllerError("runtime version projection is unreadable") from error
+	for node in ast.walk(tree):
+		if isinstance(node, ast.Assign) and any(
+			isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets
+		):
+			if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+				return node.value.value
+			break
+	raise ReleaseControllerError("runtime version projection is missing")
+
+
+def _release_notes(root: Path, version: str) -> None:
+	try:
+		notes = (root / ".release" / "notes.md").read_text(encoding="utf-8")
+	except (OSError, UnicodeError) as error:
+		raise ReleaseControllerError(".release/notes.md is missing or unreadable") from error
+	if not re.search(rf"(?m)^Version:\s*{re.escape(version)}\s*$", notes):
+		raise ReleaseControllerError("release notes do not identify the version authority")
+	if re.search(r"(?m)^Impact:\s*(?:MAJOR|MINOR|PATCH)\s*$", notes) is None:
+		raise ReleaseControllerError("release notes do not identify the release impact")
+	if re.search(r"(?m)^Changes:\s*\S+", notes) is None:
+		raise ReleaseControllerError("release notes do not identify user-visible changes")
+	if re.search(r"(?m)^Required adaptation:\s*\S+", notes) is None:
+		raise ReleaseControllerError("release notes do not identify required adaptation")
+	if tuple(re.findall(r"(?m)^##\s+(.+?)\s*$", notes)) != RELEASE_NOTE_HEADINGS:
+		raise ReleaseControllerError(
+			"release notes headings must be exactly " + ", ".join(RELEASE_NOTE_HEADINGS)
+		)
+
+
 def _expected_version(manifest: Manifest, requested: str | None) -> str:
 	version = requested or manifest.policy_release
 	components = version[1:].split(".") if version.startswith("v") else ()
@@ -81,10 +142,18 @@ def validate_release_source(root: Path | str = ".", *, version: str | None = Non
 		raise ReleaseControllerError(f"manifest is unverifiable: {error}") from error
 	release_version = _expected_version(manifest, version)
 	project_version = _project_version(actual_root)
-	if f"v{project_version}" != release_version:
+	authoritative_version = _version_authority(actual_root)
+	if project_version != authoritative_version:
+		raise ReleaseControllerError(
+			f"project.version {project_version} does not match .release/version.toml"
+		)
+	if _runtime_version(actual_root) != authoritative_version:
+		raise ReleaseControllerError("runtime __version__ does not match .release/version.toml")
+	if f"v{authoritative_version}" != release_version:
 		raise ReleaseControllerError(
 			f"project.version {project_version} does not match release {release_version}"
 		)
+	_release_notes(actual_root, authoritative_version)
 	documents = required_documents_result(actual_root, manifest)
 	if documents.status is not Status.PASSED:
 		missing = documents.findings[0].path if documents.findings else "required documents"

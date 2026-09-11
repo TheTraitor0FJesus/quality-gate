@@ -33,7 +33,7 @@ from .contracts import (
 )
 from .distribution import DistributionError
 from .integrity import documentation_results, git_integrity_results, workflow_result
-from .launcher import PreparedEnvironment, prepare
+from .launcher import PreparedEnvironment, prepare, prepare_bootstrap
 from .lessons import lessons_result
 from .reporting import render
 from .runtime import RuntimeUnavailable
@@ -1782,6 +1782,7 @@ def _check_snapshot(
 	base: str | None = None,
 	head: str | None = None,
 	mode: Literal["check", "audit"] = "check",
+	policy_release: str | None = None,
 ) -> Verdict:
 	actual_root = actual_root.resolve()
 	try:
@@ -1805,9 +1806,14 @@ def _check_snapshot(
 	results.extend(web_budget_results(actual_root, manifest))
 	try:
 		components = load_components(actual_root)
-		prepared = prepare(
-			actual_root,
-			repository_root=repository_root or actual_root,
+		prepared = (
+			prepare_bootstrap(
+				actual_root,
+				policy_release=policy_release,
+				repository_root=repository_root or actual_root,
+			)
+			if policy_release is not None
+			else prepare(actual_root, repository_root=repository_root or actual_root)
 		)
 	except QualityGateError as error:
 		return Verdict((*results, _error_result(error)))
@@ -1904,6 +1910,7 @@ def _run_snapshot(
 	base: str | None = None,
 	head: str | None = None,
 	mode: Literal["check", "audit"] = "check",
+	policy_release: str | None = None,
 ) -> Verdict:
 	"""Run one candidate snapshot and convert snapshot failures to a verdict."""
 	try:
@@ -1916,6 +1923,7 @@ def _run_snapshot(
 				base=base,
 				head=head,
 				mode=mode,
+				policy_release=policy_release,
 			)
 	except SnapshotError as error:
 		quality_error = QualityGateError(
@@ -1925,6 +1933,25 @@ def _run_snapshot(
 			recovery_action=f"restore a stable supported Git index and run {mode} again",
 		)
 		verdict = Verdict((_error_result(quality_error),))
+	return verdict
+
+
+def bootstrap_check(
+	root: Path,
+	*,
+	policy_release: str,
+	base: str | None = None,
+	head: str | None = None,
+) -> Verdict:
+	"""Run the current checkout against a previous immutable policy release."""
+	actual_root = repository_root(root)
+	verdict = _run_snapshot(
+		actual_root,
+		base=base,
+		head=head,
+		policy_release=policy_release,
+	)
+	emit(render(verdict))
 	return verdict
 
 

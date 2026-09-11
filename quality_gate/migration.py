@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .contracts import ValidationError
+from .release_contract import UNIFIED_RELEASE
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +56,9 @@ def _component(value: object, index: int) -> LegacyComponent:
 
 
 def migration_proposal(
-	root: Path | str = ".", manifest_name: str = "quality-gate.toml", policy_release: str = "v2.0.5"
+	root: Path | str = ".",
+	manifest_name: str = "quality-gate.toml",
+	policy_release: str = UNIFIED_RELEASE,
 ) -> str:
 	path = Path(root).resolve() / manifest_name
 	try:
