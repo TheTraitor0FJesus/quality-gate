@@ -224,6 +224,12 @@ def test_owner_merge_requires_authorization_for_the_exact_source() -> None:
 		lambda pr: pr.update(merged_by={"login": "another-user"}),
 		lambda pr: pr.update(merge_commit_sha=OTHER_SHA),
 		lambda pr: pr.update(body="approved but no release declaration"),
+		lambda pr: pr.update(
+			body=str(pr["body"]).replace(
+				"Publication: owner merge authorizes publication after the merged commit passes the required release checks.",
+				"Publication: owner merge authorizes publication after the merged commit passes the required release checks",
+			)
+		),
 	):
 		candidate = _pull_request()
 		mutation(candidate)
