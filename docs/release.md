@@ -30,6 +30,8 @@ Before creating or resuming a draft, the controller checks GitHub's immutable-re
 
 The publish job reads the repository `RELEASE_TOKEN` secret. It must be a fine-grained token limited to this repository with `Administration: read`, `Contents: write`, `Pull requests: read`, `Checks: read`, and `Workflows: write`; the secret is passed only to the publish job. Verification jobs continue using the built-in read-only `GITHUB_TOKEN`.
 
+GitHub's tag lookup returns only published releases, so the controller discovers resumable drafts through the authenticated release list and validates each draft's `target_commitish` against the exact source before uploading assets. It rechecks the Git tag after promotion.
+
 ## Artifacts and source identity
 
 `scripts/release_adapter.py` is the only Quality Gate-specific seam. It builds the existing Linux and Windows ZIP assets, preserves wheel installation and the unified inventory, and returns the common identity shape: source SHA, plain version, platform, asset name, and SHA-256 digest. `verify` and `runtime-check` run the existing release controller against that exact source and artifact. Fixed Gitleaks URLs/digests are recorded in `.release/release-tools.toml`; the publisher records the merged source SHA and both platform asset digests in the immutable GitHub Release.

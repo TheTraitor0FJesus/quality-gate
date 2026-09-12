@@ -700,7 +700,7 @@ def verify_published_release(
 def verify_draft_release(
 	release: Mapping[str, object],
 	*,
-	tag_sha: str,
+	release_source_sha: str,
 	source_sha: str,
 	intent: ReleaseIntent,
 	artifacts: Sequence[ArtifactIdentity],
@@ -710,7 +710,7 @@ def verify_draft_release(
 		release.get("tag_name") != intent.tag
 		or release.get("draft") is not True
 		or release.get("prerelease") is True
-		or tag_sha != source_sha
+		or release_source_sha != source_sha
 		or release.get("body") != _expected_body(intent, source_sha)
 	):
 		raise ReleaseError("conflicting unpublished release cannot be resumed")
@@ -770,6 +770,16 @@ class ReleaseController:
 		except GitHubNotFound:
 			return None
 
+	def _optional_draft_release(self, tag: str) -> Mapping[str, object] | None:
+		drafts = [
+			release
+			for release in self._releases()
+			if release.get("tag_name") == tag and release.get("draft") is True
+		]
+		if len(drafts) > 1:
+			raise ReleaseError("multiple draft releases use the same release tag")
+		return drafts[0] if drafts else None
+
 	def _require_immutable_releases(self) -> None:
 		try:
 			settings = _object(self._get(f"{self.prefix}/immutable-releases"), "immutable release settings")
@@ -812,6 +822,16 @@ class ReleaseController:
 			raise ReleaseError("release tag does not identify the reviewed source")
 		return tag_sha
 
+	@staticmethod
+	def _draft_source(release: Mapping[str, object]) -> str:
+		target = release.get("target_commitish")
+		if not isinstance(target, str):
+			raise ReleaseError("draft release does not identify the reviewed source")
+		try:
+			return validate_source_sha(target)
+		except ReleaseError as error:
+			raise ReleaseError("draft release does not identify the reviewed source") from error
+
 	def _require_local_source(self, source_sha: str) -> None:
 		"""Require the source files being read to come from the reviewed commit."""
 		actual_sha = validate_source_sha(self.source_sha_resolver(self.root))
@@ -853,14 +873,14 @@ class ReleaseController:
 		self,
 		release: Mapping[str, object],
 		*,
-		tag_sha: str,
 		source_sha: str,
 		intent: ReleaseIntent,
 		artifacts: Sequence[ArtifactIdentity],
 	) -> None:
+		release_source_sha = self._draft_source(release)
 		_, missing = verify_draft_release(
 			release,
-			tag_sha=tag_sha,
+			release_source_sha=release_source_sha,
 			source_sha=source_sha,
 			intent=intent,
 			artifacts=artifacts,
@@ -878,7 +898,7 @@ class ReleaseController:
 		body: str,
 		artifacts: Sequence[ArtifactIdentity],
 	) -> None:
-		self.api.post(
+		release = self.api.post(
 			f"{self.prefix}/releases",
 			{
 				"tag_name": intent.tag,
@@ -889,12 +909,17 @@ class ReleaseController:
 				"prerelease": False,
 			},
 		)
-		release = self._optional_release(intent.tag)
-		if release is None:
-			raise ReleaseError("GitHub did not return the created draft release")
-		self._require_tag_source(intent.tag, source_sha)
-		for artifact in artifacts:
-			self._upload_artifact(release, artifact)
+		release_source_sha = self._draft_source(release)
+		_, missing = verify_draft_release(
+			release,
+			release_source_sha=release_source_sha,
+			source_sha=source_sha,
+			intent=intent,
+			artifacts=artifacts,
+		)
+		by_name = {artifact.name: artifact for artifact in artifacts}
+		for name in missing:
+			self._upload_artifact(release, by_name[name])
 		self.api.patch(f"{self.prefix}/releases/{release.get('id')}", {"draft": False})
 
 	def _verify_completed(
@@ -975,6 +1000,8 @@ class ReleaseController:
 		if not artifacts:
 			raise ReleaseError("publish requires verified Linux and Windows artifacts")
 		existing = self._optional_release(intent.tag)
+		if existing is None:
+			existing = self._optional_draft_release(intent.tag)
 		if existing is not None:
 			if existing.get("draft") is not True:
 				return self._verify_completed(intent=intent, source_sha=source_sha, artifacts=artifacts)
@@ -982,7 +1009,6 @@ class ReleaseController:
 		if existing is not None:
 			self._resume_draft(
 				existing,
-				tag_sha=self._require_tag_source(intent.tag, source_sha),
 				source_sha=source_sha,
 				intent=intent,
 				artifacts=artifacts,
