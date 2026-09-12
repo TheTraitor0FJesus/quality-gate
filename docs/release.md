@@ -28,6 +28,8 @@ The only publisher is `.github/workflows/release.yml` after the owner-merged PR 
 
 Before creating or resuming a draft, the controller checks GitHub's immutable-releases repository setting and fails closed when it is unavailable or disabled. The setting must be enabled by repository administration before the first publication.
 
+The publish job reads the repository `RELEASE_TOKEN` secret. It must be a fine-grained token limited to this repository with `Administration: read`, `Contents: write`, `Pull requests: read`, `Checks: read`, and `Workflows: write`; the secret is passed only to the publish job. Verification jobs continue using the built-in read-only `GITHUB_TOKEN`.
+
 ## Artifacts and source identity
 
 `scripts/release_adapter.py` is the only Quality Gate-specific seam. It builds the existing Linux and Windows ZIP assets, preserves wheel installation and the unified inventory, and returns the common identity shape: source SHA, plain version, platform, asset name, and SHA-256 digest. `verify` and `runtime-check` run the existing release controller against that exact source and artifact. Fixed Gitleaks URLs/digests are recorded in `.release/release-tools.toml`; the publisher records the merged source SHA and both platform asset digests in the immutable GitHub Release.

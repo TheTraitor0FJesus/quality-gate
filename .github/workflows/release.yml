@@ -336,7 +336,7 @@ jobs:
 
       - name: Publish or resume the exact immutable release
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
         shell: python
