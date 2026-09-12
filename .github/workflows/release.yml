@@ -176,6 +176,11 @@ jobs:
           output = Path(os.environ["RUNNER_TEMP"]) / "quality-gate-release" / os.environ["RELEASE_PLATFORM"]
           output.mkdir(parents=True, exist_ok=True)
           subprocess.run(
+              [sys.executable, "-m", "pip", "install", "--require-hashes", "--only-binary=:all:", "-r", ".release/build-requirements.txt"],
+              check=True,
+              timeout=subprocess_timeout,
+          )
+          subprocess.run(
               [sys.executable, "-m", "pip", "install", "--require-hashes", "--only-binary=:all:", "-r", ".release/release-requirements.txt"],
               check=True,
               timeout=subprocess_timeout,
