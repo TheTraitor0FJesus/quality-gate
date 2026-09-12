@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+from io import BytesIO
 from pathlib import Path
+from urllib.request import Request
 
 import pytest
+from scripts import source_release
 from scripts.source_release import (
 	ArtifactIdentity,
 	GitHubNotFound,
@@ -549,10 +552,12 @@ def test_controller_hydrates_merge_authorization_from_full_pull_request(tmp_path
 	_root(tmp_path)
 	commit_pull = _pull_request(source_sha=SOURCE_SHA)
 	commit_pull["merged_by"] = None
+	full_pull = _pull_request(source_sha=SOURCE_SHA)
+	full_pull["body"] = str(full_pull["body"]).replace("\n", "\r\n")
 	api = FakeGitHub(
 		{
 			f"/repos/o/r/commits/{SOURCE_SHA}/pulls": [commit_pull],
-			"/repos/o/r/pulls/12": _pull_request(source_sha=SOURCE_SHA),
+			"/repos/o/r/pulls/12": full_pull,
 			"/repos/o/r/releases?per_page=100": [
 				{"tag_name": "v2.0.5", "draft": False, "prerelease": False}
 			],
@@ -565,6 +570,41 @@ def test_controller_hydrates_merge_authorization_from_full_pull_request(tmp_path
 	)
 
 	assert _controller(tmp_path, api).verify(SOURCE_SHA, authorization_only=True).status == "authorized"
+
+
+def test_github_api_uses_merge_compatible_version(monkeypatch: pytest.MonkeyPatch) -> None:
+	class Response:
+		headers: dict[str, str] = {}
+
+		def __init__(self) -> None:
+			self._body = BytesIO(b"{}")
+
+		def __enter__(self) -> Response:
+			return self
+
+		def __exit__(self, *args: object) -> None:
+			return None
+
+		def read(self, _size: int) -> bytes:
+			return self._body.read(_size)
+
+	requests: list[Request] = []
+
+	def fake_urlopen(request: Request, timeout: float) -> Response:
+		assert timeout == 1
+		requests.append(request)
+		return Response()
+
+	monkeypatch.setattr(source_release, "urlopen", fake_urlopen)
+	api = source_release.HttpGitHubApi(
+		"o/r",
+		"token",
+		api_url="https://api.example",
+		timeout_seconds=1,
+	)
+
+	assert api.get("/pulls/12") == {}
+	assert requests[0].headers["X-github-api-version"] == "2022-11-28"
 
 
 def test_missing_checks_and_artifact_source_mismatch_fail_closed(tmp_path: Path) -> None:
