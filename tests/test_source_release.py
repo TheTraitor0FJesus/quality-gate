@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 from urllib.request import Request
@@ -28,9 +29,22 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 
 class FakeGitHub:
 	def __init__(self, values: dict[str, object]) -> None:
-		self.values = values
+		self.values = deepcopy(values)
 		self.uploaded: list[str] = []
 		self.patched: list[dict[str, object]] = []
+
+	def _stored_releases(self) -> list[dict[str, object]]:
+		result: list[dict[str, object]] = []
+		for value in self.values.values():
+			if isinstance(value, dict) and value.get("id") == 7:
+				result.append(value)
+			elif isinstance(value, list):
+				result.extend(
+					item
+					for item in value
+					if isinstance(item, dict) and item.get("id") == 7
+				)
+		return result
 
 	def get(self, path: str) -> object:
 		if path not in self.values:
@@ -52,29 +66,41 @@ class FakeGitHub:
 			"immutable": False,
 			**payload,
 		}
-		self.values[f"{prefix}/releases/tags/{payload['tag_name']}"] = release
-		self.values[f"{prefix}/git/ref/tags/{payload['tag_name']}"] = {
-			"object": {"sha": payload["target_commitish"], "type": "commit"}
-		}
+		if payload.get("draft") is True:
+			releases = self.values.setdefault(f"{prefix}/releases?per_page=100", [])
+			assert isinstance(releases, list)
+			releases.insert(0, release)
+		else:
+			self.values[f"{prefix}/releases/tags/{payload['tag_name']}"] = release
+			self.values[f"{prefix}/git/ref/tags/{payload['tag_name']}"] = {
+				"object": {"sha": payload["target_commitish"], "type": "commit"}
+			}
 		return release
 
 	def patch(self, path: str, payload: dict[str, object]) -> dict[str, object]:
 		self.patched.append(payload)
-		for value in self.values.values():
-			if isinstance(value, dict) and value.get("id") == 7:
-				value.update(payload)
-				if payload.get("draft") is False:
-					value["immutable"] = True
+		release = next(iter(self._stored_releases()), None)
+		if release is not None:
+			release.update(payload)
+			if payload.get("draft") is False:
+				release["immutable"] = True
+			prefix = path.rsplit("/releases/", 1)[0]
+			tag = release.get("tag_name")
+			if isinstance(tag, str):
+				self.values[f"{prefix}/releases/tags/{tag}"] = release
+				self.values[f"{prefix}/git/ref/tags/{tag}"] = {
+					"object": {"sha": release["target_commitish"], "type": "commit"}
+				}
 		return {"id": 7, **payload}
 
 	def upload(self, upload_url: str, name: str, content: bytes) -> dict[str, object]:
 		self.uploaded.append(name)
 		asset = {"name": name, "digest": f"sha256:{hashlib.sha256(content).hexdigest()}"}
-		for value in self.values.values():
-			if isinstance(value, dict) and value.get("id") == 7:
-				assets = value.setdefault("assets", [])
-				assert isinstance(assets, list)
-				assets.append(asset)
+		release = next(iter(self._stored_releases()), None)
+		if release is not None:
+			assets = release.setdefault("assets", [])
+			assert isinstance(assets, list)
+			assets.append(asset)
 		return asset
 
 
@@ -85,13 +111,10 @@ class MismatchingUploadGitHub(FakeGitHub):
 		return asset
 
 
-class MismatchingTagGitHub(FakeGitHub):
+class MismatchingDraftSourceGitHub(FakeGitHub):
 	def post(self, path: str, payload: dict[str, object]) -> dict[str, object]:
 		release = super().post(path, payload)
-		prefix = path.removesuffix("/releases")
-		self.values[f"{prefix}/git/ref/tags/{payload['tag_name']}"] = {
-			"object": {"sha": OTHER_SHA, "type": "commit"}
-		}
+		release["target_commitish"] = OTHER_SHA
 		return release
 
 
@@ -697,17 +720,17 @@ def test_new_publication_and_recoverable_draft_use_only_missing_assets(tmp_path:
 	draft = {
 		"id": 7,
 		"tag_name": "v2.0.6",
+		"target_commitish": SOURCE_SHA,
 		"draft": True,
 		"prerelease": False,
-		"immutable": True,
+		"immutable": False,
 		"body": draft_body,
 		"upload_url": "https://uploads.example/releases/7/assets{?name,label}",
 		"assets": [{"name": "linux.zip", "digest": f"sha256:{artifacts[0].sha256}"}],
 	}
 	draft_values = {
 		**base,
-		"/repos/o/r/releases/tags/v2.0.6": draft,
-		"/repos/o/r/git/ref/tags/v2.0.6": {"object": {"sha": SOURCE_SHA, "type": "commit"}},
+		"/repos/o/r/releases?per_page=100": [draft, {"tag_name": "v2.0.5", "draft": False, "prerelease": False}],
 	}
 	draft_api = FakeGitHub(draft_values)
 	draft_controller = _controller(tmp_path, draft_api)
@@ -758,8 +781,9 @@ def test_upload_digest_mismatch_keeps_new_release_draft(tmp_path: Path) -> None:
 	with pytest.raises(ReleaseError, match="digest mismatch"):
 		controller.publish(SOURCE_SHA, artifacts)
 
-	draft = api.values["/repos/o/r/releases/tags/v2.0.6"]
-	assert isinstance(draft, dict)
+	releases = api.values["/repos/o/r/releases?per_page=100"]
+	assert isinstance(releases, list)
+	draft = next(release for release in releases if isinstance(release, dict) and release.get("tag_name") == "v2.0.6")
 	assert draft["draft"] is True
 	assert api.patched == []
 
@@ -774,7 +798,7 @@ def test_new_publication_tag_mismatch_stops_before_upload_or_promotion(tmp_path:
 		ArtifactIdentity("2.0.6", SOURCE_SHA, "linux", linux.name, hashlib.sha256(linux.read_bytes()).hexdigest(), str(linux)),
 		ArtifactIdentity("2.0.6", SOURCE_SHA, "windows", windows.name, hashlib.sha256(windows.read_bytes()).hexdigest(), str(windows)),
 	]
-	api = MismatchingTagGitHub(
+	api = MismatchingDraftSourceGitHub(
 		{
 			f"/repos/o/r/commits/{SOURCE_SHA}/pulls": [_pull_request(source_sha=SOURCE_SHA)],
 			"/repos/o/r/releases?per_page=100": [
@@ -788,11 +812,12 @@ def test_new_publication_tag_mismatch_stops_before_upload_or_promotion(tmp_path:
 	)
 	controller = _controller(tmp_path, api)
 
-	with pytest.raises(ReleaseError, match="tag does not identify"):
+	with pytest.raises(ReleaseError, match="conflicting unpublished"):
 		controller.publish(SOURCE_SHA, artifacts)
 
-	draft = api.values["/repos/o/r/releases/tags/v2.0.6"]
-	assert isinstance(draft, dict)
+	releases = api.values["/repos/o/r/releases?per_page=100"]
+	assert isinstance(releases, list)
+	draft = next(release for release in releases if isinstance(release, dict) and release.get("tag_name") == "v2.0.6")
 	assert draft["draft"] is True
 	assert api.uploaded == []
 	assert api.patched == []
