@@ -1,0 +1,53 @@
+name: Shared release publication
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        type: string
+        required: true
+      candidate-id:
+        type: string
+        required: true
+    secrets:
+      publication-token:
+        required: true
+      registry-auth:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: shared-release-publication-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the executed shared helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+          path: publisher
+
+      - name: Verify provenance and publish the ready draft
+        env:
+          GH_TOKEN: ${{ secrets.publication-token }}
+          PUBLISHER_REPOSITORY: ${{ job.workflow_repository }}
+          PUBLISHER_SHA: ${{ job.workflow_sha }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          CANDIDATE_ID: ${{ inputs.candidate-id }}
+          PYTHONDONTWRITEBYTECODE: "1"
+          PUBLISHER_REGISTRY_AUTH: ${{ secrets.registry-auth }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -B -I publisher/scripts/source_release.py publish --pr "$PR_NUMBER" --candidate-id "$CANDIDATE_ID"

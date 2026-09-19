@@ -1,0 +1,91 @@
+name: Shared release preparation
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        type: string
+        required: true
+      validation-only:
+        type: boolean
+        default: false
+    secrets:
+      registry-auth:
+        required: false
+    outputs:
+      status:
+        value: ${{ jobs.prepare.outputs.status }}
+      version:
+        value: ${{ jobs.prepare.outputs.version }}
+      source-sha:
+        value: ${{ jobs.prepare.outputs.source-sha }}
+      candidate-id:
+        value: ${{ jobs.prepare.outputs.candidate-id }}
+      candidate-run-id:
+        value: ${{ jobs.prepare.outputs.candidate-run-id }}
+      candidate-digest:
+        value: ${{ jobs.prepare.outputs.candidate-digest }}
+      provider-sha:
+        value: ${{ jobs.prepare.outputs.provider-sha }}
+      provider-repository:
+        value: ${{ jobs.prepare.outputs.provider-repository }}
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: shared-release-prepare-${{ github.repository }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      status: ${{ steps.prepare.outputs.status }}
+      version: ${{ steps.prepare.outputs.version }}
+      source-sha: ${{ steps.prepare.outputs.source-sha }}
+      candidate-id: ${{ steps.prepare.outputs.candidate-id || steps.envelope.outputs.artifact-id }}
+      candidate-run-id: ${{ steps.prepare.outputs.candidate-run-id }}
+      candidate-digest: ${{ steps.prepare.outputs.candidate-digest }}
+      provider-sha: ${{ steps.prepare.outputs.provider-sha }}
+      provider-repository: ${{ steps.prepare.outputs.provider-repository }}
+    steps:
+      - name: Check out the executed shared helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+          path: publisher
+
+      - name: Prepare candidate
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISHER_REPOSITORY: ${{ job.workflow_repository }}
+          PUBLISHER_SHA: ${{ job.workflow_sha }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          VALIDATION_ONLY: ${{ inputs.validation-only }}
+          PYTHONDONTWRITEBYTECODE: "1"
+          PUBLISHER_REGISTRY_AUTH: ${{ secrets.registry-auth }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          arguments=(prepare --pr "$PR_NUMBER" --output "$RUNNER_TEMP/release-candidate")
+          if [[ "$VALIDATION_ONLY" == "true" ]]; then arguments+=(--validation-only); fi
+          python -B -I publisher/scripts/source_release.py "${arguments[@]}"
+
+      - name: Upload release evidence
+        id: envelope
+        if: steps.prepare.outputs.save-required == 'true' && !inputs.validation-only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        with:
+          name: ${{ steps.prepare.outputs.artifact-name }}
+          path: ${{ runner.temp }}/release-candidate/candidate.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
