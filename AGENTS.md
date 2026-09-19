@@ -19,10 +19,11 @@ Before changing the runner, a shared tool policy, the manifest contract, or the 
 Read [the local issue tracker procedure](docs/agents/issue-tracker.md) before this work.
 
 When preparing a pull request, changing a public contract, or configuring release setup, read
-[the local release contract](docs/release.md) and the shared release policy at
-`C:\Users\Traitor\.codex\skills\git\references\release-policy.md`. Keep the reviewed
-version intent and compatibility notes in `.release/` and use the repository-owned controller
-and adapter described by that contract.
+[the local release contract](docs/release.md). Resolve the Git skill's release policy under
+`CODEX_HOME/skills/git/references/release-policy.md`, falling back to `.codex` under the OS
+user profile when `CODEX_HOME` is unset. The local contract owns this repository's executable
+declaration format. Before changing shared publication, consumer wiring, or recovery, read
+[the shared publisher interface](docs/publication.md); retain product builds in the local adapter.
 
 ## When maintaining the quality manifest
 

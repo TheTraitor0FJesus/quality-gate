@@ -35,7 +35,7 @@ from quality_gate.runner import bootstrap_check as run_bootstrap_check
 from quality_gate.runtime import RuntimeUnavailable
 
 try:
-	from .source_release import (
+	from .release_metadata import (
 		ArtifactIdentity,
 		ReleaseError,
 		load_release_timeout,
@@ -44,7 +44,7 @@ try:
 		validate_version_projections,
 	)
 except ImportError:  # pragma: no cover - exercised by the workflow script entry point.
-	from source_release import (
+	from release_metadata import (
 		ArtifactIdentity,
 		ReleaseError,
 		load_release_timeout,

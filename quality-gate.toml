@@ -20,6 +20,7 @@ required_documents = [
     ".release/release-requirements.txt",
     ".release/version.toml",
     ".release/notes.md",
+    ".release/publisher.toml",
     "README.md",
     "docs/agent-reference.md",
     "docs/architecture.md",
@@ -27,9 +28,15 @@ required_documents = [
     "docs/lessons.md",
     "docs/quality-policy-changes.md",
     "docs/release.md",
+    "docs/publication.md",
     ".github/workflows/release.yml",
+    ".github/workflows/release-prepare.yml",
+    ".github/workflows/release-publish.yml",
+    ".github/workflows/release-validation.yml",
     "scripts/source_release.py",
     "scripts/release_adapter.py",
+    "scripts/release_build.py",
+    "scripts/release_metadata.py",
     "quality-gate.toml",
 ]
 

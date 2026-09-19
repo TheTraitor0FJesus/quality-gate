@@ -1,0 +1,41 @@
+schema = 1
+workflow = ".github/workflows/release.yml"
+
+[[projections]]
+path = "pyproject.toml"
+format = "toml"
+key = "project.version"
+
+[[projections]]
+path = "quality_gate/__init__.py"
+format = "python"
+key = "__version__"
+
+[[projections]]
+path = "quality-gate.toml"
+format = "toml"
+key = "quality.policy_release"
+prefix = "v"
+
+[[projections]]
+path = "templates/quality-gate.toml"
+format = "toml"
+key = "quality.policy_release"
+prefix = "v"
+
+[[projections]]
+path = "quality_gate/release_contract.py"
+format = "python"
+key = "UNIFIED_RELEASE_PACKAGE_VERSION"
+
+[[producers]]
+name = "linux"
+job = "Build linux"
+checks = ["Verify package"]
+deliverables = ["quality-gate-v{version}-Linux.zip"]
+
+[[producers]]
+name = "windows"
+job = "Build windows"
+checks = ["Verify package"]
+deliverables = ["quality-gate-v{version}-Windows.zip"]

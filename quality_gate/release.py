@@ -24,15 +24,9 @@ from .runner import required_documents_result
 
 RELEASE_VERSION = re.compile(r"^v\d+\.\d+\.\d+$")
 PACKAGE_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
-RELEASE_NOTE_HEADINGS = (
-	"Interface",
-	"Integrations",
-	"Configuration",
-	"Persisted data",
-	"Delivery/runtime",
-)
 MAX_RELEASE_VERSION_LENGTH = 32
 MAX_RELEASE_VERSION_COMPONENT_LENGTH = 8
+MAX_RELEASE_NOTES_BYTES = 64 * 1024
 WINDOWS_MAX_WORKSPACE_PATH_CHARS = 48
 WINDOWS_MAX_PATH_BUFFER_CHARS = 32768
 _LOGGER = logging.getLogger(__name__)
@@ -97,23 +91,13 @@ def _runtime_version(root: Path) -> str:
 	raise ReleaseControllerError("runtime version projection is missing")
 
 
-def _release_notes(root: Path, version: str) -> None:
+def _release_notes(root: Path) -> None:
 	try:
 		notes = (root / ".release" / "notes.md").read_text(encoding="utf-8")
 	except (OSError, UnicodeError) as error:
 		raise ReleaseControllerError(".release/notes.md is missing or unreadable") from error
-	if not re.search(rf"(?m)^Version:\s*{re.escape(version)}\s*$", notes):
-		raise ReleaseControllerError("release notes do not identify the version authority")
-	if re.search(r"(?m)^Impact:\s*(?:MAJOR|MINOR|PATCH)\s*$", notes) is None:
-		raise ReleaseControllerError("release notes do not identify the release impact")
-	if re.search(r"(?m)^Changes:\s*\S+", notes) is None:
-		raise ReleaseControllerError("release notes do not identify user-visible changes")
-	if re.search(r"(?m)^Required adaptation:\s*\S+", notes) is None:
-		raise ReleaseControllerError("release notes do not identify required adaptation")
-	if tuple(re.findall(r"(?m)^##\s+(.+?)\s*$", notes)) != RELEASE_NOTE_HEADINGS:
-		raise ReleaseControllerError(
-			"release notes headings must be exactly " + ", ".join(RELEASE_NOTE_HEADINGS)
-		)
+	if not notes.strip() or len(notes.encode("utf-8")) > MAX_RELEASE_NOTES_BYTES:
+		raise ReleaseControllerError("release notes must be nonempty and at most 64 KiB")
 
 
 def _expected_version(manifest: Manifest, requested: str | None) -> str:
@@ -153,7 +137,7 @@ def validate_release_source(root: Path | str = ".", *, version: str | None = Non
 		raise ReleaseControllerError(
 			f"project.version {project_version} does not match release {release_version}"
 		)
-	_release_notes(actual_root, authoritative_version)
+	_release_notes(actual_root)
 	documents = required_documents_result(actual_root, manifest)
 	if documents.status is not Status.PASSED:
 		missing = documents.findings[0].path if documents.findings else "required documents"

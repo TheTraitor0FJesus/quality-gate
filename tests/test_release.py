@@ -161,6 +161,9 @@ sha256 = "{digest}"
 
 def test_release_controller_accepts_a_verified_self_host_candidate(tmp_path: Path) -> None:
 	_source(tmp_path)
+	(tmp_path / ".release" / "notes.md").write_text(
+		"Общий механизм публикации. Существующие форматы пакетов сохраняются.\n", encoding="utf-8"
+	)
 	candidate = verify_release_candidate(tmp_path, _artifact(tmp_path))
 
 	assert candidate.version == "v2.0.0"
