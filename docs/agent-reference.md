@@ -11,6 +11,7 @@ place and uses pointers here instead of copying configuration rules.
   manifest contract, and reusable workflow.
 - [Lesson format](lessons.md) is the source of truth for escaped-defect lessons.
 - [Release procedure](release.md) is the source of truth for release validation and publication.
+- [Shared publisher interface](publication.md) owns reusable release callers, evidence, and recovery.
 - `quality_gate/contracts.py` is the source of truth for schema 2, verdicts, and waivers.
 - `quality-gate.toml` declares this repository's policy release, documents, components, and limits.
 
@@ -154,12 +155,12 @@ and external rule changes remain human-reviewed decisions.
 ## Release and rollback route
 
 Run the complete test suite and `quality-gate audit` before building the exact platform artifacts.
-Then run the release controller described in [Release procedure](release.md). The owner-merged
-post-merge workflow validates the exact source, checks, self-host manifest, lessons, and every
-declared artifact in a temporary cache before publishing the immutable GitHub Release.
+Then follow [Release procedure](release.md). Shared preparation preserves the original owner-merged
+candidate; product jobs validate its exact source, checks, self-host manifest, lessons, and every
+declared artifact in a temporary cache before shared publication. Completed readback skips builds.
 
 Retain the active and preceding policy releases. To recover a bad activation, run
 the consumer rollback procedure above: restore the manifest release and reusable-workflow SHA,
 then verify the complete candidate. Ruleset changes, consumer pin updates, and rollback remain
-human-reviewed operations; an unpublished release attempt is retried only for its exact source
-SHA.
+human-reviewed operations. Recover an unpublished attempt by its original merged PR number using
+the retained envelope and [shared recovery contract](publication.md).
