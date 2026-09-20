@@ -66,11 +66,11 @@ def test_sync_installs_verified_release_and_keeps_previous_for_rollback(tmp_path
 	cache.sync(source)
 	second = tmp_path / "second"
 	second.mkdir()
-	_release(second, "v2.1.0")
+	_release(second, "v2.0.1")
 	cache.sync(second)
 
-	assert cache.select("v2.1.0").is_dir()
-	assert cache.status()["active"] == "v2.1.0"
+	assert cache.select("v2.0.1").is_dir()
+	assert cache.status()["active"] == "v2.0.1"
 	assert cache.rollback().name == "v2.0.0"
 
 
