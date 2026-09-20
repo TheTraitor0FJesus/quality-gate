@@ -14,6 +14,8 @@ Before a non-trivial codebase question, design task, or code change, read [the a
 
 Before changing the runner, a shared tool policy, the manifest contract, or the reusable CI workflow, read [the quality policy change guide](docs/quality-policy-changes.md). Consumers select an immutable policy release and a pinned reusable-workflow SHA; activation requires an explicit consumer update, as described in [the agent reference](docs/agent-reference.md).
 
+This repository's commit hook runs the pinned released Quality Gate. Source or policy changes also require a current-source `quality-gate check` before committing; see [verification details](docs/agent-reference.md#normal-operation).
+
 ## When planning, publishing, or starting issue work
 
 Read [the local issue tracker procedure](docs/agents/issue-tracker.md) before this work.

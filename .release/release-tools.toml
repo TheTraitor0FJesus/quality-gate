@@ -8,7 +8,7 @@ check_wait_seconds = 900
 check_poll_seconds = 10
 
 [bootstrap]
-policy_release = "v2.0.5"
+policy_release = "v2.0.6"
 
 [gitleaks]
 version = "8.30.1"
