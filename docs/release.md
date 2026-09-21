@@ -35,6 +35,8 @@ package construction, inventory, SHA-256 checks, wheel installation, and isolate
 `quality_gate.release` for source/self-host validation, learned lessons, a disposable installation,
 and audit. Both platforms then run the complete repository test suite using the newly built release.
 The `Verify package` step and artifact upload must succeed for each platform before publication.
+The full-suite subprocess excludes the parent PR's history-selection variables so disposable
+test repositories select their own history. The build process retains Actions context for evidence.
 
 The build installs `.release/build-requirements.txt` and `.release/release-requirements.txt` with
 hash verification and binary-only dependencies. The build-only backend lock remains outside the

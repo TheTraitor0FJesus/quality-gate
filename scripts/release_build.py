@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd()))
 from quality_gate.publication_artifacts import load_json_record
+
 from scripts.release_metadata import load_release_timeout
 
 
@@ -140,6 +141,9 @@ def main() -> None:
 		timeout=subprocess_timeout,
 	)
 	test_environment = os.environ.copy()
+	# Tests create disposable repositories whose history is unrelated to the release PR.
+	for variable in ("GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "GITHUB_SHA"):
+		test_environment.pop(variable, None)
 	cache_variable = "LOCALAPPDATA" if os.name == "nt" else "XDG_CACHE_HOME"
 	test_environment[cache_variable] = str(cache.parent)
 	test_environment["QUALITY_GATE_POLICY_ROOT"] = str(
