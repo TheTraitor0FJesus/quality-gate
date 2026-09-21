@@ -13,7 +13,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from quality_gate import runner
 from quality_gate.cli import main
 from quality_gate.contracts import load_manifest
@@ -729,7 +728,7 @@ def test_cli_blocks_and_accepts_the_staged_python_policy_candidate(
 
 	failed_result, failed_output = _invoke(root, monkeypatch, capsys)
 
-	assert failed_result == 1
+	assert failed_result == 1, failed_output
 	assert "python.component_1.ruff: failed" in failed_output
 
 	source.write_text(

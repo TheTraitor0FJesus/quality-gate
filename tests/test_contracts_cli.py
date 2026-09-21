@@ -368,7 +368,7 @@ def test_check_validates_but_does_not_execute_supplemental_tests(tmp_path: Path)
 
 	result = _run(tmp_path, "check")
 
-	assert result.returncode == 0
+	assert result.returncode == 0, result.stdout + result.stderr
 	assert "must not run" not in result.stdout
 
 
