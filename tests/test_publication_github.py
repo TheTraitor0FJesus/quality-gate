@@ -14,7 +14,12 @@ from pathlib import Path
 import pytest
 
 from quality_gate.publication import PublicationError
-from quality_gate.publication_github import BoundedCommand, GitHubCLI
+from quality_gate.publication_github import (
+	BoundedCommand,
+	GitHubCLI,
+	MissingResourceError,
+	_operation,
+)
 
 
 class Command:
@@ -80,6 +85,67 @@ def test_image_readback_uses_content_digest_without_running_product() -> None:
 def test_external_command_deadline_and_size_limits_fail_closed(program: str) -> None:
 	with pytest.raises(PublicationError):
 		BoundedCommand(0.2)([sys.executable, "-B", "-c", program], limit=64)
+
+
+def test_external_command_diagnostics_expose_stage_status_without_stderr() -> None:
+	program = (
+		"import sys; sys.stderr.write('Authorization: bearer secret-token HTTP 403\\n'); "
+		"sys.exit(7)"
+	)
+	with pytest.raises(PublicationError) as error:
+		BoundedCommand(5)([sys.executable, "-B", "-c", program], limit=64)
+	message = str(error.value)
+	assert message == "external command: command failed (exit 7, HTTP 403)"
+	assert "secret-token" not in message
+	assert "Authorization" not in message
+
+
+def test_external_command_404_remains_optional_without_stderr() -> None:
+	program = "import sys; sys.stderr.write('HTTP 404 secret-token\\n'); sys.exit(1)"
+	with pytest.raises(MissingResourceError) as error:
+		BoundedCommand(5)([sys.executable, "-B", "-c", program], limit=64)
+	message = str(error.value)
+	assert message == "external command: resource is absent (HTTP 404)"
+	assert "secret-token" not in message
+
+
+def test_external_command_timeout_is_distinguished_from_exit_failure() -> None:
+	with pytest.raises(PublicationError, match=r"^external command: timed out after"):
+		BoundedCommand(0.2)([sys.executable, "-B", "-c", "import time; time.sleep(30)"], limit=64)
+
+
+def test_missing_executable_is_distinguished_from_timeout(tmp_path: Path) -> None:
+	missing = tmp_path / "missing-command"
+	with pytest.raises(PublicationError, match=r"^external command: command unavailable$") as error:
+		BoundedCommand(5)([str(missing)], limit=64)
+	assert str(missing) not in str(error.value)
+
+
+def test_gh_operation_removes_query_and_untrusted_endpoint_text() -> None:
+	assert (
+		_operation(
+			[
+				"gh",
+				"api",
+				"repos/o/r/actions/runs/7/jobs?filter=all&token=secret",
+				"--method",
+				"GET",
+			]
+		)
+		== "gh api GET repos/o/r/actions/runs/7/jobs"
+	)
+	assert (
+		_operation(
+			(
+				"gh",
+				"api",
+				"https://example.invalid/?token=secret",
+				"--method",
+				"POST",
+			)
+		)
+		== "gh api POST <endpoint>"
+	)
 
 
 def test_registry_credentials_are_temporary_and_cannot_launch_helpers() -> None:

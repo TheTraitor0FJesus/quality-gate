@@ -23,6 +23,41 @@ from .publication_evidence import positive, record
 JSON_LIMIT = 16 * 1024 * 1024
 MAX_TIMEOUT_SECONDS = 300
 MAX_REGISTRY_AUTH_BYTES = 64 * 1024
+HTTP_STATUS = re.compile(rb"(?:\(\s*HTTP\s+([1-5][0-9]{2})\)|\bHTTP\s+([1-5][0-9]{2})\b)")
+GH_API_ARGUMENTS = 3
+
+
+def _operation(command: Sequence[str]) -> str:
+	"""Describe one external operation without echoing arguments or query data."""
+	if len(command) >= GH_API_ARGUMENTS and command[0] == "gh" and command[1] == "api":
+		method = "GET"
+		if "--method" in command:
+			index = command.index("--method") + 1
+			candidate = command[index] if index < len(command) else ""
+			if candidate in {"GET", "POST", "PATCH", "DELETE"}:
+				method = candidate
+		endpoint = command[2].split("?", 1)[0]
+		if endpoint.startswith("https://uploads.github.com/"):
+			endpoint = endpoint.removeprefix("https://uploads.github.com/")
+		if re.fullmatch(
+			r"repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.@-]+)*",
+			endpoint,
+		):
+			return f"gh api {method} {endpoint}"
+		return f"gh api {method} <endpoint>"
+	if command and command[0] == "docker":
+		return "docker command"
+	if command and command[0] == "git":
+		return "git command"
+	return "external command"
+
+
+def _http_status(detail: bytes) -> str | None:
+	"""Extract only a bounded HTTP status from a child diagnostic."""
+	match = HTTP_STATUS.search(detail)
+	if match is None:
+		return None
+	return next((group.decode("ascii") for group in match.groups() if group), None)
 
 
 @contextmanager
@@ -86,29 +121,48 @@ class BoundedCommand:
 				return self._execute(command, errors, limit)
 
 	def _execute(self, command: list[str], errors: BinaryIO, limit: int) -> bytes:
+		operation = _operation(command)
 		try:
 			with subprocess.Popen(
 				command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors
 			) as process:
-				watchdog = threading.Timer(self.timeout_seconds, process.kill)
+				timed_out = threading.Event()
+
+				def terminate() -> None:
+					timed_out.set()
+					try:
+						process.kill()
+					except OSError:
+						pass
+
+				watchdog = threading.Timer(self.timeout_seconds, terminate)
 				watchdog.start()
 				try:
 					output = self._read(process, limit)
 					code = process.wait(timeout=self.timeout_seconds)
 				finally:
 					watchdog.cancel()
+				if timed_out.is_set():
+					raise PublicationError(
+						f"{operation}: timed out after {self.timeout_seconds:g} seconds"
+					)
 				if code:
 					errors.seek(0)
 					detail = errors.read(4096)
-					if b"(HTTP 404)" in detail:
-						raise MissingResourceError("GitHub resource is absent (HTTP 404)")
+					status = _http_status(detail)
+					if status == "404":
+						raise MissingResourceError(f"{operation}: resource is absent (HTTP 404)")
+					status_detail = f", HTTP {status}" if status else ""
 					raise PublicationError(
-						f"GitHub/registry command failed or timed out (exit {code}); "
-						"inspect runner diagnostics"
+						f"{operation}: command failed (exit {code}{status_detail})"
 					)
 				return output
-		except (OSError, subprocess.TimeoutExpired) as error:
-			raise PublicationError("GitHub/registry command is unavailable or timed out") from error
+		except subprocess.TimeoutExpired as error:
+			raise PublicationError(
+				f"{operation}: timed out after {self.timeout_seconds:g} seconds"
+			) from error
+		except OSError as error:
+			raise PublicationError(f"{operation}: command unavailable") from error
 
 	@staticmethod
 	def _read(process: subprocess.Popen[bytes], limit: int) -> bytes:
