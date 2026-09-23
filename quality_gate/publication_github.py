@@ -23,6 +23,9 @@ from .publication_evidence import positive, record
 JSON_LIMIT = 16 * 1024 * 1024
 MAX_TIMEOUT_SECONDS = 300
 MAX_REGISTRY_AUTH_BYTES = 64 * 1024
+GH_ESCAPE_SEQUENCE_ERROR = (
+	b"the response contains terminal escape sequences; pass --allow-escape-sequences"
+)
 HTTP_STATUS = re.compile(rb"(?:\(\s*HTTP\s+([1-5][0-9]{2})\)|\bHTTP\s+([1-5][0-9]{2})\b)")
 GH_API_ARGUMENTS = 3
 
@@ -100,6 +103,10 @@ class MissingResourceError(PublicationError):
 	"""GitHub positively reported HTTP 404 for an optional resource."""
 
 
+class EscapeSequenceError(PublicationError):
+	"""GitHub CLI refused a raw response containing terminal escape sequences."""
+
+
 class BoundedCommand:
 	"""Read a child stream with a size limit and a watchdog independent of stream progress."""
 
@@ -152,6 +159,10 @@ class BoundedCommand:
 					status = _http_status(detail)
 					if status == "404":
 						raise MissingResourceError(f"{operation}: resource is absent (HTTP 404)")
+					if status is None and GH_ESCAPE_SEQUENCE_ERROR in detail:
+						raise EscapeSequenceError(
+							f"{operation}: raw response contains terminal escape sequences"
+						)
 					status_detail = f", HTTP {status}" if status else ""
 					raise PublicationError(
 						f"{operation}: command failed (exit {code}{status_detail})"
@@ -190,11 +201,13 @@ class GitHubCLI:
 		self.repository = repository
 		self.command = command or BoundedCommand(timeout_seconds)
 
-	def _arguments(self, path: str, method: str) -> list[str]:
+	def _arguments(
+		self, path: str, method: str, *, allow_escape_sequences: bool = False
+	) -> list[str]:
 		if not path.startswith("/") or ".." in path or "\\" in path:
 			raise PublicationError("invalid repository API path")
 		endpoint = f"repos/{self.repository}" + ("" if path == "/" else path)
-		return [
+		arguments = [
 			"gh",
 			"api",
 			endpoint,
@@ -205,6 +218,9 @@ class GitHubCLI:
 			"--header",
 			"X-GitHub-Api-Version: 2022-11-28",
 		]
+		if allow_escape_sequences:
+			arguments.append("--allow-escape-sequences")
+		return arguments
 
 	def _json(self, path: str, method: str, payload: Mapping[str, object] | None = None) -> object:
 		content = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -250,7 +266,15 @@ class GitHubCLI:
 
 	def download(self, path: str) -> bytes:
 		limit = JSON_LIMIT if path.endswith("/logs") else MAX_BUNDLE_BYTES
-		return self.command(self._arguments(path, "GET"), limit=limit)
+		arguments = self._arguments(path, "GET")
+		try:
+			return self.command(arguments, limit=limit)
+		except EscapeSequenceError:
+			if re.fullmatch(r"/actions/jobs/[0-9]+/logs", path) is None:
+				raise
+			return self.command(
+				self._arguments(path, "GET", allow_escape_sequences=True), limit=limit
+			)
 
 	def upload(self, release_id: int, name: str, content: bytes) -> dict[str, object]:
 		positive(release_id, "release ID")
