@@ -16,6 +16,7 @@ import pytest
 from quality_gate.publication import PublicationError
 from quality_gate.publication_github import (
 	BoundedCommand,
+	EscapeSequenceError,
 	GitHubCLI,
 	MissingResourceError,
 	_operation,
@@ -107,6 +108,44 @@ def test_external_command_404_remains_optional_without_stderr() -> None:
 	message = str(error.value)
 	assert message == "external command: resource is absent (HTTP 404)"
 	assert "secret-token" not in message
+
+
+def test_external_command_marks_gh_escape_guard_without_stderr() -> None:
+	program = (
+		"import sys; sys.stderr.write("
+		"'the response contains terminal escape sequences; pass --allow-escape-sequences "
+		"secret-token\\n'); sys.exit(1)"
+	)
+	with pytest.raises(EscapeSequenceError) as error:
+		BoundedCommand(5)([sys.executable, "-B", "-c", program], limit=64)
+	message = str(error.value)
+	assert message == "external command: raw response contains terminal escape sequences"
+	assert "secret-token" not in message
+
+
+@pytest.mark.parametrize(
+	"stderr",
+	[
+		"HTTP 403; pass --allow-escape-sequences secret-token\\n",
+		"unknown flag: --allow-escape-sequences\\n",
+	],
+)
+def test_external_command_does_not_trust_an_unrelated_escape_flag_hint(stderr: str) -> None:
+	program = f"import sys; sys.stderr.write({stderr!r}); sys.exit(1)"
+	with pytest.raises(PublicationError) as error:
+		BoundedCommand(5)([sys.executable, "-B", "-c", program], limit=64)
+	assert not isinstance(error.value, EscapeSequenceError)
+
+
+def test_external_command_preserves_http_status_with_escape_text() -> None:
+	program = (
+		"import sys; sys.stderr.write('HTTP 403: the response contains terminal escape sequences; "
+		"pass --allow-escape-sequences secret-token\\n'); sys.exit(1)"
+	)
+	with pytest.raises(PublicationError) as error:
+		BoundedCommand(5)([sys.executable, "-B", "-c", program], limit=64)
+	assert not isinstance(error.value, EscapeSequenceError)
+	assert str(error.value) == "external command: command failed (exit 1, HTTP 403)"
 
 
 def test_external_command_timeout_is_distinguished_from_exit_failure() -> None:
@@ -233,6 +272,98 @@ def test_workflow_entrypoint_rejects_wrong_or_floating_helper_before_github(
 		"helper checkout differs" in result.stderr or "full lowercase commit SHAs" in result.stderr
 	)
 	assert not result.stdout
+
+
+def test_job_log_download_retries_escape_guard_with_gh_opt_in() -> None:
+	class EscapeRetryCommand:
+		def __init__(self) -> None:
+			self.calls: list[list[str]] = []
+
+		def __call__(
+			self, arguments: Sequence[str], *, content: bytes | None = None, limit: int
+		) -> bytes:
+			self.calls.append(list(arguments))
+			if len(self.calls) == 1:
+				raise EscapeSequenceError("guarded raw response")
+			return b"Artifact ID: 300\n"
+
+	command = EscapeRetryCommand()
+	api = GitHubCLI("o/r", timeout_seconds=120, command=command)
+	assert api.download("/actions/jobs/42/logs") == b"Artifact ID: 300\n"
+	assert len(command.calls) == 2
+	assert "--allow-escape-sequences" not in command.calls[0]
+	assert "--allow-escape-sequences" in command.calls[1]
+
+
+def test_job_log_download_preserves_fail_closed_on_retry_failure() -> None:
+	class EscapeCommand:
+		def __init__(self) -> None:
+			self.calls: list[list[str]] = []
+
+		def __call__(
+			self, arguments: Sequence[str], *, content: bytes | None = None, limit: int
+		) -> bytes:
+			self.calls.append(list(arguments))
+			raise EscapeSequenceError("guarded raw response")
+
+	command = EscapeCommand()
+	api = GitHubCLI("o/r", timeout_seconds=120, command=command)
+	with pytest.raises(EscapeSequenceError):
+		api.download("/actions/jobs/42/logs")
+	assert len(command.calls) == 2
+	assert "--allow-escape-sequences" in command.calls[1]
+
+
+@pytest.mark.parametrize(
+	"message",
+	[
+		"gh api GET repos/o/r/actions/jobs/42/logs: command failed (exit 1, HTTP 403)",
+		"gh api GET repos/o/r/actions/jobs/42/logs: timed out after 60 seconds",
+	],
+)
+def test_job_log_download_does_not_retry_other_failures(message: str) -> None:
+	class FailingCommand:
+		def __init__(self) -> None:
+			self.calls: list[list[str]] = []
+
+		def __call__(
+			self, arguments: Sequence[str], *, content: bytes | None = None, limit: int
+		) -> bytes:
+			self.calls.append(list(arguments))
+			raise PublicationError(message)
+
+	command = FailingCommand()
+	api = GitHubCLI("o/r", timeout_seconds=120, command=command)
+	with pytest.raises(PublicationError, match="(HTTP 403|timed out after)"):
+		api.download("/actions/jobs/42/logs")
+	assert len(command.calls) == 1
+
+
+def test_job_log_download_keeps_plain_gh_compatible_without_flag() -> None:
+	command = Command([b"Artifact ID: 300\n"])
+	api = GitHubCLI("o/r", timeout_seconds=120, command=command)
+	assert api.download("/actions/jobs/42/logs") == b"Artifact ID: 300\n"
+	assert len(command.calls) == 1
+	assert "--allow-escape-sequences" not in command.calls[0]
+
+
+def test_artifact_download_does_not_retry_escape_guard() -> None:
+	class EscapeCommand:
+		def __init__(self) -> None:
+			self.calls: list[list[str]] = []
+
+		def __call__(
+			self, arguments: Sequence[str], *, content: bytes | None = None, limit: int
+		) -> bytes:
+			self.calls.append(list(arguments))
+			raise EscapeSequenceError("guarded raw response")
+
+	command = EscapeCommand()
+	api = GitHubCLI("o/r", timeout_seconds=120, command=command)
+	with pytest.raises(EscapeSequenceError):
+		api.download("/actions/artifacts/7/zip")
+	assert len(command.calls) == 1
+	assert "--allow-escape-sequences" not in command.calls[0]
 
 
 @pytest.mark.parametrize("oversized", [False, True])
