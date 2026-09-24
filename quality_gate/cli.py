@@ -23,9 +23,11 @@ from .runner import (  # noqa: E402
 	audit,
 	check,
 	format_paths,
+	repository_root,
 	validate,
 )
 from .runtime import RuntimeManager, RuntimeUnavailable, runtime_identity  # noqa: E402
+from .temp_workspace import TemporaryWorkspaceError, temporary_workspace  # noqa: E402
 
 
 def parser() -> argparse.ArgumentParser:
@@ -120,7 +122,6 @@ def _doctor(root: Path | None, cache_dir: Path | None) -> int:
 
 
 def _setup(root: Path | None, cache_dir: Path | None) -> None:
-	from .runner import repository_root
 
 	actual_root = repository_root(root)
 	environment = prepare(
@@ -166,7 +167,24 @@ def _dispatch(arguments: argparse.Namespace) -> int:
 def main() -> int:
 	arguments = parser().parse_args()
 	try:
+		if arguments.command in {
+			"check",
+			"audit",
+			"format",
+			"setup",
+			"doctor",
+			"validate",
+		}:
+			actual_root = repository_root(arguments.root)
+			with temporary_workspace(actual_root):
+				return _dispatch(arguments)
 		return _dispatch(arguments)
+	except TemporaryWorkspaceError as error:
+		sys.stdout.write(
+			f"temporary workspace: unchecked - {error}; "
+			"action: restore a writable repository temp directory and retry the quality gate\n"
+		)
+		return 2
 	except ValidationError as error:
 		action = (
 			"review the schema 1 manifest and run migrate"

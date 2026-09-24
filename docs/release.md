@@ -42,6 +42,12 @@ package construction, inventory, SHA-256 checks, wheel installation, and isolate
 and audit. The isolated runtime setup and audit explicitly select the candidate policy release, while
 the source manifest remains on the latest published policy until the post-publication pin update. Both
 platforms then run the complete repository test suite using the newly built release.
+`quality_gate.temp_workspace` scopes check, parity, publisher, and release-process temporary files
+under the checked repository's ignored `temp/` directory. Release cache staging and atomic
+replacement files remain beside their persistent targets. Release verification defaults to this
+run workspace; the explicit `--workspace-parent` option remains available when an operator needs
+a shorter path.
+
 The `Verify package` step and artifact upload must succeed for each platform before publication.
 The full-suite subprocess excludes the parent PR's history-selection variables so disposable
 test repositories select their own history. The build process retains Actions context for evidence.

@@ -21,6 +21,7 @@ from .publication_github import (
 	GitHubCLI,
 	registry_configuration,
 )
+from .temp_workspace import TemporaryWorkspaceError, temporary_workspace
 
 
 def _configured_timeout(timeouts: Mapping[str, object], name: str) -> float:
@@ -198,11 +199,15 @@ def _main(arguments: Sequence[str] | None = None) -> int:
 def main(arguments: Sequence[str] | None = None) -> int:
 	"""Run shared publication with isolated caller-owned GHCR authentication."""
 	try:
-		with registry_configuration(
-			os.environ.get("PUBLISHER_GHCR_TOKEN", ""),
-			os.environ.get("PUBLISHER_GHCR_USERNAME", ""),
-		):
-			return _main(arguments)
+		with temporary_workspace(Path(__file__).resolve().parents[1]):
+			with registry_configuration(
+				os.environ.get("PUBLISHER_GHCR_TOKEN", ""),
+				os.environ.get("PUBLISHER_GHCR_USERNAME", ""),
+			):
+				return _main(arguments)
+	except TemporaryWorkspaceError as error:
+		sys.stderr.write(f"publication: temporary workspace refused - {error}\n")
+		return 1
 	except (PublicationError, OSError) as error:
 		sys.stderr.write(f"publication: GHCR configuration refused - {error}\n")
 		return 1

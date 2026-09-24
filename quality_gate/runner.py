@@ -39,6 +39,7 @@ from .reporting import render
 from .runtime import RuntimeUnavailable
 from .secrets import secret_audit_result, secret_candidate_result, secret_history_result
 from .snapshot import SnapshotError, candidate_snapshot
+from .temp_workspace import TemporaryWorkspaceError, temporary_workspace
 
 _LOGGER = logging.getLogger(__name__)
 MANIFEST_NAME = "quality-gate.toml"
@@ -1914,23 +1915,34 @@ def _run_snapshot(
 ) -> Verdict:
 	"""Run one candidate snapshot and convert snapshot failures to a verdict."""
 	try:
-		with candidate_snapshot(actual_root) as snapshot:
-			verdict = _check_snapshot(
-				snapshot.root,
-				verbose=verbose,
-				repository_root=actual_root,
-				index_file=getattr(snapshot, "repository_index", None),
-				base=base,
-				head=head,
-				mode=mode,
-				policy_release=policy_release,
-			)
+		with temporary_workspace(actual_root):
+			with candidate_snapshot(actual_root) as snapshot:
+				verdict = _check_snapshot(
+					snapshot.root,
+					verbose=verbose,
+					repository_root=actual_root,
+					index_file=getattr(snapshot, "repository_index", None),
+					base=base,
+					head=head,
+					mode=mode,
+					policy_release=policy_release,
+				)
 	except SnapshotError as error:
 		quality_error = QualityGateError(
 			error.message,
 			check_id="candidate.snapshot",
 			exit_code=EXIT_UNCHECKED,
 			recovery_action=f"restore a stable supported Git index and run {mode} again",
+		)
+		verdict = Verdict((_error_result(quality_error),))
+	except TemporaryWorkspaceError as error:
+		quality_error = QualityGateError(
+			str(error),
+			check_id="temporary.workspace",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action=(
+				"restore a writable repository temp directory and retry the quality gate"
+			),
 		)
 		verdict = Verdict((_error_result(quality_error),))
 	return verdict

@@ -22,6 +22,7 @@ from typing import cast
 from urllib.parse import urlparse
 
 from .release_contract import ReleaseInventoryError, validate_release_inventory
+from .temp_workspace import SYSTEM_TEMP_DIRECTORY
 
 RELEASE_VERSION = re.compile(r"^v\d+\.\d+\.\d+$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -215,7 +216,7 @@ def verify_release(path: Path, manifest: ReleaseManifest | None = None) -> Relea
 def default_cache_root() -> Path:
 	"""Return the user-local cache directory without creating it."""
 	if os.name == "nt":
-		windows_base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+		windows_base = os.environ.get("LOCALAPPDATA") or SYSTEM_TEMP_DIRECTORY
 		return Path(windows_base) / "quality-gate"
 	unix_base = os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")
 	return Path(unix_base) / "quality-gate"

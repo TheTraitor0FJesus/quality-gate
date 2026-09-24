@@ -17,6 +17,7 @@ from typing import Any
 
 from .contracts import load_manifest
 from .distribution import PolicyCache, ReleaseManifest, load_release_manifest
+from .temp_workspace import temporary_workspace
 
 RESULT_LINE = re.compile(
 	r"^(?P<check_id>[a-z0-9_.]+): "
@@ -302,13 +303,14 @@ def main(arguments: list[str] | None = None) -> int:
 
 	options = _parser().parse_args(arguments)
 	try:
-		if options.compare:
-			compare_results(*options.compare)
+		with temporary_workspace(PROJECT_ROOT):
+			if options.compare:
+				compare_results(*options.compare)
+				return 0
+			result = build_result()
+			output = options.output or Path("parity-result.json")
+			output.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 			return 0
-		result = build_result()
-		output = options.output or Path("parity-result.json")
-		output.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-		return 0
 	except (OSError, RuntimeError, ValueError, KeyError) as error:
 		sys.stderr.write(f"quality-gate parity: unchecked - {error}\n")
 		return 2
