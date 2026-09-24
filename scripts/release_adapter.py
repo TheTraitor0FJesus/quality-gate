@@ -33,6 +33,7 @@ from quality_gate.release_contract import (
 )
 from quality_gate.runner import bootstrap_check as run_bootstrap_check
 from quality_gate.runtime import RuntimeUnavailable
+from quality_gate.temp_workspace import temporary_workspace
 
 try:
 	from .release_metadata import (
@@ -412,23 +413,24 @@ def _parser() -> argparse.ArgumentParser:
 def main(arguments: Sequence[str] | None = None) -> int:
 	options = _parser().parse_args(arguments)
 	try:
-		if options.command == "bootstrap-setup":
-			bootstrap_setup(options.policy_release)
-			return 0
-		if options.command == "bootstrap-check":
-			return bootstrap_check(options.policy_release, base=options.base, head=options.head)
-		if options.command == "build":
-			if options.output is None:
-				raise ReleaseError("build requires --output")
-			result = build(options.source_sha, options.output, platform=options.platform)
-		else:
-			if options.artifact is None:
-				raise ReleaseError(f"{options.command} requires --artifact")
-			result = (
-				runtime_check(options.source_sha, options.artifact)
-				if options.command == "runtime-check"
-				else verify(options.source_sha, options.artifact)
-			)
+		with temporary_workspace(_root()):
+			if options.command == "bootstrap-setup":
+				bootstrap_setup(options.policy_release)
+				return 0
+			if options.command == "bootstrap-check":
+				return bootstrap_check(options.policy_release, base=options.base, head=options.head)
+			if options.command == "build":
+				if options.output is None:
+					raise ReleaseError("build requires --output")
+				result = build(options.source_sha, options.output, platform=options.platform)
+			else:
+				if options.artifact is None:
+					raise ReleaseError(f"{options.command} requires --artifact")
+				result = (
+					runtime_check(options.source_sha, options.artifact)
+					if options.command == "runtime-check"
+					else verify(options.source_sha, options.artifact)
+				)
 	except (OSError, ReleaseError) as error:
 		print(f"release adapter: unchecked - {error}")
 		return 2

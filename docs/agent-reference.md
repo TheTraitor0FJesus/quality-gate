@@ -21,8 +21,12 @@ test paths, dependency inputs, required documents, workflows, waivers, or supple
 ## Normal operation
 
 Run commands from the repository root. `check`, `audit`, `validate`, `doctor`, and `version` do
-not change repository files. `sync`, `setup`, rollback, confirmed prune, and `format` are the
-explicit mutation commands.
+not change tracked project files. Quality Gate puts temporary work under the checked repository's
+ignored `temp/` directory, removes stale inactive runs when it starts, and removes its own run
+directory when it exits. Every consumer repository must ignore its root `temp/` directory in
+`.gitignore` (for example, with `/temp/`). Cache staging and atomic replacement files remain beside
+their persistent targets. `sync`, `setup`, rollback, confirmed prune, and `format` are the explicit
+mutation commands.
 
 1. Run `quality-gate validate` after editing `quality-gate.toml`.
 2. Run `quality-gate doctor` to inspect the selected release and component runtimes.

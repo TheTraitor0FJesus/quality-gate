@@ -21,13 +21,15 @@ from .contracts import Manifest, Status, ValidationError, load_manifest
 from .distribution import DistributionError, PolicyCache, ReleaseManifest
 from .lessons import ReleaseBlockedError, ensure_release_ready
 from .runner import required_documents_result
+from .temp_workspace import TemporaryWorkspaceError, temporary_workspace
 
 RELEASE_VERSION = re.compile(r"^v\d+\.\d+\.\d+$")
 PACKAGE_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 MAX_RELEASE_VERSION_LENGTH = 32
 MAX_RELEASE_VERSION_COMPONENT_LENGTH = 8
 MAX_RELEASE_NOTES_BYTES = 64 * 1024
-WINDOWS_MAX_WORKSPACE_PATH_CHARS = 48
+# Keep enough room for the venv, installed package, and release cache below this path.
+WINDOWS_MAX_WORKSPACE_PATH_CHARS = 180
 WINDOWS_MAX_PATH_BUFFER_CHARS = 32768
 _LOGGER = logging.getLogger(__name__)
 
@@ -222,94 +224,72 @@ def _windows_final_path(path: Path) -> Path:
 	return Path(final)
 
 
-def _workspace_parents(
-	root: Path, artifact: Path, workspace_parent: Path | str | None
-) -> tuple[Path | None, ...]:
-	if workspace_parent is not None:
-		candidate = Path(workspace_parent).expanduser()
-		try:
-			candidate = candidate.resolve()
-			is_directory = candidate.is_dir()
-		except OSError as error:
-			raise ReleaseControllerError(
-				"release workspace parent is unavailable; provide an existing directory"
-			) from error
-		if not is_directory:
-			raise ReleaseControllerError(
-				"release workspace parent is unavailable; provide an existing directory"
-			)
-		return (candidate,)
-	if os.name != "nt":
-		return (None,)
-
-	candidates: list[Path] = []
+def _workspace_parents(workspace_parent: Path | str | None) -> tuple[Path, ...]:
+	if workspace_parent is None:
+		return (Path(tempfile.gettempdir()),)
+	candidate = Path(workspace_parent).expanduser()
 	try:
-		home = Path.home()
-	except RuntimeError as error:
-		configured_home = os.environ.get("USERPROFILE") or os.environ.get("HOME")
-		if not configured_home:
-			raise ReleaseControllerError("release workspace home is unavailable") from error
-		home = Path(configured_home)
-	candidates.append(home)
-	for source in (root, artifact, Path(sys.executable), Path(tempfile.gettempdir())):
-		anchor = Path(source).anchor
-		if anchor:
-			candidate = Path(anchor)
-			if os.path.normcase(str(candidate)) not in {
-				os.path.normcase(str(item)) for item in candidates
-			}:
-				candidates.append(candidate)
-	return tuple(candidates)
+		candidate = candidate.resolve()
+		is_directory = candidate.is_dir()
+	except OSError as error:
+		raise ReleaseControllerError(
+			"release workspace parent is unavailable; provide an existing directory"
+		) from error
+	if not is_directory:
+		raise ReleaseControllerError(
+			"release workspace parent is unavailable; provide an existing directory"
+		)
+	return (candidate,)
 
 
 @contextmanager
-def _release_workspace(
-	root: Path, artifact: Path, workspace_parent: Path | str | None
-) -> Iterator[Path]:
+def _release_workspace(workspace_parent: Path | str | None) -> Iterator[Path]:
 	"""Yield one isolated workspace with enough Windows path headroom."""
-	parents = _workspace_parents(root, artifact, workspace_parent)
-	failure_reasons: list[str] = []
-	for parent in parents:
-		try:
-			temporary = tempfile.TemporaryDirectory(
-				prefix="qg-", dir=str(parent) if parent is not None else None
-			)
-		except OSError as error:
-			failure_reasons.append("workspace creation failed")
-			if workspace_parent is not None:
+	if workspace_parent is None:
+		yield _default_release_workspace()
+		return
+	parent = _workspace_parents(workspace_parent)[0]
+	try:
+		temporary = tempfile.TemporaryDirectory(prefix="qg-", dir=str(parent))
+	except OSError as error:
+		raise ReleaseControllerError(
+			"release workspace is unavailable; provide an existing writable "
+			"directory with --workspace-parent"
+		) from error
+	with temporary:
+		workspace = Path(temporary.name)
+		if os.name == "nt":
+			try:
+				final = _windows_final_path(workspace)
+			except (OSError, ReleaseControllerError) as error:
 				raise ReleaseControllerError(
-					"release workspace is unavailable; provide an existing short writable "
-					"directory with --workspace-parent"
+					"release workspace final path is unavailable; provide a shorter "
+					"--workspace-parent directory"
 				) from error
-			continue
-		with temporary:
-			workspace = Path(temporary.name)
-			if os.name == "nt":
-				try:
-					final = _windows_final_path(workspace)
-				except (OSError, ReleaseControllerError) as error:
-					failure_reasons.append("workspace final-path validation failed")
-					if workspace_parent is not None:
-						raise ReleaseControllerError(
-							"release workspace final path is unavailable; provide a shorter "
-							"--workspace-parent directory"
-						) from error
-					continue
-				if len(str(final)) > WINDOWS_MAX_WORKSPACE_PATH_CHARS:
-					failure_reasons.append("workspace path is too long")
-					if workspace_parent is not None:
-						raise ReleaseControllerError(
-							"release workspace path is too long; provide a shorter "
-							"--workspace-parent directory"
-						)
-					continue
-			yield workspace
-			return
-	reasons = ", ".join(dict.fromkeys(failure_reasons)) or "no usable candidate"
-	raise ReleaseControllerError(
-		f"release workspace is unavailable ({reasons}); provide an existing short "
-		"writable directory with --workspace-parent"
-	)
+			if len(str(final)) > WINDOWS_MAX_WORKSPACE_PATH_CHARS:
+				raise ReleaseControllerError(
+					"release workspace path is too long; provide a shorter "
+					"--workspace-parent directory"
+				)
+		yield workspace
+
+
+def _default_release_workspace() -> Path:
+	workspace = Path(tempfile.gettempdir())
+	if os.name != "nt":
+		return workspace
+	try:
+		final = _windows_final_path(workspace)
+	except (OSError, ReleaseControllerError) as error:
+		raise ReleaseControllerError(
+			"release workspace final path is unavailable; provide a shorter "
+			"--workspace-parent directory"
+		) from error
+	if len(str(final)) > WINDOWS_MAX_WORKSPACE_PATH_CHARS:
+		raise ReleaseControllerError(
+			"release workspace path is too long; provide a shorter --workspace-parent directory"
+		)
+	return workspace
 
 
 def _run_release_command(
@@ -469,16 +449,19 @@ def verify_release_candidate(
 	release_version = _expected_version(_version_authority(actual_root), version)
 	artifact_path = Path(artifact).resolve()
 	try:
-		with _release_workspace(actual_root, artifact_path, workspace_parent) as workspace:
-			cache = PolicyCache(workspace / "quality-gate")
-			checked = cache.sync(artifact_path, version=release_version)
-			_execute_artifact_gate(
-				actual_root,
-				cache,
-				checked,
-				workspace,
-				manifest.repository.gate_timeout_seconds,
-			)
+		with temporary_workspace(actual_root):
+			with _release_workspace(workspace_parent) as workspace:
+				cache = PolicyCache(workspace / "quality-gate")
+				checked = cache.sync(artifact_path, version=release_version)
+				_execute_artifact_gate(
+					actual_root,
+					cache,
+					checked,
+					workspace,
+					manifest.repository.gate_timeout_seconds,
+				)
+	except TemporaryWorkspaceError as error:
+		raise ReleaseControllerError(f"release workspace is unavailable: {error}") from error
 	except DistributionError as error:
 		raise ReleaseControllerError(f"release artifact is unverifiable: {error}") from error
 	return ReleaseCandidate(release_version, actual_root, artifact_path, checked)

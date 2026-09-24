@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd()))
 from quality_gate.publication_artifacts import load_json_record
-
+from quality_gate.temp_workspace import temporary_workspace
 from scripts.release_metadata import load_release_timeout
 
 
@@ -22,7 +22,7 @@ def _write_json(path: Path, value: object) -> None:
 	temporary.replace(path)
 
 
-def main() -> None:
+def _run_release_build() -> None:
 
 	candidate_path = Path(os.environ["CANDIDATE_PATH"])
 	with candidate_path.open("rb") as candidate_file:
@@ -189,6 +189,11 @@ def main() -> None:
 		],
 	}
 	_write_json(output / "evidence.json", evidence)
+
+
+def main() -> None:
+	with temporary_workspace(Path.cwd()):
+		_run_release_build()
 
 
 if __name__ == "__main__":
