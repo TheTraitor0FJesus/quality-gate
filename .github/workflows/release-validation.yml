@@ -9,6 +9,7 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
+  packages: read
 
 concurrency:
   group: release-validation-${{ github.event.pull_request.number }}

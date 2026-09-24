@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .publication import PublicationError
-from .publication_artifacts import load_json_record
+from .publication_artifacts import ArtifactReader, load_json_record
 from .publication_evidence import record
 from .publication_flow import Context, Publisher, canonical, sha
 from .publication_github import (
@@ -21,6 +21,13 @@ from .publication_github import (
 	GitHubCLI,
 	registry_configuration,
 )
+
+
+def _configured_timeout(timeouts: Mapping[str, object], name: str) -> float:
+	value = timeouts.get(name)
+	if isinstance(value, bool) or not isinstance(value, (int, float)):
+		raise PublicationError(f"release timeout {name} must be numeric")
+	return float(value)
 
 
 def _helper(root: Path, expected: str, command: BoundedCommand) -> str:
@@ -46,25 +53,50 @@ def _helper(root: Path, expected: str, command: BoundedCommand) -> str:
 def _publisher(root: Path) -> Publisher:
 	provider_sha = sha(os.environ.get("PUBLISHER_SHA"))
 	settings = tomllib.loads((root / ".release/release-tools.toml").read_text(encoding="utf-8"))
-	command = BoundedCommand(float(settings["timeouts"]["github_api_seconds"]))
+	release_token = os.environ.pop("PUBLISHER_RELEASE_TOKEN", "")
+	timeouts = record(settings.get("timeouts"), "release timeouts")
+	github_api_timeout = _configured_timeout(timeouts, "github_api_seconds")
+	evidence_wait = _configured_timeout(timeouts, "actions_evidence_wait_seconds")
+	evidence_poll = _configured_timeout(timeouts, "actions_evidence_poll_seconds")
+	command = BoundedCommand(github_api_timeout)
 	helper_sha = _helper(root, provider_sha, command)
+	release_command = (
+		BoundedCommand(
+			command.timeout_seconds,
+			environment={"GH_TOKEN": release_token},
+		)
+		if release_token
+		else command
+	)
 	api = GitHubCLI(
 		os.environ["GITHUB_REPOSITORY"],
 		timeout_seconds=command.timeout_seconds,
 		command=command,
+		release_command=release_command,
 	)
-	run = record(api.get(f"/actions/runs/{int(os.environ['GITHUB_RUN_ID'])}"), "actual Actions run")
+	run_id = int(os.environ["GITHUB_RUN_ID"])
+	attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+	run = ArtifactReader(
+		api,
+		wait_seconds=float(evidence_wait),
+		poll_seconds=float(evidence_poll),
+	).run(run_id, expected_attempt=attempt)
 	context = Context(
 		repository=os.environ["GITHUB_REPOSITORY"],
 		provider_repository=os.environ["PUBLISHER_REPOSITORY"],
 		provider_sha=provider_sha,
 		helper_sha=helper_sha,
-		run_id=int(os.environ["GITHUB_RUN_ID"]),
-		attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]),
+		run_id=run_id,
+		attempt=attempt,
 		run_source_sha=sha(os.environ.get("GITHUB_SHA")),
 		run_head_sha=sha(run.get("head_sha")),
 	)
-	return Publisher(api, context)
+	return Publisher(
+		api,
+		context,
+		evidence_wait_seconds=float(evidence_wait),
+		evidence_poll_seconds=float(evidence_poll),
+	)
 
 
 def _outputs(result: Mapping[str, object], publisher: Publisher, directory: Path) -> None:
@@ -122,6 +154,8 @@ def _parser() -> argparse.ArgumentParser:
 def _main(arguments: Sequence[str] | None = None) -> int:
 	options = _parser().parse_args(arguments)
 	try:
+		if options.command == "publish" and not os.environ.get("PUBLISHER_RELEASE_TOKEN"):
+			raise PublicationError("GitHub release API token is required")
 		publisher = _publisher(Path(__file__).resolve().parents[1])
 		if options.command == "publish":
 			result = publisher.publish(options.pr, options.candidate_id)
@@ -162,10 +196,13 @@ def _main(arguments: Sequence[str] | None = None) -> int:
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
-	"""Run shared publication with optional isolated caller registry credentials."""
+	"""Run shared publication with isolated caller-owned GHCR authentication."""
 	try:
-		with registry_configuration(os.environ.get("PUBLISHER_REGISTRY_AUTH", "")):
+		with registry_configuration(
+			os.environ.get("PUBLISHER_GHCR_TOKEN", ""),
+			os.environ.get("PUBLISHER_GHCR_USERNAME", ""),
+		):
 			return _main(arguments)
 	except (PublicationError, OSError) as error:
-		sys.stderr.write(f"publication: registry configuration refused - {error}\n")
+		sys.stderr.write(f"publication: GHCR configuration refused - {error}\n")
 		return 1

@@ -44,12 +44,12 @@ def test_release_build_isolates_test_history_and_preserves_evidence(
 	}
 	for key, value in context.items():
 		monkeypatch.setenv(key, value)
-	package = tmp_path / "quality-gate-v2.1.0.zip"
+	package = tmp_path / "quality-gate-v2.2.0.zip"
 	package.write_bytes(b"verified archive from the product adapter")
 	identity = {
 		"path": str(package),
 		"name": package.name,
-		"version": "2.1.0",
+		"version": "2.2.0",
 		"source_sha": source_sha,
 		"sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
 	}
@@ -81,7 +81,7 @@ def test_release_build_isolates_test_history_and_preserves_evidence(
 	cache_variable = "LOCALAPPDATA" if os.name == "nt" else "XDG_CACHE_HOME"
 	assert Path(test_environment[cache_variable]) == cache
 	assert (
-		Path(test_environment["QUALITY_GATE_POLICY_ROOT"]) == cache / "quality-gate/releases/v2.1.0"
+		Path(test_environment["QUALITY_GATE_POLICY_ROOT"]) == cache / "quality-gate/releases/v2.2.0"
 	)
 	output = tmp_path / "quality-gate-release" / context["RELEASE_PLATFORM"]
 	if test_exit_code:

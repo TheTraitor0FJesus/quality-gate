@@ -1965,3 +1965,21 @@ def audit(root: Path | None = None, *, verbose: bool = False) -> Verdict:
 	)
 	emit(render(verdict, verbose=verbose))
 	return verdict
+
+
+def bootstrap_audit(
+	root: Path,
+	*,
+	policy_release: str,
+	verbose: bool = False,
+) -> Verdict:
+	"""Audit one candidate using an explicitly selected immutable policy release."""
+	actual_root = repository_root(root)
+	verdict = _run_snapshot(
+		actual_root,
+		verbose=verbose,
+		mode="audit",
+		policy_release=policy_release,
+	)
+	emit(render(verdict, verbose=verbose))
+	return verdict

@@ -6,6 +6,8 @@ external_download_seconds = 120
 subprocess_seconds = 900
 check_wait_seconds = 900
 check_poll_seconds = 10
+actions_evidence_wait_seconds = 30
+actions_evidence_poll_seconds = 2
 
 [bootstrap]
 policy_release = "v2.0.6"

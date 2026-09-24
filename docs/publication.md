@@ -1,9 +1,10 @@
 # Shared publisher contract
 
 Paths in this contract are relative to the provider repository root unless labelled caller-owned.
-The public workflow interface and evidence schema are version 1. Consumers select one accepted
-full provider commit SHA, **R**, for both reusable workflows. A later R requires an explicit rollout
-and verification of affected behavior; it does not change product versions or Quality Gate pins.
+The evidence schema is version 1. Consumers select one accepted full provider commit SHA, **R**,
+for both reusable workflows. A later R requires an explicit rollout and verification of affected
+behavior; it does not change product versions or Quality Gate pins. Each R may update caller
+permissions and one-time package access requirements, which are documented before rollout.
 
 ## Entry points and ownership
 
@@ -14,7 +15,7 @@ and verification of affected behavior; it does not change product versions or Qu
   behavioral tests with a controlled GitHub service. The other `publication_*` modules implement
   transport, bounded artifact reads, and provenance; product adapters contain no release parser.
 - The caller owns `.release/version.toml`, `.release/notes.md`, `.release/publisher.toml`, exact-source
-  build/check jobs, registry/package credentials, and existing deliverable retention.
+  build/check jobs, job-scoped token permissions, package access, and deliverable retention.
 
 Each wrapper checks out `job.workflow_repository` at `job.workflow_sha`, disables persisted checkout
 credentials, and verifies that the helper checkout is clean and identifies that exact commit before
@@ -60,15 +61,19 @@ Preparation outputs are strings:
 
 Publication takes required string inputs `pr-number` and `candidate-id`, and the required secret
 `publication-token`. Its successful CLI result is `published` or `already-complete`. It exposes no
-product-execution hook. Supply a repository-scoped token with Contents write, Pull requests read,
-and Actions read; repository/workflow protection may additionally require Workflows write.
-Both entry points accept the optional caller-owned `registry-auth` secret for private image
-readback, including already-complete preparation. Its Docker configuration contains only
-`{"auths":{"<registry>":{"auth":"<base64 credentials>"}}}`. The helper writes it to a temporary
-restricted configuration and removes it on exit; executable credential helpers are rejected.
-Open-PR validation callers omit this secret.
-Administration access and native Immutable Releases are not required. The built-in job token
-remains read-only. The publication job installs no dependencies and starts no product code.
+product-execution hook. `RELEASE_TOKEN` is used only for release-tag and GitHub Release mutations;
+it needs Contents write, and creating a tag containing workflow changes may also require Workflows
+write. GitHub metadata reads use the caller's `GITHUB_TOKEN`.
+
+Both reusable workflows require `packages: read` and configure a temporary Docker auth file from
+the caller's short-lived `GITHUB_TOKEN` and actor. The helper removes that configuration on exit.
+When the GHCR package belongs to another repository, its owner grants the caller repository Read
+under the package's **Manage Actions access** settings. This is a one-time package access setting,
+not a token or repository secret. Image-producing jobs use their own job-scoped `GITHUB_TOKEN` with
+`packages: write` for the push. No separate GHCR read or push credential is required.
+
+Administration access and native Immutable Releases are not required. The publisher job installs no
+dependencies and starts no product code.
 
 The common publication workflow serializes each repository with `cancel-in-progress: false`.
 Preparation/build runs have distinct concurrency groups so another candidate cannot cancel an
@@ -83,7 +88,7 @@ lines are these exact Markdown list fields:
 ```markdown
 ## Release
 
-- Version: 2.1.0
+- Version: 2.2.0
 - Changes: Описание изменений и необходимой адаптации.
 - Publication: owner merge authorizes publication after the merged commit passes the required release checks.
 ```
@@ -145,17 +150,21 @@ repackaging. Their bytes must match the declared SHA-256. An image reference ide
 repository and `@sha256:<digest>`; the publisher resolves that digest with `docker buildx imagetools
 inspect --raw`, without running the image. Docker's raw output preserves the original manifest
 bytes, including their digest, as defined by its [printer implementation](https://github.com/docker/buildx/blob/master/util/imagetools/printers.go).
-Supply the caller's separate `registry-auth` secret when registry reads require authentication;
-the existing product owner remains responsible for registry retention. Do not replace registry
-credentials with the publication token or install product dependencies in the publisher job.
+The temporary caller-token configuration described above authenticates this read; the existing
+product owner remains responsible for registry retention. Do not use the release token for registry
+authentication or install product dependencies in the publisher job.
 
-The publisher cross-checks actual run repository/path/reusable revision, latest producing job
+The publisher cross-checks actual run repository/path/reusable revision, the latest producing job
 attempt and result, required step results, artifact run/source, timestamps, ID, archive digest, and
 producer upload logs. It downloads by verified artifact ID and validates transfer integrity before
-reading evidence JSON. Reused names and self-declared JSON alone are insufficient. A successful
-producer from an earlier attempt of the same run remains valid when only failed jobs are rerun;
-a newer failed/pending producer supersedes it and blocks publication. A recovery run verifies new
-product evidence while retaining the original candidate separately.
+reading evidence JSON. Reused names and self-declared JSON alone are insufficient. Evidence is
+paired with the job record from its exact attempt. If GitHub reports a successful job reused by a
+later run attempt, an earlier artifact is accepted only when both attempt records identify the same
+execution; a newly executed producer must provide evidence for that attempt. Incomplete API lists,
+run records, producer-job fields, and artifact metadata are retried for a bounded interval. Missing
+or mismatched provenance then fails with a diagnostic before publication mutations. A newer failed
+or pending producer blocks publication. A recovery run verifies new product evidence while retaining the
+original candidate separately.
 
 ## Envelope retention, completion, and recovery
 

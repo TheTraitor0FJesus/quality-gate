@@ -22,7 +22,8 @@ from .publication_evidence import positive, record
 
 JSON_LIMIT = 16 * 1024 * 1024
 MAX_TIMEOUT_SECONDS = 300
-MAX_REGISTRY_AUTH_BYTES = 64 * 1024
+MAX_GHCR_TOKEN_BYTES = 64 * 1024
+MAX_GHCR_USERNAME_LENGTH = 255
 GH_ESCAPE_SEQUENCE_ERROR = (
 	b"the response contains terminal escape sequences; pass --allow-escape-sequences"
 )
@@ -64,20 +65,20 @@ def _http_status(detail: bytes) -> str | None:
 
 
 @contextmanager
-def registry_configuration(content: str) -> Iterator[None]:
-	"""Expose caller-owned registry auth temporarily, without executable credential helpers."""
-	if not content:
-		yield
-		return
-	if len(content.encode("utf-8")) > MAX_REGISTRY_AUTH_BYTES:
-		raise PublicationError("registry auth exceeds 64 KiB")
-	configuration = json_record(content.encode("utf-8"))
-	if set(configuration) != {"auths"}:
-		raise PublicationError("registry configuration supports only inline auths")
-	for credentials in record(configuration["auths"], "registry auths").values():
-		entry = record(credentials, "registry credentials")
-		if set(entry) != {"auth"} or not isinstance(entry["auth"], str):
-			raise PublicationError("registry credentials require only an inline auth string")
+def registry_configuration(token: str, username: str) -> Iterator[None]:
+	"""Expose the caller's short-lived GHCR token through a temporary Docker config."""
+	if not token or not username:
+		raise PublicationError("caller GITHUB_TOKEN and actor are required for GHCR access")
+	if len(token.encode("utf-8")) > MAX_GHCR_TOKEN_BYTES:
+		raise PublicationError("GHCR token exceeds 64 KiB")
+	if any(character.isspace() or character == "\x00" for character in token):
+		raise PublicationError("GHCR token contains invalid characters")
+	if len(username) > MAX_GHCR_USERNAME_LENGTH or any(
+		character.isspace() or character in ":\x00" for character in username
+	):
+		raise PublicationError("GitHub actor is invalid for GHCR authentication")
+	auth = base64.b64encode(f"{username}:{token}".encode()).decode("ascii")
+	content = json.dumps({"auths": {"ghcr.io": {"auth": auth}}}, separators=(",", ":"))
 	previous = os.environ.get("DOCKER_CONFIG")
 	with tempfile.TemporaryDirectory(prefix="publisher-registry-") as directory:
 		path = Path(directory) / "config.json"
@@ -110,10 +111,13 @@ class EscapeSequenceError(PublicationError):
 class BoundedCommand:
 	"""Read a child stream with a size limit and a watchdog independent of stream progress."""
 
-	def __init__(self, timeout_seconds: float) -> None:
+	def __init__(
+		self, timeout_seconds: float, *, environment: Mapping[str, str] | None = None
+	) -> None:
 		if not 0 < timeout_seconds <= MAX_TIMEOUT_SECONDS:
 			raise PublicationError("GitHub command timeout must be within 300 seconds")
 		self.timeout_seconds = timeout_seconds
+		self.environment = dict(environment or {})
 
 	def __call__(
 		self, arguments: Sequence[str], *, content: bytes | None = None, limit: int
@@ -129,9 +133,15 @@ class BoundedCommand:
 
 	def _execute(self, command: list[str], errors: BinaryIO, limit: int) -> bytes:
 		operation = _operation(command)
+		environment = os.environ.copy()
+		environment.update(self.environment)
 		try:
 			with subprocess.Popen(
-				command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors
+				command,
+				stdin=subprocess.DEVNULL,
+				stdout=subprocess.PIPE,
+				stderr=errors,
+				env=environment,
 			) as process:
 				timed_out = threading.Event()
 
@@ -194,12 +204,18 @@ class GitHubCLI:
 	"""GitHub.com repository API plus content-addressed registry readback."""
 
 	def __init__(
-		self, repository: str, *, timeout_seconds: float, command: Command | None = None
+		self,
+		repository: str,
+		*,
+		timeout_seconds: float,
+		command: Command | None = None,
+		release_command: Command | None = None,
 	) -> None:
 		if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None:
 			raise PublicationError("invalid GitHub repository")
 		self.repository = repository
 		self.command = command or BoundedCommand(timeout_seconds)
+		self.release_command = release_command or self.command
 
 	def _arguments(
 		self, path: str, method: str, *, allow_escape_sequences: bool = False
@@ -222,9 +238,17 @@ class GitHubCLI:
 			arguments.append("--allow-escape-sequences")
 		return arguments
 
-	def _json(self, path: str, method: str, payload: Mapping[str, object] | None = None) -> object:
+	def _json(
+		self,
+		path: str,
+		method: str,
+		payload: Mapping[str, object] | None = None,
+		*,
+		release_operation: bool = False,
+	) -> object:
 		content = json.dumps(payload).encode("utf-8") if payload is not None else None
-		raw = self.command(self._arguments(path, method), content=content, limit=JSON_LIMIT)
+		command = self.release_command if release_operation else self.command
+		raw = command(self._arguments(path, method), content=content, limit=JSON_LIMIT)
 		try:
 			value = json.loads(raw)
 		except (UnicodeError, json.JSONDecodeError) as error:
@@ -259,10 +283,12 @@ class GitHubCLI:
 			raise PublicationError("source content encoding is invalid") from error
 
 	def post(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
-		return record(self._json(path, "POST", payload), "created resource")
+		return record(self._json(path, "POST", payload, release_operation=True), "created resource")
 
 	def patch(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
-		return record(self._json(path, "PATCH", payload), "updated resource")
+		return record(
+			self._json(path, "PATCH", payload, release_operation=True), "updated resource"
+		)
 
 	def download(self, path: str) -> bytes:
 		limit = JSON_LIMIT if path.endswith("/logs") else MAX_BUNDLE_BYTES
@@ -282,7 +308,7 @@ class GitHubCLI:
 			f"https://uploads.github.com/repos/{self.repository}/releases/{release_id}"
 			f"/assets?name={quote(name, safe='')}"
 		)
-		raw = self.command(
+		raw = self.release_command(
 			[
 				"gh",
 				"api",

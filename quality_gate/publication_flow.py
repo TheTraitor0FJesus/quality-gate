@@ -14,7 +14,7 @@ from typing import Protocol
 from .publication import PublicationError, parse_decision, prepare
 from .publication_artifacts import ArtifactReader, json_record
 from .publication_config import validate_config, validate_identities
-from .publication_evidence import digest, positive, record, records
+from .publication_evidence import digest, positive, record, records, verify_job
 
 RECEIPT_MARKER = "\n<!-- shared-publisher-receipt-v1\n"
 PAGE_SIZE = 100
@@ -110,10 +110,21 @@ class Context:
 class Publisher:
 	"""Validate original authorization, verify evidence, and resume one exact candidate."""
 
-	def __init__(self, api: GitHub, context: Context) -> None:
+	def __init__(
+		self,
+		api: GitHub,
+		context: Context,
+		*,
+		evidence_wait_seconds: float = 30.0,
+		evidence_poll_seconds: float = 2.0,
+	) -> None:
 		self.api = api
 		self.context = context
-		self.artifacts = ArtifactReader(api)
+		self.artifacts = ArtifactReader(
+			api,
+			wait_seconds=evidence_wait_seconds,
+			poll_seconds=evidence_poll_seconds,
+		)
 		if sha(context.provider_sha) != sha(context.helper_sha):
 			raise PublicationError("executed helper differs from reusable workflow revision")
 		sha(context.run_source_sha)
@@ -342,18 +353,13 @@ class Publisher:
 		self._validate_candidate(candidate, self._pull(number, merged=True))
 		run_id = positive(candidate.get("origin_run_id"), "original run ID")
 		attempt = positive(candidate.get("origin_attempt"), "original attempt")
-		jobs = [
-			job
-			for job in self.artifacts.jobs(run_id)
-			if job.get("name") == "Prepare release / Prepare candidate"
-			and job.get("run_attempt") == attempt
-		]
-		if len(jobs) != 1:
-			raise PublicationError("original candidate producer is missing or ambiguous")
+		job = self.artifacts.jobs_for_attempt(
+			run_id, "Prepare release / Prepare candidate", attempt, ["Prepare candidate"]
+		)
 		config = record(candidate.get("config"), "candidate configuration")
 		self.artifacts.prove(
 			artifact,
-			job=jobs[0],
+			job=job,
 			repository=self.context.repository,
 			run_id=run_id,
 			run_head_sha=sha(candidate.get("origin_run_head_sha")),
@@ -418,7 +424,7 @@ class Publisher:
 		}
 
 	def _recovery_context(self) -> None:
-		run = record(self.api.get(f"/actions/runs/{self.context.run_id}"), "verification run")
+		run = self.artifacts.run(self.context.run_id, expected_attempt=self.context.attempt)
 		if run.get("event") == "workflow_dispatch":
 			repository = record(self.api.get("/"), "repository")
 			if run.get("head_branch") != repository.get("default_branch"):
@@ -426,21 +432,132 @@ class Publisher:
 			if run.get("head_sha") != self.context.run_source_sha:
 				raise PublicationError("recovery tooling source differs from its Actions run")
 
+	def _latest_producer_job(
+		self,
+		job_name: str,
+		checks: list[str],
+		*,
+		minimum_attempt: int = 1,
+	) -> tuple[dict[str, object], int]:
+		context = self.context
+		job = self.artifacts.latest_job(
+			context.run_id,
+			job_name,
+			required_steps=checks,
+			minimum_attempt=minimum_attempt,
+		)
+		attempt = positive(job.get("run_attempt"), "producing attempt")
+		verify_job(
+			job,
+			run_id=context.run_id,
+			run_head_sha=context.run_head_sha,
+			current_attempt=context.attempt,
+			job_name=job_name,
+			required_steps=checks,
+		)
+		return job, attempt
+
+	@staticmethod
+	def _artifact_attempt(prefix: str, item: Mapping[str, object]) -> int | None:
+		match = re.fullmatch(re.escape(prefix) + r"([1-9][0-9]*)", str(item.get("name")))
+		return int(match.group(1)) if match is not None else None
+
+	@classmethod
+	def _contains_evidence(
+		cls,
+		items: list[dict[str, object]],
+		prefix: str,
+		expected_name: str | None,
+	) -> bool:
+		return any(
+			cls._artifact_attempt(prefix, item) is not None
+			and (expected_name is None or item.get("name") == expected_name)
+			for item in items
+		)
+
+	def _producer_artifacts(
+		self,
+		producer_name: str,
+		prefix: str,
+		*,
+		attempt: int | None = None,
+	) -> list[tuple[int, dict[str, object]]]:
+		context = self.context
+		expected_name = f"{prefix}{attempt}" if attempt is not None else None
+		label = f"required evidence artifact for producer {producer_name}"
+		if attempt is not None:
+			label += f" attempt {attempt}"
+		items = self.artifacts.pages(
+			f"/actions/runs/{context.run_id}/artifacts",
+			"artifacts",
+			accept=lambda values: self._contains_evidence(values, prefix, expected_name),
+			wait_label=label,
+		)
+		result: list[tuple[int, dict[str, object]]] = []
+		for item in items:
+			item_attempt = self._artifact_attempt(prefix, item)
+			if item_attempt is not None:
+				result.append((item_attempt, item))
+		return result
+
+	def _select_producer_artifact(
+		self,
+		producer_name: str,
+		prefix: str,
+		job_name: str,
+		checks: list[str],
+		latest_job: dict[str, object],
+		latest_attempt: int,
+		available: list[tuple[int, dict[str, object]]],
+	) -> tuple[int, dict[str, object], dict[str, object], int]:
+		future_attempts = [attempt for attempt, _item in available if attempt > latest_attempt]
+		if future_attempts:
+			latest_job, latest_attempt = self._latest_producer_job(
+				job_name, checks, minimum_attempt=max(future_attempts)
+			)
+			if any(attempt > latest_attempt for attempt, _item in available):
+				raise PublicationError(
+					"producer evidence artifact is newer than the reported job attempt"
+				)
+		eligible = [(attempt, item) for attempt, item in available if attempt <= latest_attempt]
+		if not eligible:
+			raise PublicationError(
+				f"required evidence artifact for producer {producer_name} is missing "
+				f"through job attempt {latest_attempt}"
+			)
+		attempt = max(item_attempt for item_attempt, _item in eligible)
+		matches = [item for item_attempt, item in eligible if item_attempt == attempt]
+		if len(matches) != 1:
+			raise PublicationError(
+				f"evidence artifact for producer {producer_name} is ambiguous at attempt {attempt}"
+			)
+		artifact = matches[0]
+		job = latest_job
+		if attempt < latest_attempt:
+			attempt_job = self.artifacts.jobs_for_attempt(
+				self.context.run_id, job_name, attempt, checks
+			)
+			if self.artifacts.same_execution(attempt_job, latest_job):
+				job = attempt_job
+			else:
+				latest_matches = self._producer_artifacts(
+					producer_name, prefix, attempt=latest_attempt
+				)
+				if len(latest_matches) != 1:
+					raise PublicationError(
+						f"evidence artifact for producer {producer_name} is ambiguous "
+						f"at attempt {latest_attempt}"
+					)
+				attempt, artifact = latest_matches[0]
+		return attempt, artifact, job, latest_attempt
+
 	def _producer_bundle(
 		self,
 		candidate: Mapping[str, object],
 		producer: Mapping[str, object],
 	) -> tuple[dict[str, object], dict[str, bytes], dict[str, object]]:
 		context = self.context
-		job = self.artifacts.latest_job(context.run_id, str(producer.get("job")))
-		attempt = positive(job.get("run_attempt"), "producing attempt")
-		name = f"release-evidence-{producer.get('name')}-{attempt}"
-		artifacts = self.artifacts.pages(f"/actions/runs/{context.run_id}/artifacts", "artifacts")
-		matches = [item for item in artifacts if item.get("name") == name]
-		if len(matches) != 1:
-			raise PublicationError(f"required evidence artifact is missing or ambiguous: {name}")
-		artifact, files = self.artifacts.read(positive(matches[0].get("id"), "artifact ID"))
-		config = record(candidate.get("config"), "candidate configuration")
+		job_name = str(producer.get("job"))
 		checks = producer.get("checks")
 		if (
 			not isinstance(checks, list)
@@ -448,6 +565,22 @@ class Publisher:
 			or not all(isinstance(item, str) for item in checks)
 		):
 			raise PublicationError("producer must name its required verification steps")
+		latest_job, latest_attempt = self._latest_producer_job(job_name, checks)
+		producer_name = str(producer.get("name"))
+		prefix = f"release-evidence-{producer_name}-"
+		available = self._producer_artifacts(producer_name, prefix)
+		attempt, artifact_item, job, latest_attempt = self._select_producer_artifact(
+			producer_name,
+			prefix,
+			job_name,
+			checks,
+			latest_job,
+			latest_attempt,
+			available,
+		)
+		name = f"{prefix}{attempt}"
+		artifact, files = self.artifacts.read(positive(artifact_item.get("id"), "artifact ID"))
+		config = record(candidate.get("config"), "candidate configuration")
 		proof = self.artifacts.prove(
 			artifact,
 			job=job,
@@ -477,10 +610,12 @@ class Publisher:
 			raise PublicationError(
 				"product evidence does not bind this candidate and producing run"
 			)
+		proof["artifact_attempt"] = attempt
+		proof["latest_attempt"] = latest_attempt
 		return evidence, files, proof
 
 	def _verification_context(self, candidate: Mapping[str, object]) -> None:
-		run = record(self.api.get(f"/actions/runs/{self.context.run_id}"), "verification run")
+		run = self.artifacts.run(self.context.run_id, expected_attempt=self.context.attempt)
 		if run.get("event") == "pull_request" and (
 			self.context.run_id != candidate.get("origin_run_id")
 			or self.context.run_head_sha != candidate.get("origin_run_head_sha")

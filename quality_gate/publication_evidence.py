@@ -110,6 +110,26 @@ def _verify_job(
 	return attempt
 
 
+def verify_job(
+	job: Mapping[str, object],
+	*,
+	run_id: int,
+	run_head_sha: str,
+	current_attempt: int,
+	job_name: str,
+	required_steps: Sequence[str],
+) -> int:
+	"""Verify one successful producer record independently of its artifact."""
+	return _verify_job(
+		job,
+		run_id=run_id,
+		run_head_sha=run_head_sha,
+		current_attempt=current_attempt,
+		job_name=job_name,
+		required_steps=required_steps,
+	)
+
+
 def verify_producer(
 	proof: Mapping[str, object],
 	*,
@@ -126,8 +146,9 @@ def verify_producer(
 ) -> dict[str, object]:
 	"""Verify API records and producer logs, independently of uploaded evidence JSON.
 
-	A successful earlier attempt remains eligible on failed-jobs reruns of the same run.
-	The caller selects the latest attempt of the named producer before invoking this function.
+	The job record and artifact must identify the same producing attempt. The caller separately
+	checks the latest job and only permits an earlier successful artifact when GitHub identifies
+	the later record as the same reused execution.
 	"""
 	verify_run(
 		record(proof.get("run"), "run"),
@@ -139,7 +160,7 @@ def verify_producer(
 		workflow=workflow,
 	)
 	job = record(proof.get("job"), "job")
-	attempt = _verify_job(
+	attempt = verify_job(
 		job,
 		run_id=run_id,
 		run_head_sha=run_head_sha,

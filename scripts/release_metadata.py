@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 
 SEMANTIC_VERSION = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+POLICY_RELEASE = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -28,6 +29,8 @@ RELEASE_TIMEOUT_KEYS = frozenset(
 		"subprocess_seconds",
 		"check_wait_seconds",
 		"check_poll_seconds",
+		"actions_evidence_wait_seconds",
+		"actions_evidence_poll_seconds",
 	}
 )
 
@@ -38,6 +41,8 @@ RELEASE_TIMEOUT_LIMITS = {
 	"subprocess_seconds": 3600.0,
 	"check_wait_seconds": 3600.0,
 	"check_poll_seconds": 60.0,
+	"actions_evidence_wait_seconds": 300.0,
+	"actions_evidence_poll_seconds": 60.0,
 }
 
 
@@ -47,11 +52,11 @@ class ReleaseError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class VersionProjection:
-	"""The projections that must agree with the repository version authority."""
+	"""The product projections and the independent source policy selection."""
 
 	version: str
 	package: str
-	policy_release: str
+	source_policy_release: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +232,7 @@ def _toml(path: Path, label: str) -> dict[str, object]:
 
 
 def validate_version_projections(root: Path | str) -> VersionProjection:
-	"""Require package, runtime, manifest, template, and workflow projections to agree."""
+	"""Validate product projections while allowing the source to use its current policy."""
 	actual_root = Path(root).resolve()
 	version = load_version_authority(actual_root)
 	project = _toml(actual_root / "pyproject.toml", "pyproject.toml").get("project")
@@ -238,8 +243,12 @@ def validate_version_projections(root: Path | str) -> VersionProjection:
 		raise ReleaseError("runtime version does not match the version authority")
 	manifest = _toml(actual_root / "quality-gate.toml", "quality-gate.toml")
 	quality = _object(manifest.get("quality"), "quality-gate.toml quality")
-	if quality.get("policy_release") != f"v{version}":
-		raise ReleaseError("policy manifest version does not match the version authority")
+	source_policy_release = quality.get("policy_release")
+	if (
+		not isinstance(source_policy_release, str)
+		or POLICY_RELEASE.fullmatch(source_policy_release) is None
+	):
+		raise ReleaseError("quality.policy_release must use vMAJOR.MINOR.PATCH")
 	template = _toml(actual_root / "templates" / "quality-gate.toml", "template manifest")
 	template_release = template.get("policy_release")
 	if template_release is None:
@@ -257,4 +266,4 @@ def validate_version_projections(root: Path | str) -> VersionProjection:
 
 	if not supports_unified_inventory(f"v{version}"):
 		raise ReleaseError("distribution inventory does not support the authoritative version")
-	return VersionProjection(version, version, f"v{version}")
+	return VersionProjection(version, version, source_policy_release)
