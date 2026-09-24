@@ -234,8 +234,20 @@ def test_gh_operation_removes_query_and_untrusted_endpoint_text() -> None:
 	)
 
 
-def test_builtin_token_creates_a_temporary_ghcr_only_docker_configuration() -> None:
-	original = os.environ.get("DOCKER_CONFIG")
+def test_builtin_token_uses_isolated_config_and_restores_existing_docker_config(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	existing_directory = tmp_path / "existing-docker-config"
+	existing_directory.mkdir()
+	existing_config = {
+		"auths": {
+			"ghcr.io": {"auth": "prior"},
+			"registry.example": {"auth": "external"},
+		}
+	}
+	existing_config_path = existing_directory / "config.json"
+	existing_config_path.write_text(json.dumps(existing_config), encoding="utf-8")
+	monkeypatch.setenv("DOCKER_CONFIG", str(existing_directory))
 	username = "github-actions[bot]"
 	token = "short-lived-token"
 	with registry_configuration(token, username):
@@ -251,7 +263,8 @@ def test_builtin_token_creates_a_temporary_ghcr_only_docker_configuration() -> N
 		if os.name != "nt":
 			assert (directory / "config.json").stat().st_mode & 0o777 == 0o600
 	assert not directory.exists()
-	assert os.environ.get("DOCKER_CONFIG") == original
+	assert os.environ["DOCKER_CONFIG"] == str(existing_directory)
+	assert json.loads(existing_config_path.read_text(encoding="utf-8")) == existing_config
 
 
 @pytest.mark.parametrize(
