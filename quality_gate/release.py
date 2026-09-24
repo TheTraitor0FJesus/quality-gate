@@ -100,8 +100,8 @@ def _release_notes(root: Path) -> None:
 		raise ReleaseControllerError("release notes must be nonempty and at most 64 KiB")
 
 
-def _expected_version(manifest: Manifest, requested: str | None) -> str:
-	version = requested or manifest.policy_release
+def _expected_version(authoritative_version: str, requested: str | None) -> str:
+	version = requested or f"v{authoritative_version}"
 	components = version[1:].split(".") if version.startswith("v") else ()
 	if len(version) > MAX_RELEASE_VERSION_LENGTH or any(
 		len(component) > MAX_RELEASE_VERSION_COMPONENT_LENGTH for component in components
@@ -109,10 +109,10 @@ def _expected_version(manifest: Manifest, requested: str | None) -> str:
 		raise ReleaseControllerError("release version is too long")
 	if not RELEASE_VERSION.fullmatch(version):
 		raise ReleaseControllerError("release version must use vMAJOR.MINOR.PATCH")
-	if version != manifest.policy_release:
+	if version != f"v{authoritative_version}":
 		raise ReleaseControllerError(
-			f"release version {version} does not match "
-			f"quality.policy_release {manifest.policy_release}"
+			f"release version {version} does not match product version "
+			f"{authoritative_version} from .release/version.toml"
 		)
 	return version
 
@@ -124,19 +124,15 @@ def validate_release_source(root: Path | str = ".", *, version: str | None = Non
 		manifest = load_manifest(actual_root)
 	except ValidationError as error:
 		raise ReleaseControllerError(f"manifest is unverifiable: {error}") from error
-	release_version = _expected_version(manifest, version)
-	project_version = _project_version(actual_root)
 	authoritative_version = _version_authority(actual_root)
+	_expected_version(authoritative_version, version)
+	project_version = _project_version(actual_root)
 	if project_version != authoritative_version:
 		raise ReleaseControllerError(
 			f"project.version {project_version} does not match .release/version.toml"
 		)
 	if _runtime_version(actual_root) != authoritative_version:
 		raise ReleaseControllerError("runtime __version__ does not match .release/version.toml")
-	if f"v{authoritative_version}" != release_version:
-		raise ReleaseControllerError(
-			f"project.version {project_version} does not match release {release_version}"
-		)
 	_release_notes(actual_root)
 	documents = required_documents_result(actual_root, manifest)
 	if documents.status is not Status.PASSED:
@@ -410,15 +406,24 @@ def _execute_artifact_gate(
 		deadline=deadline,
 		stage="version probe",
 	)
+	setup_script = (
+		"import sys\n"
+		"from pathlib import Path\n"
+		"from quality_gate.launcher import prepare_bootstrap\n"
+		"prepare_bootstrap(\n"
+		"    Path(sys.argv[1]),\n"
+		"    policy_release=sys.argv[2],\n"
+		"    cache_dir=Path(sys.argv[3]),\n"
+		"    create_runtimes=True,\n"
+		")\n"
+	)
 	_run_release_command(
 		[
 			str(python),
-			"-m",
-			"quality_gate",
-			"--root",
+			"-c",
+			setup_script,
 			str(root),
-			"setup",
-			"--cache-dir",
+			release_manifest.version,
 			str(cache.root),
 		],
 		cwd=gate_root,
@@ -426,8 +431,24 @@ def _execute_artifact_gate(
 		deadline=deadline,
 		stage="runtime setup",
 	)
+	audit_script = (
+		"import sys\n"
+		"from pathlib import Path\n"
+		"from quality_gate.runner import bootstrap_audit\n"
+		"verdict = bootstrap_audit(\n"
+		"    Path(sys.argv[1]),\n"
+		"    policy_release=sys.argv[2],\n"
+		")\n"
+		"raise SystemExit(verdict.exit_code)\n"
+	)
 	_run_release_command(
-		[str(python), "-m", "quality_gate", "--root", str(root), "audit"],
+		[
+			str(python),
+			"-c",
+			audit_script,
+			str(root),
+			release_manifest.version,
+		],
 		cwd=gate_root,
 		environment=environment,
 		deadline=deadline,
@@ -445,7 +466,7 @@ def verify_release_candidate(
 	"""Validate the source and verify one immutable release directory or archive."""
 	actual_root = Path(root).resolve()
 	manifest = validate_release_source(actual_root, version=version)
-	release_version = _expected_version(manifest, version)
+	release_version = _expected_version(_version_authority(actual_root), version)
 	artifact_path = Path(artifact).resolve()
 	try:
 		with _release_workspace(actual_root, artifact_path, workspace_parent) as workspace:

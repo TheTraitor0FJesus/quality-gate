@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from quality_gate import runner
 from quality_gate.contracts import CheckResult, Status
 from quality_gate.distribution import DistributionError, PolicyCache
@@ -256,6 +257,12 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	workflow = WORKFLOW.read_text(encoding="utf-8")
 	references = re.findall(r"^ +uses: +([^ ]+)", workflow, re.MULTILINE)
 	manifest = tomllib.loads((REPOSITORY / "quality-gate.toml").read_text(encoding="utf-8"))
+	template = tomllib.loads(
+		(REPOSITORY / "templates" / "quality-gate.toml").read_text(encoding="utf-8")
+	)
+	publisher = tomllib.loads(
+		(REPOSITORY / ".release" / "publisher.toml").read_text(encoding="utf-8")
+	)
 
 	assert references
 	assert all(
@@ -294,6 +301,9 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert "manifest_python.outputs.versions" in workflow
 	assert 'default: "3.12"' not in workflow
 	assert manifest["quality"]["policy_release"] == "v2.1.0"
+	assert template["quality"]["policy_release"] == "v2.2.0"
+	assert all(item["path"] != "quality-gate.toml" for item in publisher["projections"])
+	assert any(item["path"] == "templates/quality-gate.toml" for item in publisher["projections"])
 
 
 def test_workflow_bootstraps_before_reading_a_multicomponent_manifest(tmp_path: Path) -> None:

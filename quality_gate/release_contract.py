@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-UNIFIED_RELEASE = "v2.1.0"
-UNIFIED_RELEASE_PACKAGE_VERSION = "2.1.0"
+UNIFIED_RELEASE = "v2.2.0"
+UNIFIED_RELEASE_PACKAGE_VERSION = "2.2.0"
 UNIFIED_RELEASE_PACKAGE_VERSIONS = {
 	"v2.0.5": "2.0.5",
 	"v2.0.6": "2.0.6",
 	"v2.1.0": "2.1.0",
+	"v2.2.0": "2.2.0",
 }
 WHEEL_IDENTITY_PARTS = 3
 UNIFIED_RELEASE_TOOLS = {

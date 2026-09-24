@@ -12,12 +12,6 @@ format = "python"
 key = "__version__"
 
 [[projections]]
-path = "quality-gate.toml"
-format = "toml"
-key = "quality.policy_release"
-prefix = "v"
-
-[[projections]]
 path = "templates/quality-gate.toml"
 format = "toml"
 key = "quality.policy_release"

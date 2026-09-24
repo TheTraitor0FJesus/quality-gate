@@ -14,12 +14,14 @@ from pathlib import Path
 import pytest
 
 from quality_gate.publication import PublicationError
+from quality_gate.publication_cli import main as publisher_main
 from quality_gate.publication_github import (
 	BoundedCommand,
 	EscapeSequenceError,
 	GitHubCLI,
 	MissingResourceError,
 	_operation,
+	registry_configuration,
 )
 
 
@@ -80,6 +82,51 @@ def test_image_readback_uses_content_digest_without_running_product() -> None:
 	assert command.calls == [
 		["docker", "buildx", "imagetools", "inspect", "ghcr.io/o/image@sha256:" + "c" * 64, "--raw"]
 	]
+
+
+def test_release_api_mutations_use_the_separate_release_command() -> None:
+	read_command = Command([b'{"id":1}'])
+	release_command = Command(
+		[
+			b'{"ref":"refs/tags/v2.2.0"}',
+			b'{"id":2}',
+			b'{"id":2}',
+			b'{"digest":"sha256:' + b"a" * 64 + b'"}',
+		]
+	)
+	api = GitHubCLI(
+		"o/r",
+		timeout_seconds=120,
+		command=read_command,
+		release_command=release_command,
+	)
+	api.get("/actions/runs/7")
+	api.post("/git/refs", {"ref": "refs/tags/v2.2.0", "sha": "a" * 40})
+	api.post("/releases", {"tag_name": "v2.2.0"})
+	api.patch("/releases/2", {"draft": False})
+	api.upload(2, "quality-gate.zip", b"asset")
+
+	assert len(read_command.calls) == 1
+	assert len(release_command.calls) == 4
+	assert [call[2] for call in release_command.calls[:3]] == [
+		"repos/o/r/git/refs",
+		"repos/o/r/releases",
+		"repos/o/r/releases/2",
+	]
+	assert release_command.calls[3][2].startswith("https://uploads.github.com/repos/o/r/releases/2")
+
+
+def test_bounded_command_can_scope_the_gh_token_to_release_mutations() -> None:
+	output = BoundedCommand(5, environment={"GH_TOKEN": "release-only"})(
+		[
+			sys.executable,
+			"-B",
+			"-c",
+			"import os; print(os.environ['GH_TOKEN'])",
+		],
+		limit=64,
+	)
+	assert output.splitlines() == [b"release-only"]
 
 
 @pytest.mark.parametrize("program", ["import time; time.sleep(30)", "print('x' * 1024)"])
@@ -187,19 +234,46 @@ def test_gh_operation_removes_query_and_untrusted_endpoint_text() -> None:
 	)
 
 
-def test_registry_credentials_are_temporary_and_cannot_launch_helpers() -> None:
-	from quality_gate.publication_github import registry_configuration
-
+def test_builtin_token_creates_a_temporary_ghcr_only_docker_configuration() -> None:
 	original = os.environ.get("DOCKER_CONFIG")
-	configuration = '{"auths":{"ghcr.io":{"auth":"dXNlcjpwYXNz"}}}'
-	with registry_configuration(configuration):
+	username = "github-actions[bot]"
+	token = "short-lived-token"
+	with registry_configuration(token, username):
 		directory = Path(os.environ["DOCKER_CONFIG"])
-		assert json.loads((directory / "config.json").read_text()) == json.loads(configuration)
+		configuration = json.loads((directory / "config.json").read_text())
+		assert configuration == {
+			"auths": {
+				"ghcr.io": {
+					"auth": base64.b64encode(f"{username}:{token}".encode()).decode("ascii")
+				}
+			}
+		}
+		if os.name != "nt":
+			assert (directory / "config.json").stat().st_mode & 0o777 == 0o600
 	assert not directory.exists()
 	assert os.environ.get("DOCKER_CONFIG") == original
-	with pytest.raises(PublicationError):
-		with registry_configuration('{"credHelpers":{"ghcr.io":"product-startup"}}'):
-			pytest.fail("executable credential helper was accepted")
+
+
+@pytest.mark.parametrize(
+	("token", "username"), [("", "actor"), ("token", ""), ("", "")]
+)
+def test_ghcr_configuration_requires_both_caller_credentials(token: str, username: str) -> None:
+	with pytest.raises(PublicationError, match="GITHUB_TOKEN and actor are required"):
+		with registry_configuration(token, username):
+			pytest.fail("incomplete caller credentials were accepted")
+
+
+@pytest.mark.parametrize("username", ["actor:other", "actor\nother"])
+def test_ghcr_configuration_rejects_invalid_actor_names(username: str) -> None:
+	with pytest.raises(PublicationError, match="actor is invalid"):
+		with registry_configuration("token", username):
+			pytest.fail("invalid actor was accepted")
+
+
+def test_ghcr_configuration_rejects_invalid_token_characters() -> None:
+	with pytest.raises(PublicationError, match="GHCR token contains invalid characters"):
+		with registry_configuration("token\nvalue", "actor"):
+			pytest.fail("multiline token was accepted")
 
 
 @pytest.mark.parametrize("revision", ["a" * 40, "main"])
@@ -249,6 +323,8 @@ def test_workflow_entrypoint_rejects_wrong_or_floating_helper_before_github(
 	environment.pop("GH_TOKEN", None)
 	environment.pop("GITHUB_TOKEN", None)
 	environment.pop("PUBLISHER_REGISTRY_AUTH", None)
+	environment["PUBLISHER_GHCR_TOKEN"] = "short-lived-token"
+	environment["PUBLISHER_GHCR_USERNAME"] = "github-actions[bot]"
 	result = subprocess.run(
 		[
 			sys.executable,
@@ -272,6 +348,17 @@ def test_workflow_entrypoint_rejects_wrong_or_floating_helper_before_github(
 		"helper checkout differs" in result.stderr or "full lowercase commit SHAs" in result.stderr
 	)
 	assert not result.stdout
+
+
+def test_publish_requires_a_dedicated_release_api_token(
+	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+	monkeypatch.setenv("PUBLISHER_GHCR_TOKEN", "short-lived-token")
+	monkeypatch.setenv("PUBLISHER_GHCR_USERNAME", "github-actions[bot]")
+	monkeypatch.delenv("PUBLISHER_RELEASE_TOKEN", raising=False)
+
+	assert publisher_main(["publish", "--pr", "7", "--candidate-id", "9"]) == 1
+	assert capsys.readouterr().err == "publication: refused - GitHub release API token is required\n"
 
 
 def test_job_log_download_retries_escape_guard_with_gh_opt_in() -> None:

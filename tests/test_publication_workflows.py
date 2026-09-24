@@ -11,6 +11,7 @@ def test_open_pr_validation_is_read_only_and_includes_body_edits() -> None:
 	assert "validation-only: true" in workflow
 	assert "./.github/workflows/release-prepare.yml" in workflow
 	assert "RELEASE_TOKEN" not in workflow
+	assert "packages: read" in workflow
 
 
 def test_reusable_workflows_checkout_their_executed_helper_revision() -> None:
@@ -23,6 +24,11 @@ def test_reusable_workflows_checkout_their_executed_helper_revision() -> None:
 		assert "persist-credentials: false" in workflow
 		assert "pip install" not in workflow
 		assert "scripts/source_release.py" in workflow
+		assert "packages: read" in workflow
+		assert "PUBLISHER_GHCR_TOKEN: ${{ github.token }}" in workflow
+		assert "PUBLISHER_GHCR_USERNAME: ${{ github.actor }}" in workflow
+		assert "registry-auth" not in workflow
+		assert "PUBLISHER_REGISTRY_AUTH" not in workflow
 
 
 def test_product_only_builds_required_candidates_and_isolates_publication_credentials() -> None:
@@ -37,7 +43,14 @@ def test_product_only_builds_required_candidates_and_isolates_publication_creden
 	assert "./.github/workflows/release-publish.yml" in workflow
 	assert workflow.count("secrets.RELEASE_TOKEN") == 1
 	assert "secrets.RELEASE_TOKEN" not in workflow.split("  publish:")[0]
+	assert "packages: read" in workflow
 	assert "Impact:" not in workflow
 	assert "cancel-in-progress: false" in (
 		ROOT / ".github/workflows/release-publish.yml"
 	).read_text(encoding="utf-8")
+
+
+def test_image_producer_uses_its_job_token_for_package_write() -> None:
+	workflow = (ROOT / "tests/fixtures/tracker-deploy.yml").read_text(encoding="utf-8")
+	assert "packages: write" in workflow
+	assert "password: ${{ github.token }}" in workflow

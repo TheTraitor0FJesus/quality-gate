@@ -69,9 +69,15 @@ class GitHub:
 		self.artifacts: dict[int, dict[str, object]] = {}
 		self.archives: dict[int, bytes] = {}
 		self.jobs: list[dict[str, object]] = []
+		self.job_attempts: dict[tuple[int, int], dict[str, object]] = {}
 		self.logs: dict[int, bytes] = {}
 		self.fail_upload = ""
 		self.run_overrides: dict[str, object] = {}
+		self.incomplete_lists: dict[str, int] = {}
+		self.incomplete_artifact_metadata: dict[int, int] = {}
+		self.incomplete_run_metadata = 0
+		self.incomplete_job_steps = 0
+		self.incomplete_job_conclusion = 0
 
 	def artifact(self, name: str, files: dict[str, bytes], job_name: str, checks: list[str]) -> int:
 		artifact_id = 300 + len(self.artifacts)
@@ -91,23 +97,23 @@ class GitHub:
 			"created_at": "2026-09-14T10:09:00Z",
 			"workflow_run": {"id": 100, "head_sha": PR_HEAD},
 		}
-		self.jobs.append(
-			{
-				"id": job_id,
-				"run_id": 100,
-				"run_attempt": 1,
-				"head_sha": PR_HEAD,
-				"name": job_name,
-				"status": "completed",
-				"conclusion": "success",
-				"started_at": "2026-09-14T10:00:00Z",
-				"completed_at": "2026-09-14T10:10:00Z",
-				"steps": [
-					{"name": step, "conclusion": "success"}
-					for step in [*checks, "Upload release evidence"]
-				],
-			}
-		)
+		job = {
+			"id": job_id,
+			"run_id": 100,
+			"run_attempt": 1,
+			"head_sha": PR_HEAD,
+			"name": job_name,
+			"status": "completed",
+			"conclusion": "success",
+			"started_at": "2026-09-14T10:00:00Z",
+			"completed_at": "2026-09-14T10:10:00Z",
+			"steps": [
+				{"name": step, "conclusion": "success"}
+				for step in [*checks, "Upload release evidence"]
+			],
+		}
+		self.jobs.append(job)
+		self.job_attempts[(job_id, 1)] = copy.deepcopy(job)
 		self.logs[job_id] = (
 			f"Artifact ID: {artifact_id}\nSHA256 digest of uploaded artifact zip is {digest}\n"
 		).encode()
@@ -158,16 +164,45 @@ class GitHub:
 			path.startswith("/actions/artifacts?")
 			or path == "/actions/runs/100/artifacts?per_page=100&page=1"
 		):
+			artifacts = copy.deepcopy(list(self.artifacts.values()))
+			if self.incomplete_lists.get("artifacts", 0):
+				self.incomplete_lists["artifacts"] -= 1
+				artifacts = artifacts[:-1]
 			return {
-				"artifacts": copy.deepcopy(list(self.artifacts.values())),
+				"artifacts": artifacts,
 				"total_count": len(self.artifacts),
 			}
 		if path.startswith("/actions/artifacts/"):
-			return copy.deepcopy(self.artifacts[int(path.rsplit("/", 1)[1])])
+			artifact_id = int(path.rsplit("/", 1)[1])
+			artifact = copy.deepcopy(self.artifacts[artifact_id])
+			if self.incomplete_artifact_metadata.get(artifact_id, 0):
+				self.incomplete_artifact_metadata[artifact_id] -= 1
+				artifact.pop("workflow_run")
+			return artifact
 		if path.startswith("/actions/runs/100/jobs?"):
-			return {"jobs": copy.deepcopy(self.jobs), "total_count": len(self.jobs)}
+			jobs = copy.deepcopy(self.jobs)
+			if self.incomplete_lists.get("jobs", 0):
+				self.incomplete_lists["jobs"] -= 1
+				jobs = jobs[:-1]
+			if self.incomplete_job_steps:
+				self.incomplete_job_steps -= 1
+				linux = next(job for job in jobs if job.get("name") == "Build linux")
+				linux.pop("steps")
+			if self.incomplete_job_conclusion:
+				self.incomplete_job_conclusion -= 1
+				linux = next(job for job in jobs if job.get("name") == "Build linux")
+				linux["conclusion"] = None
+			return {"jobs": jobs, "total_count": len(self.jobs)}
+		if path.startswith("/actions/runs/100/attempts/"):
+			attempt = int(path.split("/attempts/", 1)[1].split("/", 1)[0])
+			jobs = [
+				copy.deepcopy(job)
+				for (job_id, job_attempt), job in self.job_attempts.items()
+				if job_attempt == attempt
+			]
+			return {"jobs": jobs, "total_count": len(jobs)}
 		if path == "/actions/runs/100":
-			return {
+			run = {
 				"id": 100,
 				"head_sha": PR_HEAD,
 				"path": ".github/workflows/release.yml",
@@ -183,6 +218,10 @@ class GitHub:
 				],
 				**self.run_overrides,
 			}
+			if self.incomplete_run_metadata:
+				self.incomplete_run_metadata -= 1
+				run.pop("run_attempt")
+			return run
 		if path == "/":
 			return {"full_name": "o/r", "default_branch": "main", "owner": {"login": "o"}}
 		if path == "/pulls/7":
@@ -245,7 +284,13 @@ class GitHub:
 		raise AssertionError(f"unexpected image: {reference}")
 
 
-def _publisher(api: GitHub) -> Publisher:
+def _publisher(
+	api: GitHub,
+	*,
+	attempt: int = 1,
+	evidence_wait_seconds: float = 30.0,
+	evidence_poll_seconds: float = 2.0,
+) -> Publisher:
 	return Publisher(
 		api,
 		Context(
@@ -254,10 +299,12 @@ def _publisher(api: GitHub) -> Publisher:
 			provider_sha=PROVIDER,
 			helper_sha=PROVIDER,
 			run_id=100,
-			attempt=1,
+			attempt=attempt,
 			run_source_sha=SOURCE,
 			run_head_sha=PR_HEAD,
 		),
+		evidence_wait_seconds=evidence_wait_seconds,
+		evidence_poll_seconds=evidence_poll_seconds,
 	)
 
 
@@ -340,8 +387,14 @@ def test_helper_mismatch_is_rejected_before_accessing_product() -> None:
 	assert api.writes == []
 
 
-def _ready(api: GitHub) -> tuple[Publisher, int]:
-	publisher = _publisher(api)
+def _ready(
+	api: GitHub, *, evidence_wait_seconds: float = 30.0, evidence_poll_seconds: float = 2.0
+) -> tuple[Publisher, int]:
+	publisher = _publisher(
+		api,
+		evidence_wait_seconds=evidence_wait_seconds,
+		evidence_poll_seconds=evidence_poll_seconds,
+	)
 	candidate = publisher.prepare(7, event=_event(api))["candidate"]
 	assert isinstance(candidate, dict)
 	artifact_id = api.persist(candidate)
@@ -447,6 +500,7 @@ def test_completed_readback_survives_expired_actions_artifacts() -> None:
 def test_original_event_rerun_reuses_the_original_candidate_envelope() -> None:
 	api = GitHub()
 	_, artifact_id = _ready(api)
+	api.run_overrides["run_attempt"] = 2
 	publisher = Publisher(
 		api,
 		Context(
@@ -517,6 +571,7 @@ def test_matching_draft_without_tag_resumes_after_tag_creation() -> None:
 def test_failed_jobs_rerun_uses_only_latest_successful_platform(latest_failure: bool) -> None:
 	api = GitHub()
 	_, artifact_id = _ready(api)
+	api.run_overrides["run_attempt"] = 2
 	if latest_failure:
 		failed = {**api.jobs[-1], "id": 999, "run_attempt": 2, "conclusion": "failure"}
 		api.jobs.append(failed)
@@ -539,6 +594,98 @@ def test_failed_jobs_rerun_uses_only_latest_successful_platform(latest_failure: 
 		assert api.writes == []
 	else:
 		assert publisher.publish(7, artifact_id)["status"] == "published"
+
+
+def test_rerun_accepts_reused_successful_jobs_with_their_attempt_one_evidence() -> None:
+	api = GitHub()
+	_, candidate_artifact_id = _ready(api, evidence_wait_seconds=0.05, evidence_poll_seconds=0.001)
+	api.run_overrides["run_attempt"] = 2
+	for job in api.jobs:
+		if job.get("name") in {"Build linux", "Build windows"}:
+			job["run_attempt"] = 2
+	publisher = _publisher(api, attempt=2, evidence_wait_seconds=0.05, evidence_poll_seconds=0.001)
+
+	assert publisher.publish(7, candidate_artifact_id)["status"] == "published"
+	assert '"artifact_attempt":1' in str(api.releases[-1]["body"])
+	assert '"attempt":1' in str(api.releases[-1]["body"])
+	assert '"latest_attempt":2' in str(api.releases[-1]["body"])
+
+
+@pytest.mark.parametrize(
+	"incomplete_field",
+	[
+		"jobs",
+		"job_steps",
+		"job_conclusion",
+		"artifacts",
+		"artifact_metadata",
+		"run_metadata",
+	],
+)
+def test_temporary_incomplete_actions_data_is_retried_before_provenance(
+	incomplete_field: str,
+) -> None:
+	api = GitHub()
+	publisher, candidate_artifact_id = _ready(
+		api, evidence_wait_seconds=0.05, evidence_poll_seconds=0.001
+	)
+	if incomplete_field in {"jobs", "artifacts"}:
+		api.incomplete_lists[incomplete_field] = 1
+	elif incomplete_field == "job_steps":
+		api.incomplete_job_steps = 1
+	elif incomplete_field == "job_conclusion":
+		api.incomplete_job_conclusion = 1
+	elif incomplete_field == "artifact_metadata":
+		api.incomplete_artifact_metadata[candidate_artifact_id] = 1
+	else:
+		api.incomplete_run_metadata = 1
+
+	assert publisher.publish(7, candidate_artifact_id)["status"] == "published"
+	assert api.writes
+
+
+def test_missing_producer_evidence_fails_clearly_without_publication_mutations() -> None:
+	api = GitHub()
+	publisher, candidate_artifact_id = _ready(
+		api, evidence_wait_seconds=0.05, evidence_poll_seconds=0.001
+	)
+	linux_id = next(
+		artifact_id
+		for artifact_id, artifact in api.artifacts.items()
+		if artifact["name"] == "release-evidence-linux-1"
+	)
+	del api.artifacts[linux_id]
+	del api.archives[linux_id]
+	before = copy.deepcopy((api.writes, api.releases, api.tags))
+
+	with pytest.raises(PublicationError, match="required evidence artifact for producer linux"):
+		publisher.publish(7, candidate_artifact_id)
+	assert before == (api.writes, api.releases, api.tags)
+
+
+def test_attempt_one_evidence_does_not_match_a_new_attempt_two_job() -> None:
+	api = GitHub()
+	_, candidate_artifact_id = _ready(
+		api, evidence_wait_seconds=0.05, evidence_poll_seconds=0.001
+	)
+	api.run_overrides["run_attempt"] = 2
+	for job in api.jobs:
+		if job.get("name") in {"Build linux", "Build windows"}:
+			job.update(
+				{
+					"run_attempt": 2,
+					"started_at": "2026-09-14T10:11:00Z",
+					"completed_at": "2026-09-14T10:20:00Z",
+				}
+			)
+	publisher = _publisher(
+		api, attempt=2, evidence_wait_seconds=0.05, evidence_poll_seconds=0.001
+	)
+	before = copy.deepcopy((api.writes, api.releases, api.tags))
+
+	with pytest.raises(PublicationError, match="evidence artifact for producer linux attempt 2"):
+		publisher.publish(7, candidate_artifact_id)
+	assert before == (api.writes, api.releases, api.tags)
 
 
 class RegistryGitHub(GitHub):
@@ -641,6 +788,8 @@ class RepairedGitHub(GitHub):
 		if "evidence.json" in files:
 			self.artifacts[artifact_id]["workflow_run"] = {"id": 101, "head_sha": REPAIRED_SOURCE}
 			self.jobs[-1].update({"run_id": 101, "head_sha": REPAIRED_SOURCE})
+			job_id = int(self.jobs[-1]["id"])
+			self.job_attempts[(job_id, 1)] = copy.deepcopy(self.jobs[-1])
 		return artifact_id
 
 	def get(self, path: str) -> object:
@@ -661,19 +810,25 @@ class RepairedGitHub(GitHub):
 				],
 			}
 		if path.startswith("/actions/runs/101/jobs?"):
-			return {
-				"jobs": copy.deepcopy([job for job in self.jobs if job["run_id"] == REPAIRED_RUN])
-			}
+			jobs = copy.deepcopy([job for job in self.jobs if job["run_id"] == REPAIRED_RUN])
+			return {"jobs": jobs, "total_count": len(jobs)}
+		if path.startswith("/actions/runs/101/attempts/"):
+			attempt = int(path.split("/attempts/", 1)[1].split("/", 1)[0])
+			jobs = [
+				copy.deepcopy(job)
+				for (_job_id, job_attempt), job in self.job_attempts.items()
+				if job_attempt == attempt and job.get("run_id") == REPAIRED_RUN
+			]
+			return {"jobs": jobs, "total_count": len(jobs)}
 		if path.startswith("/actions/runs/101/artifacts?"):
-			return {
-				"artifacts": copy.deepcopy(
-					[
-						artifact
-						for artifact in self.artifacts.values()
-						if artifact["workflow_run"] == {"id": 101, "head_sha": REPAIRED_SOURCE}
-					]
-				)
-			}
+			artifacts = copy.deepcopy(
+				[
+					artifact
+					for artifact in self.artifacts.values()
+					if artifact["workflow_run"] == {"id": 101, "head_sha": REPAIRED_SOURCE}
+				]
+			)
+			return {"artifacts": artifacts, "total_count": len(artifacts)}
 		return super().get(path)
 
 
