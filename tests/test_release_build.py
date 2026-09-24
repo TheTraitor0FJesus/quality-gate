@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import BinaryIO, cast
 
 import pytest
+from quality_gate.contracts import load_manifest
 from scripts import release_build
 
 
@@ -54,9 +55,11 @@ def test_release_build_isolates_test_history_and_preserves_evidence(
 		"sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
 	}
 	test_environments: list[dict[str, str]] = []
+	commands: list[list[str]] = []
 
 	# External build/install/test processes are controlled; the orchestration and files are real.
 	def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+		commands.append(list(command))
 		if "build" in command:
 			cast(BinaryIO, options["stdout"]).write(json.dumps(identity).encode())
 		if "pytest" in command:
@@ -71,6 +74,39 @@ def test_release_build_isolates_test_history_and_preserves_evidence(
 			release_build.main()
 	else:
 		release_build.main()
+
+	pinned_release = load_manifest(Path.cwd()).policy_release
+	candidate_syncs = [
+		command for command in commands if "sync" in command and "--source" in command
+	]
+	pinned_syncs = [command for command in commands if "sync" in command and "--url" in command]
+	assert len(candidate_syncs) == 1
+	candidate_sync = candidate_syncs[0]
+	candidate_release = f"v{identity['version']}"
+	assert candidate_sync[candidate_sync.index("--source") + 1] == identity["path"]
+	assert candidate_sync[candidate_sync.index("--version") + 1] == candidate_release
+	assert candidate_sync[candidate_sync.index("--cache-dir") + 1] == str(
+		tmp_path / "quality-gate-cache" / "quality-gate"
+	)
+	setup_index = next(index for index, command in enumerate(commands) if "setup" in command)
+	assert commands.index(candidate_sync) < setup_index
+	if pinned_release == candidate_release:
+		assert not pinned_syncs
+	else:
+		assert len(pinned_syncs) == 1
+		pinned_sync = pinned_syncs[0]
+		platform = context["RELEASE_PLATFORM"].title()
+		asset_name = f"quality-gate-{pinned_release}-{platform}.zip"
+		asset_url = (
+			f"https://github.com/{context['GITHUB_REPOSITORY']}/releases/download/"
+			f"{pinned_release}/{asset_name}"
+		)
+		assert pinned_sync[pinned_sync.index("--url") + 1] == asset_url
+		assert pinned_sync[pinned_sync.index("--version") + 1] == pinned_release
+		assert pinned_sync[pinned_sync.index("--cache-dir") + 1] == str(
+			tmp_path / "quality-gate-cache" / "quality-gate"
+		)
+		assert commands.index(candidate_sync) < commands.index(pinned_sync) < setup_index
 
 	assert len(test_environments) == 1
 	test_environment = test_environments[0]
