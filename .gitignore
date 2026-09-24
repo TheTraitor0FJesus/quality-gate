@@ -1,4 +1,5 @@
 .quality-gate-tmp/
+/temp/
 .venv/
 build/
 __pycache__/
