@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import os
 import shutil
 import tempfile
@@ -39,11 +41,18 @@ class _PosixLockModule(Protocol):
 	def flock(self, descriptor: int, operation: int) -> None: ...
 
 
+class _WindowsLockModule(Protocol):
+	LK_LOCK: int
+	LK_NBLCK: int
+	LK_UNLCK: int
+
+	def locking(self, descriptor: int, mode: int, nbytes: int) -> None: ...
+
+
 def _lock(handle: BinaryIO, *, blocking: bool) -> None:
 	handle.seek(0)
 	if os.name == "nt":
-		import msvcrt
-
+		msvcrt = cast(_WindowsLockModule, import_module("msvcrt"))
 		mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
 		msvcrt.locking(handle.fileno(), mode, 1)
 		return
@@ -59,8 +68,7 @@ def _unlock(handle: BinaryIO) -> None:
 	try:
 		handle.seek(0)
 		if os.name == "nt":
-			import msvcrt
-
+			msvcrt = cast(_WindowsLockModule, import_module("msvcrt"))
 			msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 		else:
 			fcntl = cast(_PosixLockModule, import_module("fcntl"))
@@ -152,6 +160,50 @@ def _prepare_workspace(root: Path) -> tuple[Path, Path, BinaryIO]:
 		) from error
 
 
+def _fallback_workspace_root(root: Path) -> Path:
+	user_identity = (
+		os.environ.get("USER")
+		or os.environ.get("USERNAME")
+		or os.environ.get("LOGNAME")
+		or os.environ.get("USERPROFILE")
+		or os.environ.get("HOME")
+		or str(SYSTEM_TEMP_DIRECTORY)
+	)
+	user_key = hashlib.sha256(os.path.normcase(user_identity).encode("utf-8")).hexdigest()[:16]
+	root_key = os.path.normcase(str(root)).encode("utf-8")
+	root_hash = hashlib.sha256(root_key).hexdigest()[:20]
+	user_root = SYSTEM_TEMP_DIRECTORY / f"quality-gate-workspaces-{user_key}"
+	if user_root.is_symlink():
+		raise OSError(f"refusing a symbolic link as the system-temp workspace root: {user_root}")
+	user_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+	fallback_root = user_root / root_hash
+	if fallback_root.is_symlink():
+		raise OSError(f"refusing a symbolic link as the repository fallback workspace: {root}")
+	fallback_root.mkdir(mode=0o700, exist_ok=True)
+	return fallback_root
+
+
+def _prepare_workspace_with_fallback(root: Path) -> tuple[Path, Path, BinaryIO]:
+	try:
+		return _prepare_workspace(root)
+	except TemporaryWorkspaceError as error:
+		cause = error.__cause__
+		if not isinstance(cause, OSError) or cause.errno not in {
+			errno.EACCES,
+			errno.EPERM,
+			errno.EROFS,
+		}:
+			raise
+	try:
+		fallback_root = _fallback_workspace_root(root)
+		return _prepare_workspace(fallback_root)
+	except OSError as fallback_error:
+		raise TemporaryWorkspaceError(
+			f"repository temp under {root} is not writable and its per-repository "
+			f"system-temp fallback failed: {fallback_error}"
+		) from fallback_error
+
+
 def _set_process_workspace(
 	run_directory: Path,
 ) -> tuple[str | None, dict[str, str | None]]:
@@ -194,7 +246,7 @@ def _remove_workspace(
 
 @contextmanager
 def temporary_workspace(root: Path) -> Iterator[Path]:
-	"""Use a clean per-run directory under ``root/temp`` for temporary files."""
+	"""Use repository-local temp, with a system-temp fallback for read-only roots."""
 	try:
 		actual_root = root.expanduser().resolve()
 	except (OSError, RuntimeError) as error:
@@ -207,7 +259,7 @@ def temporary_workspace(root: Path) -> Iterator[Path]:
 		return
 
 	with _process_lock:
-		run_directory, root_lock_path, active_lock = _prepare_workspace(actual_root)
+		run_directory, root_lock_path, active_lock = _prepare_workspace_with_fallback(actual_root)
 		previous_tempdir, previous_environment = _set_process_workspace(run_directory)
 		token = _active_workspace.set((actual_root, run_directory))
 		try:

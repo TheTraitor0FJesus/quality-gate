@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
 import quality_gate.distribution as distribution
+import quality_gate.temp_workspace as temp_workspace
 from quality_gate.release import _workspace_parents
-from quality_gate.temp_workspace import SYSTEM_TEMP_DIRECTORY, temporary_workspace
+from quality_gate.temp_workspace import (
+	SYSTEM_TEMP_DIRECTORY,
+	TemporaryWorkspaceError,
+	temporary_workspace,
+)
 
 
 def test_temporary_workspace_routes_and_restores_temp_state(
@@ -142,3 +149,33 @@ def test_temporary_workspace_preserves_an_active_process_and_removes_stale_runs(
 	assert process.returncode == 0, f"workspace subprocess failed: {stderr}"
 	assert active_workspace is not None
 	assert not active_workspace.exists()
+
+
+def test_read_only_repository_uses_a_per_repository_system_temp_fallback(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	repository = tmp_path / "readonly-repository"
+	repository.mkdir()
+	system_temp = tmp_path / "system-temp"
+	system_temp.mkdir()
+	monkeypatch.setattr(temp_workspace, "SYSTEM_TEMP_DIRECTORY", system_temp)
+	prepare_workspace = temp_workspace._prepare_workspace
+	attempted_roots: list[Path] = []
+
+	def reject_read_only_root(root: Path) -> tuple[Path, Path, BinaryIO]:
+		attempted_roots.append(root)
+		if root == repository.resolve():
+			error = TemporaryWorkspaceError("repository temp is not writable")
+			raise error from PermissionError(errno.EACCES, "read-only repository")
+		return prepare_workspace(root)
+
+	monkeypatch.setattr(temp_workspace, "_prepare_workspace", reject_read_only_root)
+	fallback_root = temp_workspace._fallback_workspace_root(repository.resolve())
+	with temporary_workspace(repository) as workspace:
+		assert workspace.parent == fallback_root / "temp"
+		assert workspace.is_dir()
+		with temporary_workspace(repository) as nested_workspace:
+			assert nested_workspace == workspace
+
+	assert not workspace.exists()
+	assert attempted_roots == [repository.resolve(), fallback_root]
