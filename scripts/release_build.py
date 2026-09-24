@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path.cwd()))
+from quality_gate.contracts import load_manifest
 from quality_gate.publication_artifacts import load_json_record
 from quality_gate.temp_workspace import temporary_workspace
 from scripts.release_metadata import load_release_timeout
@@ -126,6 +127,33 @@ def _run_release_build() -> None:
 		check=True,
 		timeout=subprocess_timeout,
 	)
+	pinned_release = load_manifest(root).policy_release
+	candidate_release = f"v{identity['version']}"
+	if pinned_release != candidate_release:
+		repository = os.environ["GITHUB_REPOSITORY"]
+		platform = os.environ["RELEASE_PLATFORM"].title()
+		asset_name = f"quality-gate-{pinned_release}-{platform}.zip"
+		asset_url = (
+			f"https://github.com/{repository}/releases/download/{pinned_release}/{asset_name}"
+		)
+		subprocess.run(
+			[
+				sys.executable,
+				"-m",
+				"quality_gate",
+				"--root",
+				str(root),
+				"sync",
+				"--url",
+				asset_url,
+				"--version",
+				pinned_release,
+				"--cache-dir",
+				str(cache),
+			],
+			check=True,
+			timeout=subprocess_timeout,
+		)
 	subprocess.run(
 		[
 			sys.executable,

@@ -41,7 +41,9 @@ package construction, inventory, SHA-256 checks, wheel installation, and isolate
 `quality_gate.release` for source/self-host validation, learned lessons, a disposable installation,
 and audit. The isolated runtime setup and audit explicitly select the candidate policy release, while
 the source manifest remains on the latest published policy until the post-publication pin update. Both
-platforms then run the complete repository test suite using the newly built release.
+platforms then run the complete repository test suite using the newly built release. Before local setup,
+each product job syncs the platform archive for the source manifest's pinned policy into the same
+isolated cache, preserving both the published baseline and the release candidate.
 `quality_gate.temp_workspace` scopes check, parity, publisher, and release-process temporary files
 under the checked repository's ignored `temp/` directory. A read-only checkout or candidate
 snapshot uses a private hashed workspace per repository under the user-local system temporary directory. Release cache
