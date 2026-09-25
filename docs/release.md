@@ -74,11 +74,12 @@ runs `scripts/source_release.py`, a policy-free entry point to `quality_gate.pub
 The publisher imports no product adapter and installs no product dependencies.
 
 Only the publication step receives the repository-owned `RELEASE_TOKEN`, through the shared
-publisher's release API channel. It authorizes release-tag and GitHub Release mutations and needs
-`Contents: write`; creating a tag containing workflow changes may also require `Workflows: write`.
-GitHub metadata reads use the caller's short-lived `GITHUB_TOKEN`, with `Contents: read`,
-`Pull requests: read`, and `Actions: read`. Shared publisher callers also grant `Packages: read` so
-the same job token can authenticate GHCR readback through a temporary Docker configuration.
+publisher's release API channel. It authorizes release-tag mutations and all GitHub Release API
+access, including draft and published release readback. It needs `Contents: write`; creating a tag
+containing workflow changes may also require `Workflows: write`. Other GitHub metadata reads use the
+caller's short-lived `GITHUB_TOKEN`, with `Contents: read`, `Pull requests: read`, and
+`Actions: read`. Shared publisher callers also grant `Packages: read` so the same job token can
+authenticate GHCR readback through a temporary Docker configuration.
 
 For a private GHCR package owned by another repository, grant the caller repository Read under that
 package's **Manage Actions access** settings. This is a one-time package setting. Image-producing

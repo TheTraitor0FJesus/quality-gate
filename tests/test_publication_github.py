@@ -84,10 +84,12 @@ def test_image_readback_uses_content_digest_without_running_product() -> None:
 	]
 
 
-def test_release_api_mutations_use_the_separate_release_command() -> None:
+def test_release_api_reads_and_mutations_use_the_separate_release_command() -> None:
 	read_command = Command([b'{"id":1}'])
 	release_command = Command(
 		[
+			b'[]',
+			b'{"id":3}',
 			b'{"ref":"refs/tags/v2.2.0"}',
 			b'{"id":2}',
 			b'{"id":2}',
@@ -101,19 +103,23 @@ def test_release_api_mutations_use_the_separate_release_command() -> None:
 		release_command=release_command,
 	)
 	api.get("/actions/runs/7")
+	assert api.get("/releases?per_page=100&page=1") == []
+	assert api.get("/releases/3") == {"id": 3}
 	api.post("/git/refs", {"ref": "refs/tags/v2.2.0", "sha": "a" * 40})
 	api.post("/releases", {"tag_name": "v2.2.0"})
 	api.patch("/releases/2", {"draft": False})
 	api.upload(2, "quality-gate.zip", b"asset")
 
 	assert len(read_command.calls) == 1
-	assert len(release_command.calls) == 4
-	assert [call[2] for call in release_command.calls[:3]] == [
+	assert len(release_command.calls) == 6
+	assert [call[2] for call in release_command.calls[:5]] == [
+		"repos/o/r/releases?per_page=100&page=1",
+		"repos/o/r/releases/3",
 		"repos/o/r/git/refs",
 		"repos/o/r/releases",
 		"repos/o/r/releases/2",
 	]
-	assert release_command.calls[3][2].startswith("https://uploads.github.com/repos/o/r/releases/2")
+	assert release_command.calls[5][2].startswith("https://uploads.github.com/repos/o/r/releases/2")
 
 
 def test_bounded_command_can_scope_the_gh_token_to_release_mutations() -> None:
