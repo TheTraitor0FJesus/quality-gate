@@ -61,9 +61,10 @@ Preparation outputs are strings:
 
 Publication takes required string inputs `pr-number` and `candidate-id`, and the required secret
 `publication-token`. Its successful CLI result is `published` or `already-complete`. It exposes no
-product-execution hook. `RELEASE_TOKEN` is used only for release-tag and GitHub Release mutations;
-it needs Contents write, and creating a tag containing workflow changes may also require Workflows
-write. GitHub metadata reads use the caller's `GITHUB_TOKEN`.
+product-execution hook. `RELEASE_TOKEN` is scoped to release publication: it authorizes release-tag
+mutations and all GitHub Release API access, including draft and published release readback. It
+needs Contents write, and creating a tag containing workflow changes may also require Workflows
+write. Other GitHub metadata reads use the caller's `GITHUB_TOKEN`.
 
 Both reusable workflows require `packages: read` and configure a temporary Docker auth file from
 the caller's short-lived `GITHUB_TOKEN` and actor. The helper removes that configuration on exit.

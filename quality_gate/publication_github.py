@@ -247,7 +247,9 @@ class GitHubCLI:
 		release_operation: bool = False,
 	) -> object:
 		content = json.dumps(payload).encode("utf-8") if payload is not None else None
-		command = self.release_command if release_operation else self.command
+		resource_path = path.split("?", 1)[0]
+		is_release_resource = resource_path == "/releases" or resource_path.startswith("/releases/")
+		command = self.release_command if release_operation or is_release_resource else self.command
 		raw = command(self._arguments(path, method), content=content, limit=JSON_LIMIT)
 		try:
 			value = json.loads(raw)
