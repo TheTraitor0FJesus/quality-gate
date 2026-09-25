@@ -32,7 +32,8 @@ def _ruff_findings(path: Path) -> tuple[int, set[str]]:
 
 
 def test_policy_blocks_selected_high_signal_findings(tmp_path: Path) -> None:
-	production = tmp_path / "app.py"
+	# Keep the file outside pytest's test_* directory so S101 is not per-file ignored.
+	production = tmp_path.parent / f"production-{tmp_path.name}.py"
 	production.write_text(
 		"""import asyncio
 

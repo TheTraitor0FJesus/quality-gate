@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -58,6 +59,19 @@ def test_temporary_workspace_routes_and_restores_temp_state(
 	assert tempfile.tempdir == str(system_temp)
 	assert {key: os.environ[key] for key in previous_environment} == previous_environment
 	assert "QUALITY_GATE_SYSTEM_TEMP" not in os.environ
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows read-only file attributes only")
+def test_temporary_workspace_removes_read_only_git_objects(tmp_path: Path) -> None:
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	with temporary_workspace(repository) as workspace:
+		object_file = workspace / "pytest" / "repository" / ".git" / "objects" / "aa" / "object"
+		object_file.parent.mkdir(parents=True)
+		object_file.write_bytes(b"git object")
+		object_file.chmod(stat.S_IREAD)
+
+	assert not workspace.exists()
 
 
 def test_release_workspace_uses_active_repository_temp_and_keeps_explicit_override(
