@@ -6,9 +6,10 @@ import errno
 import hashlib
 import os
 import shutil
+import stat
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from importlib import import_module
@@ -103,7 +104,20 @@ def _remove_entry(path: Path) -> None:
 	if path.is_symlink() or not path.is_dir():
 		path.unlink()
 	else:
-		shutil.rmtree(path)
+		shutil.rmtree(path, onerror=_retry_readonly_entry)
+
+
+def _retry_readonly_entry(
+	function: Callable[..., object], path: str, error_info: tuple[object, ...]
+) -> None:
+	error = error_info[1]
+	if isinstance(error, PermissionError) and not Path(path).is_symlink():
+		os.chmod(path, stat.S_IWRITE)
+		function(path)
+		return
+	if isinstance(error, BaseException):
+		raise error
+	raise OSError(f"could not remove temporary workspace entry: {path}")
 
 
 def _clean_stale_entries(temp_root: Path) -> None:
