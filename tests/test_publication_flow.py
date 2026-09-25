@@ -72,6 +72,7 @@ class GitHub:
 		self.job_attempts: dict[tuple[int, int], dict[str, object]] = {}
 		self.logs: dict[int, bytes] = {}
 		self.fail_upload = ""
+		self.fail_publish = False
 		self.run_overrides: dict[str, object] = {}
 		self.incomplete_lists: dict[str, int] = {}
 		self.incomplete_artifact_metadata: dict[int, int] = {}
@@ -79,7 +80,15 @@ class GitHub:
 		self.incomplete_job_steps = 0
 		self.incomplete_job_conclusion = 0
 
-	def artifact(self, name: str, files: dict[str, bytes], job_name: str, checks: list[str]) -> int:
+	def artifact(
+		self,
+		name: str,
+		files: dict[str, bytes],
+		job_name: str,
+		checks: list[str],
+		*,
+		attempt: int = 1,
+	) -> int:
 		artifact_id = 300 + len(self.artifacts)
 		job_id = 200 + len(self.jobs)
 		output = io.BytesIO()
@@ -100,7 +109,7 @@ class GitHub:
 		job = {
 			"id": job_id,
 			"run_id": 100,
-			"run_attempt": 1,
+			"run_attempt": attempt,
 			"head_sha": PR_HEAD,
 			"name": job_name,
 			"status": "completed",
@@ -113,7 +122,7 @@ class GitHub:
 			],
 		}
 		self.jobs.append(job)
-		self.job_attempts[(job_id, 1)] = copy.deepcopy(job)
+		self.job_attempts[(job_id, attempt)] = copy.deepcopy(job)
 		self.logs[job_id] = (
 			f"Artifact ID: {artifact_id}\nSHA256 digest of uploaded artifact zip is {digest}\n"
 		).encode()
@@ -127,10 +136,12 @@ class GitHub:
 			["Prepare candidate"],
 		)
 
-	def build(self, candidate: dict[str, object]) -> None:
+	def build(self, candidate: dict[str, object], *, attempt: int = 1) -> None:
 		for platform in ["linux", "windows"]:
 			name = f"package-{platform}-2.1.0.zip"
-			content = platform.encode()
+			content = platform.encode() + (
+				b"" if attempt == 1 else f"-attempt-{attempt}".encode()
+			)
 			evidence = {
 				"schema": 1,
 				"repository": "o/r",
@@ -139,7 +150,7 @@ class GitHub:
 				"version": "2.1.0",
 				"provider_sha": PROVIDER,
 				"run_id": 100,
-				"attempt": 1,
+				"attempt": attempt,
 				"candidate_sha256": hashlib.sha256(
 					(
 						json.dumps(
@@ -153,10 +164,11 @@ class GitHub:
 				],
 			}
 			self.artifact(
-				f"release-evidence-{platform}-1",
+				f"release-evidence-{platform}-{attempt}",
 				{"evidence.json": json.dumps(evidence).encode(), name: content},
 				f"Build {platform}",
 				["Verify package"],
+				attempt=attempt,
 			)
 
 	def get(self, path: str) -> object:
@@ -253,6 +265,8 @@ class GitHub:
 		return copy.deepcopy(release)
 
 	def patch(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
+		if payload.get("draft") is False and self.fail_publish:
+			raise PublicationError("injected interrupted publication")
 		self.writes.append(path)
 		release = next(item for item in self.releases if item["id"] == int(path.rsplit("/", 1)[1]))
 		release.update(payload)
@@ -431,6 +445,61 @@ def test_interrupted_upload_resumes_only_missing_assets() -> None:
 	api.fail_upload = ""
 	assert publisher.publish(7, artifact_id)["status"] == "published"
 	assert api.writes.count("package-linux-2.1.0.zip") == 1
+
+
+def _candidate_from_artifact(api: GitHub, artifact_id: int) -> dict[str, object]:
+	with zipfile.ZipFile(io.BytesIO(api.archives[artifact_id])) as archive:
+		return json.loads(archive.read("candidate.json"))
+
+
+def test_recovery_preserves_matching_draft_receipt_when_rebuilt_assets_change() -> None:
+	api = GitHub()
+	publisher, candidate_artifact_id = _ready(api)
+	api.fail_publish = True
+	with pytest.raises(PublicationError, match="interrupted publication"):
+		publisher.publish(7, candidate_artifact_id)
+	release = api.releases[-1]
+	assert release["draft"] is True
+	original_body = release["body"]
+	original_uploads = copy.deepcopy(api.uploads)
+
+	candidate = _candidate_from_artifact(api, candidate_artifact_id)
+	api.fail_publish = False
+	api.run_overrides["run_attempt"] = 2
+	api.build(candidate, attempt=2)
+	recovery = _publisher(api, attempt=2)
+
+	assert recovery.publish(7, candidate_artifact_id)["status"] == "published"
+	assert release["body"] == original_body
+	assert api.uploads == original_uploads
+	assert api.writes.count("package-linux-2.1.0.zip") == 1
+	assert api.writes.count("package-windows-2.1.0.zip") == 1
+
+
+def test_recovery_does_not_fill_missing_draft_asset_with_different_bytes() -> None:
+	api = GitHub()
+	publisher, candidate_artifact_id = _ready(api)
+	api.fail_upload = "package-windows-2.1.0.zip"
+	with pytest.raises(PublicationError, match="interrupted"):
+		publisher.publish(7, candidate_artifact_id)
+	release = api.releases[-1]
+	original_body = release["body"]
+	before_writes = copy.deepcopy(api.writes)
+
+	candidate = _candidate_from_artifact(api, candidate_artifact_id)
+	api.fail_upload = ""
+	api.run_overrides["run_attempt"] = 2
+	api.build(candidate, attempt=2)
+	recovery = _publisher(api, attempt=2)
+	with pytest.raises(
+		PublicationError, match="current verified output does not match its recorded digest"
+	):
+		recovery.publish(7, candidate_artifact_id)
+
+	assert release["draft"] is True
+	assert release["body"] == original_body
+	assert api.writes == before_writes
+	assert "package-windows-2.1.0.zip" not in api.uploads
 
 
 @pytest.mark.parametrize(
@@ -779,17 +848,25 @@ REPAIRED_REFERENCE = "o/provider/.github/workflows/release-prepare.yml@" + REPAI
 
 
 class RepairedGitHub(GitHub):
-	def artifact(self, name: str, files: dict[str, bytes], job_name: str, checks: list[str]) -> int:
+	def artifact(
+		self,
+		name: str,
+		files: dict[str, bytes],
+		job_name: str,
+		checks: list[str],
+		*,
+		attempt: int = 1,
+	) -> int:
 		if "evidence.json" in files:
 			evidence = json.loads(files["evidence.json"])
 			evidence.update({"run_id": 101, "provider_sha": REPAIRED_PROVIDER})
 			files = {**files, "evidence.json": json.dumps(evidence).encode()}
-		artifact_id = super().artifact(name, files, job_name, checks)
+		artifact_id = super().artifact(name, files, job_name, checks, attempt=attempt)
 		if "evidence.json" in files:
 			self.artifacts[artifact_id]["workflow_run"] = {"id": 101, "head_sha": REPAIRED_SOURCE}
 			self.jobs[-1].update({"run_id": 101, "head_sha": REPAIRED_SOURCE})
 			job_id = int(self.jobs[-1]["id"])
-			self.job_attempts[(job_id, 1)] = copy.deepcopy(self.jobs[-1])
+			self.job_attempts[(job_id, attempt)] = copy.deepcopy(self.jobs[-1])
 		return artifact_id
 
 	def get(self, path: str) -> object:

@@ -192,8 +192,11 @@ gh workflow run release.yml --ref <default-branch> -f pr_number=<original-merged
 
 Before publishing, the helper creates or resumes the exact-source tag and draft, checks every
 existing identity, uploads only missing matching files, and reads back complete readiness before
-promotion. It never moves a tag or replaces an existing asset. Completed releases retain the full
-candidate and deliverable/provenance receipt inside the release body alongside the exact notes.
+promotion. Recovery preserves a matching draft's receipt even when a fresh build produces different
+archive bytes; existing assets must still match that receipt, and a missing asset is uploaded only
+when the current verified bytes match its recorded digest. It never moves a tag or replaces an
+existing asset. Completed releases retain the full candidate and deliverable/provenance receipt
+inside the release body alongside the exact notes.
 Matching completed preparation verifies source, notes, tag, and every required deliverable and
 returns `already-complete` before any rebuild, including after temporary Actions artifacts expire.
 Conflicting completed identities or duplicate drafts fail without mutation. Native immutability

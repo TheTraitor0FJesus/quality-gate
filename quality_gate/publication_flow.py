@@ -734,10 +734,9 @@ class Publisher:
 		body = str(release.get("body", ""))
 		if body.count(RECEIPT_MARKER) == 1 and body.endswith("-->\n"):
 			previous = json_record(body.split(RECEIPT_MARKER)[1].removesuffix("-->\n").encode())
-			if (
-				previous.get("candidate") == candidate
-				and previous.get("deliverables") == receipt["deliverables"]
-			):
+			if previous.get("candidate") == candidate:
+				# A recovery rebuild can produce different ZIP bytes. Keep the receipt
+				# already bound to this draft; _readback verifies its existing assets.
 				receipt = previous
 		self._readback(release, candidate, receipt, draft=True)
 		return receipt
@@ -796,9 +795,20 @@ class Publisher:
 			)
 		missing = self._readback(release, candidate, receipt, draft=True)
 		release_id = positive(release.get("id"), "release ID")
+		expected = {
+			str(item["name"]): digest("sha256:" + str(item["sha256"]))
+			for item in records(receipt.get("deliverables"), "receipt deliverables")
+			if item.get("kind") != "image"
+		}
 		for name in sorted(missing):
-			asset = self.api.upload(release_id, name, contents[name])
-			if digest(asset.get("digest")) != hashlib.sha256(contents[name]).hexdigest():
+			content = contents.get(name)
+			if content is None or hashlib.sha256(content).hexdigest() != expected.get(name):
+				raise PublicationError(
+					f"existing draft is missing {name}; current verified output "
+					"does not match its recorded digest"
+				)
+			asset = self.api.upload(release_id, name, content)
+			if digest(asset.get("digest")) != hashlib.sha256(content).hexdigest():
 				raise PublicationError("uploaded asset digest mismatch; draft remains unpublished")
 		ready = record(self.api.get(f"/releases/{release_id}"), "ready draft")
 		if self._readback(ready, candidate, receipt, draft=True):
