@@ -15,7 +15,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from quality_gate import runner
 from quality_gate.contracts import CheckResult, Status
 from quality_gate.distribution import DistributionError, PolicyCache

@@ -17,3 +17,7 @@ CLI, schema 2, контракт hook/runtime v2 и Windows/Linux ZIP сохра�
 Quality Gate, parity и release-процессы используют отдельный временный каталог в корневом `temp/` проверяемого репозитория. При запуске удаляются оставшиеся неактивные каталоги, а временные каталоги кэша и атомарной замены остаются рядом со своими постоянными целями. Для read-only checkout и candidate snapshot используется закрытый хешированный per-repository workspace в пользовательском системном temp. Каждый consumer должен добавить `/temp/` в свой `.gitignore`.
 
 Consumers обновляют Quality Gate и reusable-workflow revision только отдельным явным изменением после проверки опубликованного релиза. ARGUS_TG и ARGUS_tracker в этой версии не переключаются.
+
+# Quality Gate 2.3.0
+
+Изменение MINOR относительно v2.2.0: общий publisher публикует образы в GHCR через отдельный проверяемый writer. Writer сверяет исходную ревизию образа с одобренным исходным кодом, а publisher до изменения GitHub Release проверяет сохранённое подтверждение публикации и читает образ обратно по его неизменяемому digest. Для GHCR и GitHub Release используется автоматически выданный `GITHUB_TOKEN`; отдельный `RELEASE_TOKEN` или GHCR PAT не нужен. Job publisher получает только `contents: write`, а отдельный вызов writer — только `packages: write`. Для приватного пакета в другом репозитории владелец один раз настраивает доступ вызывающего репозитория в **Manage Actions access**.

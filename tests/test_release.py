@@ -13,10 +13,10 @@ import pytest
 from quality_gate.release import ReleaseControllerError, verify_release_candidate
 from quality_gate.release_contract import (
 	UNIFIED_RELEASE_DEPENDENCIES,
-	UNIFIED_RELEASE_PACKAGE_VERSION,
 	UNIFIED_RELEASE_PLATFORM_TOOL_PATHS,
 	UNIFIED_RELEASE_POLICY_FILES,
 	UNIFIED_RELEASE_TOOLS,
+	supports_unified_inventory,
 )
 
 
@@ -170,7 +170,7 @@ def _artifact(root: Path, version: str = "2.0.0", *, valid_wheel: bool = True) -
 	else:
 		wheel.write_bytes(b"not a wheel")
 	files.append((wheel.name, "artifact", wheel.read_bytes()))
-	if version == UNIFIED_RELEASE_PACKAGE_VERSION:
+	if supports_unified_inventory(f"v{version}"):
 		files.extend(
 			(
 				f"{name}-{dependency_version}-py3-none-any.whl",

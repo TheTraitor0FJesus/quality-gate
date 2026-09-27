@@ -31,7 +31,6 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
-  packages: read
 
 concurrency:
   group: shared-release-prepare-${{ github.repository }}-${{ github.run_id }}
@@ -69,8 +68,6 @@ jobs:
           PR_NUMBER: ${{ inputs.pr-number }}
           VALIDATION_ONLY: ${{ inputs.validation-only }}
           PYTHONDONTWRITEBYTECODE: "1"
-          PUBLISHER_GHCR_TOKEN: ${{ github.token }}
-          PUBLISHER_GHCR_USERNAME: ${{ github.actor }}
         shell: bash
         run: |
           set -euo pipefail

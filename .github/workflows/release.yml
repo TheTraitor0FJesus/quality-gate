@@ -15,7 +15,6 @@ permissions:
   contents: read
   pull-requests: read
   actions: read
-  packages: read
 
 # Distinct runs retain preparation/build evidence. The shared publisher serializes writes.
 concurrency:
@@ -92,8 +91,11 @@ jobs:
     needs: [prepare, build-and-verify]
     if: needs.prepare.outputs.status == 'build-required'
     uses: ./.github/workflows/release-publish.yml
+    permissions:
+      contents: write
+      pull-requests: read
+      actions: read
+      packages: read
     with:
       pr-number: ${{ format('{0}', github.event.pull_request.number || inputs.pr_number) }}
       candidate-id: ${{ needs.prepare.outputs.candidate-id }}
-    secrets:
-      publication-token: ${{ secrets.RELEASE_TOKEN }}

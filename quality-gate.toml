@@ -7,6 +7,33 @@ approved_by = "TheTraitor0FJesus"
 reviewed_on = "2026-08-26"
 expires_on = "2027-08-26"
 
+[[waivers]]
+kind = "standard"
+check_id = "repository.workflow"
+target = ".github/workflows/image-writer.yml"
+reason = "Bootstrap the provider writer under v2.1; remove after v2.3.0 policy publication."
+approved_by = "TheTraitor0FJesus"
+reviewed_on = "2026-09-25"
+expires_on = "2026-10-09"
+
+[[waivers]]
+kind = "standard"
+check_id = "repository.workflow"
+target = ".github/workflows/release-publish.yml"
+reason = "Bootstrap the provider publisher under v2.1; remove after v2.3.0 policy publication."
+approved_by = "TheTraitor0FJesus"
+reviewed_on = "2026-09-25"
+expires_on = "2026-10-09"
+
+[[waivers]]
+kind = "standard"
+check_id = "repository.workflow"
+target = ".github/workflows/release.yml"
+reason = "Bootstrap the provider release route under v2.1; remove after v2.3.0 policy publication."
+approved_by = "TheTraitor0FJesus"
+reviewed_on = "2026-09-25"
+expires_on = "2026-10-09"
+
 [quality]
 schema = 2
 policy_release = "v2.1.0"
@@ -32,6 +59,7 @@ required_documents = [
     ".github/workflows/release.yml",
     ".github/workflows/release-prepare.yml",
     ".github/workflows/release-publish.yml",
+    ".github/workflows/image-writer.yml",
     ".github/workflows/release-validation.yml",
     "scripts/source_release.py",
     "scripts/release_adapter.py",

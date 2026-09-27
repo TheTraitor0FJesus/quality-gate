@@ -17,6 +17,7 @@ from .publication_evidence import record
 from .publication_flow import Context, Publisher, canonical, sha
 from .publication_github import (
 	JSON_LIMIT,
+	MAX_IMAGE_WRITER_TIMEOUT_SECONDS,
 	BoundedCommand,
 	GitHubCLI,
 	registry_configuration,
@@ -54,26 +55,23 @@ def _helper(root: Path, expected: str, command: BoundedCommand) -> str:
 def _publisher(root: Path) -> Publisher:
 	provider_sha = sha(os.environ.get("PUBLISHER_SHA"))
 	settings = tomllib.loads((root / ".release/release-tools.toml").read_text(encoding="utf-8"))
-	release_token = os.environ.pop("PUBLISHER_RELEASE_TOKEN", "")
 	timeouts = record(settings.get("timeouts"), "release timeouts")
 	github_api_timeout = _configured_timeout(timeouts, "github_api_seconds")
+	image_writer_timeout = _configured_timeout(timeouts, "image_writer_seconds")
 	evidence_wait = _configured_timeout(timeouts, "actions_evidence_wait_seconds")
 	evidence_poll = _configured_timeout(timeouts, "actions_evidence_poll_seconds")
 	command = BoundedCommand(github_api_timeout)
-	helper_sha = _helper(root, provider_sha, command)
-	release_command = (
-		BoundedCommand(
-			command.timeout_seconds,
-			environment={"GH_TOKEN": release_token},
-		)
-		if release_token
-		else command
+	image_command = BoundedCommand(
+		image_writer_timeout,
+		maximum_timeout_seconds=MAX_IMAGE_WRITER_TIMEOUT_SECONDS,
+		aggregate_timeout_seconds=image_writer_timeout,
 	)
+	helper_sha = _helper(root, provider_sha, command)
 	api = GitHubCLI(
 		os.environ["GITHUB_REPOSITORY"],
 		timeout_seconds=command.timeout_seconds,
 		command=command,
-		release_command=release_command,
+		image_command=image_command,
 	)
 	run_id = int(os.environ["GITHUB_RUN_ID"])
 	attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
@@ -149,17 +147,23 @@ def _parser() -> argparse.ArgumentParser:
 	publish = commands.add_parser("publish")
 	publish.add_argument("--pr", type=int, required=True)
 	publish.add_argument("--candidate-id", type=int, required=True)
+	write_images = commands.add_parser("write-images")
+	write_images.add_argument("--pr", type=int, required=True)
+	write_images.add_argument("--candidate-id", type=int, required=True)
+	write_images.add_argument("--output", type=Path, required=True)
 	return parser
 
 
-def _main(arguments: Sequence[str] | None = None) -> int:
-	options = _parser().parse_args(arguments)
+def _main(
+	arguments: Sequence[str] | None = None, *, options: argparse.Namespace | None = None
+) -> int:
+	options = options if options is not None else _parser().parse_args(arguments)
 	try:
-		if options.command == "publish" and not os.environ.get("PUBLISHER_RELEASE_TOKEN"):
-			raise PublicationError("GitHub release API token is required")
 		publisher = _publisher(Path(__file__).resolve().parents[1])
 		if options.command == "publish":
 			result = publisher.publish(options.pr, options.candidate_id)
+		elif options.command == "write-images":
+			result = publisher.write_images(options.pr, options.candidate_id, options.output)
 		else:
 			with Path(os.environ["GITHUB_EVENT_PATH"]).open("rb") as event_file:
 				event = load_json_record(event_file)
@@ -197,14 +201,17 @@ def _main(arguments: Sequence[str] | None = None) -> int:
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
-	"""Run shared publication with isolated caller-owned GHCR authentication."""
+	"""Run shared publication with temporary GHCR auth only for image operations."""
 	try:
 		with temporary_workspace(Path(__file__).resolve().parents[1]):
+			options = _parser().parse_args(arguments)
+			if options.command == "prepare":
+				return _main(arguments, options=options)
 			with registry_configuration(
-				os.environ.get("PUBLISHER_GHCR_TOKEN", ""),
-				os.environ.get("PUBLISHER_GHCR_USERNAME", ""),
+				os.environ.get("GH_TOKEN", ""),
+				os.environ.get("GITHUB_ACTOR", ""),
 			):
-				return _main(arguments)
+				return _main(arguments, options=options)
 	except TemporaryWorkspaceError as error:
 		sys.stderr.write(f"publication: temporary workspace refused - {error}\n")
 		return 1

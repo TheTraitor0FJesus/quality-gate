@@ -9,25 +9,32 @@ import os
 import re
 import subprocess
 import tempfile
-import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Protocol
+from threading import Event, Lock, Timer
+from time import monotonic
+from typing import BinaryIO, NoReturn, Protocol
 from urllib.parse import quote
 
-from .publication import PublicationError
+from .publication import MissingResourceError, PublicationError
 from .publication_artifacts import MAX_BUNDLE_BYTES, json_record
 from .publication_evidence import positive, record
+from .publication_writer import image_repository, preflight_image_archive, push_image_archive
 
 JSON_LIMIT = 16 * 1024 * 1024
 MAX_TIMEOUT_SECONDS = 300
+MAX_IMAGE_WRITER_TIMEOUT_SECONDS = 25 * 60
 MAX_GHCR_TOKEN_BYTES = 64 * 1024
 MAX_GHCR_USERNAME_LENGTH = 255
 GH_ESCAPE_SEQUENCE_ERROR = (
 	b"the response contains terminal escape sequences; pass --allow-escape-sequences"
 )
-HTTP_STATUS = re.compile(rb"(?:\(\s*HTTP\s+([1-5][0-9]{2})\)|\bHTTP\s+([1-5][0-9]{2})\b)")
+HTTP_STATUS = re.compile(
+	rb"""(?:\(\s*HTTP\s+([1-5][0-9]{2})\)|\bHTTP\s+([1-5][0-9]{2})\b|
+		(?:response\s+)?status\s+code:?\s*([1-5][0-9]{2})\b|\b(404)\s+Not Found\b)""",
+	re.IGNORECASE | re.VERBOSE,
+)
 GH_API_ARGUMENTS = 3
 
 
@@ -100,28 +107,40 @@ class Command(Protocol):
 	) -> bytes: ...
 
 
-class MissingResourceError(PublicationError):
-	"""GitHub positively reported HTTP 404 for an optional resource."""
-
-
 class EscapeSequenceError(PublicationError):
 	"""GitHub CLI refused a raw response containing terminal escape sequences."""
 
 
 class BoundedCommand:
-	"""Read a child stream with a size limit and a watchdog independent of stream progress."""
+	"""Bound child commands, optionally sharing a monotonic deadline across calls."""
 
 	def __init__(
-		self, timeout_seconds: float, *, environment: Mapping[str, str] | None = None
+		self,
+		timeout_seconds: float,
+		*,
+		environment: Mapping[str, str] | None = None,
+		maximum_timeout_seconds: float = MAX_TIMEOUT_SECONDS,
+		aggregate_timeout_seconds: float | None = None,
 	) -> None:
-		if not 0 < timeout_seconds <= MAX_TIMEOUT_SECONDS:
-			raise PublicationError("GitHub command timeout must be within 300 seconds")
+		if (
+			not 0 < maximum_timeout_seconds <= MAX_IMAGE_WRITER_TIMEOUT_SECONDS
+			or not 0 < timeout_seconds <= maximum_timeout_seconds
+			or (
+				aggregate_timeout_seconds is not None
+				and not 0 < aggregate_timeout_seconds <= maximum_timeout_seconds
+			)
+		):
+			raise PublicationError("external command timeout exceeds its configured bound")
 		self.timeout_seconds = timeout_seconds
+		self.aggregate_timeout_seconds = aggregate_timeout_seconds
+		self._aggregate_deadline: float | None = None
+		self._deadline_lock = Lock()
 		self.environment = dict(environment or {})
 
 	def __call__(
 		self, arguments: Sequence[str], *, content: bytes | None = None, limit: int
 	) -> bytes:
+		deadline = self._begin_aggregate_budget()
 		with tempfile.TemporaryDirectory(prefix="publisher-") as directory:
 			command = list(arguments)
 			if content is not None:
@@ -129,61 +148,136 @@ class BoundedCommand:
 				input_file.write_bytes(content)
 				command.extend(["--input", str(input_file)])
 			with (Path(directory) / "stderr").open("w+b") as errors:
-				return self._execute(command, errors, limit)
+				return self._execute(command, errors, limit, deadline)
 
-	def _execute(self, command: list[str], errors: BinaryIO, limit: int) -> bytes:
+	def _begin_aggregate_budget(self) -> float | None:
+		if self.aggregate_timeout_seconds is None:
+			return None
+		with self._deadline_lock:
+			if self._aggregate_deadline is None:
+				self._aggregate_deadline = monotonic() + self.aggregate_timeout_seconds
+			return self._aggregate_deadline
+
+	def _remaining_timeout(self, operation: str, deadline: float | None) -> float:
+		budget_seconds = self.aggregate_timeout_seconds
+		if deadline is None or budget_seconds is None:
+			return self.timeout_seconds
+		remaining = deadline - monotonic()
+		if remaining <= 0:
+			raise PublicationError(
+				f"{operation}: shared image-command budget of "
+				f"{budget_seconds:g} seconds is exhausted"
+			)
+		return min(self.timeout_seconds, remaining)
+
+	def _execute(
+		self, command: list[str], errors: BinaryIO, limit: int, deadline: float | None
+	) -> bytes:
 		operation = _operation(command)
 		environment = os.environ.copy()
 		environment.update(self.environment)
 		try:
-			with subprocess.Popen(
-				command,
-				stdin=subprocess.DEVNULL,
-				stdout=subprocess.PIPE,
-				stderr=errors,
-				env=environment,
-			) as process:
-				timed_out = threading.Event()
-
-				def terminate() -> None:
-					timed_out.set()
-					try:
-						process.kill()
-					except OSError:
-						pass
-
-				watchdog = threading.Timer(self.timeout_seconds, terminate)
-				watchdog.start()
-				try:
-					output = self._read(process, limit)
-					code = process.wait(timeout=self.timeout_seconds)
-				finally:
-					watchdog.cancel()
-				if timed_out.is_set():
-					raise PublicationError(
-						f"{operation}: timed out after {self.timeout_seconds:g} seconds"
-					)
-				if code:
-					errors.seek(0)
-					detail = errors.read(4096)
-					status = _http_status(detail)
-					if status == "404":
-						raise MissingResourceError(f"{operation}: resource is absent (HTTP 404)")
-					if status is None and GH_ESCAPE_SEQUENCE_ERROR in detail:
-						raise EscapeSequenceError(
-							f"{operation}: raw response contains terminal escape sequences"
-						)
-					status_detail = f", HTTP {status}" if status else ""
-					raise PublicationError(
-						f"{operation}: command failed (exit {code}{status_detail})"
-					)
-				return output
+			self._remaining_timeout(operation, deadline)
+			return self._run_bounded(command, errors, limit, deadline, operation, environment)
 		except subprocess.TimeoutExpired as error:
-			raise PublicationError(
-				f"{operation}: timed out after {self.timeout_seconds:g} seconds"
-			) from error
+			try:
+				self._raise_timeout(operation, deadline)
+			except PublicationError as timeout_error:
+				raise timeout_error from error
 		except OSError as error:
 			raise PublicationError(f"{operation}: command unavailable") from error
+
+	def _run_bounded(
+		self,
+		command: list[str],
+		errors: BinaryIO,
+		limit: int,
+		deadline: float | None,
+		operation: str,
+		environment: dict[str, str],
+	) -> bytes:
+		with subprocess.Popen(
+			command,
+			stdin=subprocess.DEVNULL,
+			stdout=subprocess.PIPE,
+			stderr=errors,
+			env=environment,
+		) as process:
+			command_timeout = self._process_timeout(process, operation, deadline)
+			timed_out = Event()
+
+			def terminate() -> None:
+				self._terminate(process, timed_out)
+
+			watchdog = Timer(command_timeout, terminate)
+			watchdog.start()
+			try:
+				output, code = self._read_and_wait(process, limit, operation, deadline)
+			finally:
+				watchdog.cancel()
+			if timed_out.is_set():
+				self._raise_timeout(operation, deadline)
+			if code:
+				self._raise_command_error(errors, operation, code)
+			return output
+
+	def _process_timeout(
+		self,
+		process: subprocess.Popen[bytes],
+		operation: str,
+		deadline: float | None,
+	) -> float:
+		try:
+			return self._remaining_timeout(operation, deadline)
+		except PublicationError:
+			process.kill()
+			raise
+
+	def _read_and_wait(
+		self,
+		process: subprocess.Popen[bytes],
+		limit: int,
+		operation: str,
+		deadline: float | None,
+	) -> tuple[bytes, int]:
+		output = self._read(process, limit)
+		try:
+			wait_timeout = self._remaining_timeout(operation, deadline)
+		except PublicationError:
+			process.kill()
+			raise
+		return output, process.wait(timeout=wait_timeout)
+
+	@staticmethod
+	def _terminate(process: subprocess.Popen[bytes], timed_out: Event) -> None:
+		timed_out.set()
+		try:
+			process.kill()
+		except OSError:
+			pass
+
+	@staticmethod
+	def _raise_command_error(errors: BinaryIO, operation: str, code: int) -> None:
+		errors.seek(0)
+		detail = errors.read(4096)
+		status = _http_status(detail)
+		if status == "404":
+			raise MissingResourceError(f"{operation}: resource is absent (HTTP 404)")
+		if status is None and GH_ESCAPE_SEQUENCE_ERROR in detail:
+			raise EscapeSequenceError(
+				f"{operation}: raw response contains terminal escape sequences"
+			)
+		status_detail = f", HTTP {status}" if status else ""
+		raise PublicationError(f"{operation}: command failed (exit {code}{status_detail})")
+
+	def _raise_timeout(self, operation: str, deadline: float | None) -> NoReturn:
+		budget_seconds = self.aggregate_timeout_seconds
+		if deadline is not None and budget_seconds is not None and deadline <= monotonic():
+			raise PublicationError(
+				f"{operation}: shared image-command budget of "
+				f"{budget_seconds:g} seconds is exhausted"
+			)
+		raise PublicationError(f"{operation}: timed out after {self.timeout_seconds:g} seconds")
 
 	@staticmethod
 	def _read(process: subprocess.Popen[bytes], limit: int) -> bytes:
@@ -209,13 +303,13 @@ class GitHubCLI:
 		*,
 		timeout_seconds: float,
 		command: Command | None = None,
-		release_command: Command | None = None,
+		image_command: Command | None = None,
 	) -> None:
 		if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None:
 			raise PublicationError("invalid GitHub repository")
 		self.repository = repository
 		self.command = command or BoundedCommand(timeout_seconds)
-		self.release_command = release_command or self.command
+		self.image_command = image_command or self.command
 
 	def _arguments(
 		self, path: str, method: str, *, allow_escape_sequences: bool = False
@@ -243,14 +337,9 @@ class GitHubCLI:
 		path: str,
 		method: str,
 		payload: Mapping[str, object] | None = None,
-		*,
-		release_operation: bool = False,
 	) -> object:
 		content = json.dumps(payload).encode("utf-8") if payload is not None else None
-		resource_path = path.split("?", 1)[0]
-		is_release_resource = resource_path == "/releases" or resource_path.startswith("/releases/")
-		command = self.release_command if release_operation or is_release_resource else self.command
-		raw = command(self._arguments(path, method), content=content, limit=JSON_LIMIT)
+		raw = self.command(self._arguments(path, method), content=content, limit=JSON_LIMIT)
 		try:
 			value = json.loads(raw)
 		except (UnicodeError, json.JSONDecodeError) as error:
@@ -285,12 +374,31 @@ class GitHubCLI:
 			raise PublicationError("source content encoding is invalid") from error
 
 	def post(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
-		return record(self._json(path, "POST", payload, release_operation=True), "created resource")
+		try:
+			return record(self._json(path, "POST", payload), "created resource")
+		except PublicationError as error:
+			if path == "/git/refs" and "HTTP 403" in str(error):
+				raise PublicationError(
+					"GitHub denied creation of the release tag (HTTP 403). "
+					"If this is the historical Workflows: write restriction, "
+					"keep the original candidate and its source SHA. "
+					"If v<version> is absent, an authorized maintainer may "
+					"create and push only that exact tag with an already-"
+					"authenticated Git client, then rerun only the failed "
+					"Publish release job in this original workflow run. "
+					"This reuses the successful producer and image-writer "
+					"results; do not dispatch a new run, rerun all jobs, or "
+					"repush the image. Stop and ask the owner for manual "
+					"recovery if any other job failed, a required producer "
+					"or writer artifact or upload log is missing or expired, "
+					"the publisher-only rerun is unavailable, or the tag "
+					"points elsewhere. Do not change "
+					"the source or expand GITHUB_TOKEN permissions."
+				) from error
+			raise
 
 	def patch(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
-		return record(
-			self._json(path, "PATCH", payload, release_operation=True), "updated resource"
-		)
+		return record(self._json(path, "PATCH", payload), "updated resource")
 
 	def download(self, path: str) -> bytes:
 		limit = JSON_LIMIT if path.endswith("/logs") else MAX_BUNDLE_BYTES
@@ -310,7 +418,7 @@ class GitHubCLI:
 			f"https://uploads.github.com/repos/{self.repository}/releases/{release_id}"
 			f"/assets?name={quote(name, safe='')}"
 		)
-		raw = self.release_command(
+		raw = self.command(
 			[
 				"gh",
 				"api",
@@ -328,7 +436,57 @@ class GitHubCLI:
 	def image_digest(self, reference: str) -> str:
 		if re.fullmatch(r"[a-z0-9][a-z0-9._:/-]+@sha256:[0-9a-f]{64}", reference) is None:
 			raise PublicationError("image reference must be a registry path pinned by SHA-256")
-		content = self.command(
+		content = self.image_command(
 			["docker", "buildx", "imagetools", "inspect", reference, "--raw"], limit=JSON_LIMIT
 		)
 		return hashlib.sha256(content).hexdigest()
+
+	def preflight_image_archive(
+		self,
+		content: bytes,
+		source: str,
+		repository: str,
+		version: str,
+		producer: str,
+		*,
+		expected_digest: str | None = None,
+	) -> None:
+		"""Check one configured image tag before any candidate image tag is pushed."""
+		if re.fullmatch(r"[a-z][a-z0-9-]{0,31}", producer) is None:
+			raise PublicationError("invalid image producer name")
+		package = image_repository(repository)
+		preflight_image_archive(
+			content,
+			source,
+			f"{package}:v{version}",
+			self.image_command,
+			expected_digest=expected_digest,
+		)
+
+	def publish_image_archive(
+		self,
+		content: bytes,
+		source: str,
+		repository: str,
+		version: str,
+		producer: str,
+		*,
+		expected_digest: str | None = None,
+	) -> dict[str, str]:
+		"""Push one source-verified image archive and return its immutable GHCR identity."""
+		if re.fullmatch(r"[a-z][a-z0-9-]{0,31}", producer) is None:
+			raise PublicationError("invalid image producer name")
+		package = image_repository(repository)
+		target = f"{package}:v{version}"
+		registry_digest = push_image_archive(
+			content,
+			source,
+			target,
+			self.image_command,
+			expected_digest=expected_digest,
+		)
+		return {
+			"reference": f"{package}@sha256:{registry_digest}",
+			"sha256": registry_digest,
+			"tag": target,
+		}

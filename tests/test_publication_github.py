@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-
+from quality_gate import publication_github
 from quality_gate.publication import PublicationError
-from quality_gate.publication_cli import main as publisher_main
+from quality_gate.publication_cli import _main as publisher_main
 from quality_gate.publication_github import (
+	MAX_IMAGE_WRITER_TIMEOUT_SECONDS,
 	BoundedCommand,
 	EscapeSequenceError,
 	GitHubCLI,
@@ -35,6 +38,63 @@ class Command:
 	) -> bytes:
 		self.calls.append(list(arguments))
 		return self.responses.pop(0)
+
+
+def _clocked_bounded_command(
+	monkeypatch: pytest.MonkeyPatch,
+	*,
+	launch_seconds: list[float],
+	wait_seconds: list[float],
+	exit_codes: list[int] | None = None,
+) -> tuple[BoundedCommand, dict[str, list[object]], list[float]]:
+	now = [0.0]
+	monitor: dict[str, list[object]] = {
+		"calls": [],
+		"timers": [],
+		"waits": [],
+	}
+	codes = exit_codes or [0] * len(launch_seconds)
+
+	class FakeTimer:
+		def __init__(self, interval: float, _callback: object) -> None:
+			monitor["timers"].append(interval)
+
+		def start(self) -> None:
+			pass
+
+		def cancel(self) -> None:
+			pass
+
+	class FakeProcess:
+		def __init__(
+			self, arguments: list[str], *, stderr: io.BufferedRandom, **_kwargs: object
+		) -> None:
+			self.index = len(monitor["calls"])
+			monitor["calls"].append(arguments)
+			now[0] += launch_seconds[self.index]
+			self.stdout = io.BytesIO()
+			self.code = codes[self.index]
+			if self.code:
+				stderr.write(b"HTTP 404\n")
+
+		def __enter__(self) -> FakeProcess:
+			return self
+
+		def __exit__(self, *_args: object) -> None:
+			return None
+
+		def wait(self, *, timeout: float) -> int:
+			monitor["waits"].append(timeout)
+			now[0] += wait_seconds[self.index]
+			return self.code
+
+		def kill(self) -> None:
+			self.code = -9
+
+	monkeypatch.setattr(publication_github, "monotonic", lambda: now[0])
+	monkeypatch.setattr(publication_github, "Timer", FakeTimer)
+	monkeypatch.setattr(publication_github.subprocess, "Popen", FakeProcess)
+	return BoundedCommand(10, aggregate_timeout_seconds=10), monitor, now
 
 
 def test_source_reads_exact_commit_as_data_through_gh() -> None:
@@ -71,6 +131,26 @@ def test_api_errors_are_not_interpreted_as_absent_resources() -> None:
 		GitHubCLI("o/r", timeout_seconds=120, command=command).get("/releases")
 
 
+def test_tag_creation_403_explains_fail_closed_manual_recovery() -> None:
+	class DeniedCommand:
+		def __call__(
+			self, _arguments: Sequence[str], *, content: bytes | None = None, limit: int
+		) -> bytes:
+			raise PublicationError("gh api POST repos/o/r/git/refs: command failed (exit 1, HTTP 403)")
+
+	api = GitHubCLI("o/r", timeout_seconds=60, command=DeniedCommand())
+	with pytest.raises(PublicationError) as error:
+		api.post("/git/refs", {"ref": "refs/tags/v2.3.0", "sha": "a" * 40})
+	message = str(error.value)
+	assert "Workflows: write restriction" in message
+	assert "keep the original candidate and its source SHA" in message
+	assert "create and push only that exact tag" in message
+	assert "rerun only the failed Publish release job in this original workflow run" in message
+	assert "do not dispatch a new run, rerun all jobs, or repush the image" in message
+	assert "artifact or upload log is missing or expired" in message
+	assert "Do not change the source or expand GITHUB_TOKEN permissions" in message
+
+
 def test_image_readback_uses_content_digest_without_running_product() -> None:
 	manifest = b"abc"
 	command = Command([manifest])
@@ -84,10 +164,74 @@ def test_image_readback_uses_content_digest_without_running_product() -> None:
 	]
 
 
-def test_release_api_reads_and_mutations_use_the_separate_release_command() -> None:
-	read_command = Command([b'{"id":1}'])
-	release_command = Command(
+def test_image_commands_use_a_separate_bounded_writer_timeout() -> None:
+	api_command = Command([b"{}"])
+	image_command = Command([b"manifest"])
+	api = GitHubCLI(
+		"o/r",
+		timeout_seconds=60,
+		command=api_command,
+		image_command=image_command,
+	)
+
+	assert api.get("/actions/runs/7") == {}
+	assert api.image_digest("ghcr.io/o/image@sha256:" + "c" * 64)
+	assert api_command.calls[0][:2] == ["gh", "api"]
+	assert image_command.calls[0][:3] == ["docker", "buildx", "imagetools"]
+	assert BoundedCommand(
+		MAX_IMAGE_WRITER_TIMEOUT_SECONDS,
+		maximum_timeout_seconds=MAX_IMAGE_WRITER_TIMEOUT_SECONDS,
+	).timeout_seconds == MAX_IMAGE_WRITER_TIMEOUT_SECONDS
+	with pytest.raises(PublicationError, match="timeout exceeds its configured bound"):
+		BoundedCommand(MAX_IMAGE_WRITER_TIMEOUT_SECONDS)
+	settings = tomllib.loads(
+		(Path(__file__).resolve().parents[1] / ".release/release-tools.toml").read_text(
+			encoding="utf-8"
+		)
+	)
+	assert settings["timeouts"]["github_api_seconds"] == 60
+	assert settings["timeouts"]["image_writer_seconds"] == MAX_IMAGE_WRITER_TIMEOUT_SECONDS
+
+
+def test_sequential_image_commands_share_one_aggregate_deadline(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	command, monitor, _now = _clocked_bounded_command(
+		monkeypatch,
+		launch_seconds=[1, 1],
+		wait_seconds=[1.5, 1.5],
+	)
+	command(["docker", "load"], limit=64)
+	command(["docker", "push"], limit=64)
+
+	assert len(monitor["calls"]) == 2
+	assert monitor["timers"] == pytest.approx([9, 6.5])
+	assert monitor["waits"] == pytest.approx([9, 6.5])
+
+
+def test_image_command_failure_does_not_reset_or_bypass_exhausted_budget(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	command, monitor, _now = _clocked_bounded_command(
+		monkeypatch,
+		launch_seconds=[9, 0],
+		wait_seconds=[1, 0],
+		exit_codes=[1, 0],
+	)
+	with pytest.raises(MissingResourceError, match="resource is absent"):
+		command(["docker", "buildx", "imagetools", "inspect"], limit=64)
+	with pytest.raises(PublicationError, match="shared image-command budget.*exhausted"):
+		command(["docker", "push"], limit=64)
+
+	assert len(monitor["calls"]) == 1
+	assert monitor["timers"] == [1]
+	assert monitor["waits"] == [1]
+
+
+def test_release_api_reads_and_mutations_use_the_same_caller_command() -> None:
+	command = Command(
 		[
+			b'{"id":1}',
 			b'[]',
 			b'{"id":3}',
 			b'{"ref":"refs/tags/v2.2.0"}',
@@ -99,8 +243,7 @@ def test_release_api_reads_and_mutations_use_the_separate_release_command() -> N
 	api = GitHubCLI(
 		"o/r",
 		timeout_seconds=120,
-		command=read_command,
-		release_command=release_command,
+		command=command,
 	)
 	api.get("/actions/runs/7")
 	assert api.get("/releases?per_page=100&page=1") == []
@@ -110,20 +253,22 @@ def test_release_api_reads_and_mutations_use_the_separate_release_command() -> N
 	api.patch("/releases/2", {"draft": False})
 	api.upload(2, "quality-gate.zip", b"asset")
 
-	assert len(read_command.calls) == 1
-	assert len(release_command.calls) == 6
-	assert [call[2] for call in release_command.calls[:5]] == [
+	assert len(command.calls) == 7
+	assert [call[2] for call in command.calls[1:6]] == [
 		"repos/o/r/releases?per_page=100&page=1",
 		"repos/o/r/releases/3",
 		"repos/o/r/git/refs",
 		"repos/o/r/releases",
 		"repos/o/r/releases/2",
 	]
-	assert release_command.calls[5][2].startswith("https://uploads.github.com/repos/o/r/releases/2")
+	assert command.calls[6][2].startswith("https://uploads.github.com/repos/o/r/releases/2")
 
 
-def test_bounded_command_can_scope_the_gh_token_to_release_mutations() -> None:
-	output = BoundedCommand(5, environment={"GH_TOKEN": "release-only"})(
+def test_bounded_command_inherits_the_automatically_issued_token(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	monkeypatch.setenv("GH_TOKEN", "built-in-token")
+	output = BoundedCommand(5)(
 		[
 			sys.executable,
 			"-B",
@@ -132,7 +277,7 @@ def test_bounded_command_can_scope_the_gh_token_to_release_mutations() -> None:
 		],
 		limit=64,
 	)
-	assert output.splitlines() == [b"release-only"]
+	assert output.splitlines() == [b"built-in-token"]
 
 
 @pytest.mark.parametrize("program", ["import time; time.sleep(30)", "print('x' * 1024)"])
@@ -161,6 +306,16 @@ def test_external_command_404_remains_optional_without_stderr() -> None:
 	message = str(error.value)
 	assert message == "external command: resource is absent (HTTP 404)"
 	assert "secret-token" not in message
+
+
+def test_registry_missing_tag_status_is_distinguished_without_diagnostics() -> None:
+	program = (
+		"import sys; sys.stderr.write("
+		"'response status code 404: Not Found secret-token\\n'); sys.exit(1)"
+	)
+	with pytest.raises(MissingResourceError) as error:
+		BoundedCommand(5)([sys.executable, "-B", "-c", program], limit=64)
+	assert "secret-token" not in str(error.value)
 
 
 def test_external_command_marks_gh_escape_guard_without_stderr() -> None:
@@ -342,8 +497,6 @@ def test_workflow_entrypoint_rejects_wrong_or_floating_helper_before_github(
 	environment.pop("GH_TOKEN", None)
 	environment.pop("GITHUB_TOKEN", None)
 	environment.pop("PUBLISHER_REGISTRY_AUTH", None)
-	environment["PUBLISHER_GHCR_TOKEN"] = "short-lived-token"
-	environment["PUBLISHER_GHCR_USERNAME"] = "github-actions[bot]"
 	result = subprocess.run(
 		[
 			sys.executable,
@@ -369,15 +522,54 @@ def test_workflow_entrypoint_rejects_wrong_or_floating_helper_before_github(
 	assert not result.stdout
 
 
-def test_publish_requires_a_dedicated_release_api_token(
+def test_publish_does_not_require_a_separate_release_api_token(
 	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-	monkeypatch.setenv("PUBLISHER_GHCR_TOKEN", "short-lived-token")
-	monkeypatch.setenv("PUBLISHER_GHCR_USERNAME", "github-actions[bot]")
-	monkeypatch.delenv("PUBLISHER_RELEASE_TOKEN", raising=False)
+	from quality_gate import publication_cli
 
-	assert publisher_main(["publish", "--pr", "7", "--candidate-id", "9"]) == 1
-	assert capsys.readouterr().err == "publication: refused - GitHub release API token is required\n"
+	class Publisher:
+		@staticmethod
+		def publish(_pr: int, _candidate_id: int) -> dict[str, str]:
+			return {"status": "already-complete", "version": "2.3.0"}
+
+	monkeypatch.setattr(publication_cli, "_publisher", lambda _root: Publisher())
+	monkeypatch.setenv("GH_TOKEN", "built-in-token")
+	monkeypatch.setenv("GITHUB_ACTOR", "github-actions[bot]")
+	monkeypatch.delenv("PUBLISHER_RELEASE_TOKEN", raising=False)
+	assert "PUBLISHER_RELEASE_TOKEN" not in Path(
+		publication_cli.__file__
+	).read_text(encoding="utf-8")
+
+	assert publisher_main(["publish", "--pr", "7", "--candidate-id", "9"]) == 0
+	assert '"status": "already-complete"' in capsys.readouterr().out
+
+
+def test_image_writer_cli_passes_the_original_pull_request_number(
+	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+	from quality_gate import publication_cli
+
+	class Publisher:
+		@staticmethod
+		def write_images(_pr: int, _candidate_id: int, _output: Path) -> dict[str, str]:
+			return {"status": "images-written", "version": "2.3.0"}
+
+	monkeypatch.setattr(publication_cli, "_publisher", lambda _root: Publisher())
+	assert (
+		publisher_main(
+			[
+				"write-images",
+				"--pr",
+				"7",
+				"--candidate-id",
+				"9",
+				"--output",
+				str(tmp_path),
+			]
+		)
+		== 0
+	)
+	assert '"status": "images-written"' in capsys.readouterr().out
 
 
 def test_job_log_download_retries_escape_guard_with_gh_opt_in() -> None:
