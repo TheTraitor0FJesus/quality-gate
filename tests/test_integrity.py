@@ -553,6 +553,53 @@ def test_workflow_hygiene_rejects_matrix_image_producer(tmp_path: Path) -> None:
 	)
 
 
+@pytest.mark.parametrize(
+	"strategy",
+	[
+		"{matrix: {platform: [linux, windows]}}",
+		"{'matrix': {platform: [linux, windows]}}",
+	],
+)
+def test_workflow_hygiene_rejects_flow_style_matrix_image_producer(
+	tmp_path: Path, strategy: str
+) -> None:
+	text = _shared_image_release().replace(
+		"    timeout-minutes: 20\n    permissions:",
+		f"    timeout-minutes: 20\n    strategy: {strategy}\n    permissions:",
+		1,
+	)
+	_image_release_fixture(tmp_path, workflow_text=text)
+	_assert_image_workflow_finding(
+		tmp_path,
+		"image producer does not map to one local job with a unique literal name",
+	)
+
+
+def test_workflow_hygiene_accepts_matrix_text_inside_a_strategy_string(tmp_path: Path) -> None:
+	text = _shared_image_release().replace(
+		"    timeout-minutes: 20\n    permissions:",
+		'    timeout-minutes: 20\n    strategy: "{matrix: text}"\n    permissions:',
+		1,
+	)
+	_image_release_fixture(tmp_path, workflow_text=text)
+	result = workflow_result(tmp_path, _manifest(tmp_path))
+
+	assert result.status.value == "passed", result.findings
+
+
+def test_workflow_hygiene_rejects_matrix_image_writer(tmp_path: Path) -> None:
+	text = _shared_image_release().replace(
+		"  write-image:\n    name: Write image\n",
+		"  write-image:\n    name: Write image\n    strategy: {matrix: {shard: [one, two]}}\n",
+		1,
+	)
+	_image_release_fixture(tmp_path, workflow_text=text)
+	_assert_image_workflow_finding(
+		tmp_path,
+		"release image writer job declares a matrix",
+	)
+
+
 def test_workflow_hygiene_requires_image_publisher_configuration(tmp_path: Path) -> None:
 	_image_release_fixture(tmp_path)
 	config = tmp_path / ".release" / "publisher.toml"

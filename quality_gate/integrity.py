@@ -508,6 +508,65 @@ def _workflow_needs(
 	return None
 
 
+def _flow_mapping_key_at(value: str, start: int) -> str | None:
+	while start < len(value) and value[start].isspace():
+		start += 1
+	end = start
+	if start < len(value) and value[start] in "'\"":
+		quote = value[start]
+		end += 1
+		key: list[str] = []
+		while end < len(value):
+			character = value[end]
+			if quote == '"' and character == "\\" and end + 1 < len(value):
+				key.append(value[end + 1])
+				end += 2
+				continue
+			if character == quote:
+				if quote == "'" and end + 1 < len(value) and value[end + 1] == "'":
+					key.append("'")
+					end += 2
+					continue
+				break
+			key.append(character)
+			end += 1
+		if end == len(value):
+			return None
+		end += 1
+	else:
+		while end < len(value) and value[end] not in "\t\r\n :{}[],":
+			end += 1
+		key = list(value[start:end])
+	while end < len(value) and value[end].isspace():
+		end += 1
+	return "".join(key) if end < len(value) and value[end] == ":" else None
+
+
+def _flow_mapping_has_key(value: str, expected: str) -> bool:
+	"""Find one simple flow-style mapping key without matching quoted string content."""
+	index = 0
+	quote: str | None = None
+	escaped = False
+	while index < len(value):
+		character = value[index]
+		if quote is not None:
+			if quote == '"' and escaped:
+				escaped = False
+			elif quote == '"' and character == "\\":
+				escaped = True
+			elif character == quote:
+				if quote == "'" and index + 1 < len(value) and value[index + 1] == "'":
+					index += 1
+				else:
+					quote = None
+		elif character in "'\"":
+			quote = character
+		elif character in "{," and _flow_mapping_key_at(value, index + 1) == expected:
+			return True
+		index += 1
+	return False
+
+
 def _workflow_jobs(keys: list[tuple[int, str, str] | None], lines: list[str]) -> list[_WorkflowJob]:
 	jobs_start = next(
 		(
@@ -531,6 +590,11 @@ def _workflow_jobs(keys: list[tuple[int, str, str] | None], lines: list[str]) ->
 	jobs: list[_WorkflowJob] = []
 	for position, start in enumerate(job_starts):
 		end = job_starts[position + 1] if position + 1 < len(job_starts) else jobs_end
+		raw_properties = {
+			item[1]: item[2]
+			for item in keys[start + 1 : end]
+			if item and item[0] == _PROPERTY_LEVEL
+		}
 		properties = {
 			item[1]: _unquote_scalar(item[2])
 			for item in keys[start + 1 : end]
@@ -554,7 +618,8 @@ def _workflow_jobs(keys: list[tuple[int, str, str] | None], lines: list[str]) ->
 				any(
 					item and item[0] == _PROPERTY_LEVEL + 2 and item[1] == "matrix"
 					for item in keys[start + 1 : end]
-				),
+				)
+				or _flow_mapping_has_key(raw_properties.get("strategy", ""), "matrix"),
 				_permission_entries(keys, start + 1, end, _PROPERTY_LEVEL),
 			)
 		)
@@ -690,6 +755,16 @@ def _single_workflow_findings(workflow: _Workflow, is_quality_gate_provider: boo
 					"declare a bounded job timeout",
 				)
 			)
+	if workflow.path == ".github/workflows/release.yml" and any(
+		job.id == "write-image" and job.has_matrix for job in workflow.jobs
+	):
+		findings.append(
+			_workflow_finding(
+				workflow.path,
+				"release image writer job declares a matrix",
+				"remove the matrix so one approved writer job makes one package write call",
+			)
+		)
 	return findings
 
 
@@ -936,6 +1011,7 @@ def _release_route_jobs(
 				or writer.name != "Write image"
 				or writer.has_steps
 				or writer.condition != "needs.prepare.outputs.status == 'build-required'"
+				or writer.has_matrix
 				or writer_needs is None
 				or "prepare" not in writer_needs
 				or "build-and-verify" not in writer_needs

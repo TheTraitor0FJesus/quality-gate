@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from threading import Event, Lock, Timer
+from threading import Event, Lock, Thread
 from time import monotonic
 from typing import BinaryIO, NoReturn, Protocol
 from urllib.parse import quote
@@ -25,8 +28,16 @@ from .publication_writer import image_repository, preflight_image_archive, push_
 JSON_LIMIT = 16 * 1024 * 1024
 MAX_TIMEOUT_SECONDS = 300
 MAX_IMAGE_WRITER_TIMEOUT_SECONDS = 25 * 60
+MAX_COMMAND_STDERR_BYTES = 4096
+COMMAND_CLEANUP_GRACE_SECONDS = 2
 MAX_GHCR_TOKEN_BYTES = 64 * 1024
 MAX_GHCR_USERNAME_LENGTH = 255
+WINDOWS_HELPER_MARKER = "--quality-gate-bounded-child-v1"
+WINDOWS_HELPER_READY = b"\x00quality-gate-ready-v2\n"
+WINDOWS_HELPER_PID_BYTES = 4
+WINDOWS_HELPER_GATE = b"\x00quality-gate-run-v1\n"
+WINDOWS_HELPER_UNAVAILABLE = b"\x00quality-gate-command-unavailable-v1\n"
+WINDOWS_HELPER_UNAVAILABLE_EXIT = 127
 GH_ESCAPE_SEQUENCE_ERROR = (
 	b"the response contains terminal escape sequences; pass --allow-escape-sequences"
 )
@@ -71,6 +82,13 @@ def _http_status(detail: bytes) -> str | None:
 	return next((group.decode("ascii") for group in match.groups() if group), None)
 
 
+def _kill_process_group(process_id: int) -> None:
+	try:
+		os.killpg(process_id, signal.SIGKILL)  # type: ignore[attr-defined]
+	except ProcessLookupError:
+		pass
+
+
 @contextmanager
 def registry_configuration(token: str, username: str) -> Iterator[None]:
 	"""Expose the caller's short-lived GHCR token through a temporary Docker config."""
@@ -105,6 +123,311 @@ class Command(Protocol):
 	def __call__(
 		self, arguments: Sequence[str], *, content: bytes | None = None, limit: int
 	) -> bytes: ...
+
+
+class _WindowsJob:
+	"""Contain one helper and its ordinary descendants in a kill-on-close job."""
+
+	def __init__(self) -> None:
+		from ctypes import wintypes
+
+		self._kernel32: ctypes.CDLL = ctypes.WinDLL(  # type: ignore[attr-defined]
+			"kernel32", use_last_error=True
+		)
+		self._kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+		self._kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+		self._kernel32.SetInformationJobObject.argtypes = [
+			wintypes.HANDLE,
+			wintypes.INT,
+			ctypes.c_void_p,
+			wintypes.DWORD,
+		]
+		self._kernel32.SetInformationJobObject.restype = wintypes.BOOL
+		self._kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+		self._kernel32.OpenProcess.restype = wintypes.HANDLE
+		self._kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+		self._kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+		self._kernel32.IsProcessInJob.argtypes = [
+			wintypes.HANDLE,
+			wintypes.HANDLE,
+			ctypes.POINTER(wintypes.BOOL),
+		]
+		self._kernel32.IsProcessInJob.restype = wintypes.BOOL
+		self._kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+		self._kernel32.CloseHandle.restype = wintypes.BOOL
+		self._handle: object | None = self._kernel32.CreateJobObjectW(None, None)
+		if not self._handle:
+			raise self._last_error()
+		try:
+			self._set_kill_on_close()
+		except BaseException:
+			self.close()
+			raise
+
+	@staticmethod
+	def _last_error() -> OSError:
+		code = ctypes.get_last_error()  # type: ignore[attr-defined]
+		return OSError(code, "Windows process containment operation failed")
+
+	def _set_kill_on_close(self) -> None:
+		from ctypes import wintypes
+
+		class BasicLimitInformation(ctypes.Structure):
+			_fields_ = [
+				("PerProcessUserTimeLimit", ctypes.c_longlong),
+				("PerJobUserTimeLimit", ctypes.c_longlong),
+				("LimitFlags", wintypes.DWORD),
+				("MinimumWorkingSetSize", ctypes.c_size_t),
+				("MaximumWorkingSetSize", ctypes.c_size_t),
+				("ActiveProcessLimit", wintypes.DWORD),
+				("Affinity", ctypes.c_size_t),
+				("PriorityClass", wintypes.DWORD),
+				("SchedulingClass", wintypes.DWORD),
+			]
+
+		class IoCounters(ctypes.Structure):
+			_fields_ = [
+				(name, ctypes.c_ulonglong)
+				for name in (
+					"ReadOperationCount",
+					"WriteOperationCount",
+					"OtherOperationCount",
+					"ReadTransferCount",
+					"WriteTransferCount",
+					"OtherTransferCount",
+				)
+			]
+
+		class ExtendedLimitInformation(ctypes.Structure):
+			_fields_ = [
+				("BasicLimitInformation", BasicLimitInformation),
+				("IoInfo", IoCounters),
+				("ProcessMemoryLimit", ctypes.c_size_t),
+				("JobMemoryLimit", ctypes.c_size_t),
+				("PeakProcessMemoryUsed", ctypes.c_size_t),
+				("PeakJobMemoryUsed", ctypes.c_size_t),
+			]
+
+		information = ExtendedLimitInformation()
+		information.BasicLimitInformation.LimitFlags = 0x2000
+		if not self._kernel32.SetInformationJobObject(
+			self._handle,
+			9,
+			ctypes.byref(information),
+			ctypes.sizeof(information),
+		):
+			raise self._last_error()
+
+	def assign(self, process_id: int) -> None:
+		from ctypes import wintypes
+
+		process_handle = self._kernel32.OpenProcess(0x0100 | 0x0001 | 0x1000, False, process_id)
+		if not process_handle:
+			raise self._last_error()
+		try:
+			if not self._kernel32.AssignProcessToJobObject(self._handle, process_handle):
+				raise self._last_error()
+			is_in_job = wintypes.BOOL()
+			if not self._kernel32.IsProcessInJob(
+				process_handle, self._handle, ctypes.byref(is_in_job)
+			):
+				raise self._last_error()
+			if not is_in_job.value:
+				raise OSError("Windows helper is not contained in its Job Object")
+		finally:
+			if not self._kernel32.CloseHandle(wintypes.HANDLE(process_handle)):
+				raise self._last_error()
+
+	def close(self) -> None:
+		if self._handle:
+			handle = self._handle
+			if self._kernel32.CloseHandle(handle):
+				self._handle = None
+			else:
+				raise self._last_error()
+
+
+class _CommandControl:
+	"""Serialize launch-gate release and bounded process-tree teardown."""
+
+	def __init__(
+		self,
+		process: subprocess.Popen[bytes],
+		*,
+		job: _WindowsJob | None = None,
+		gated: bool = False,
+	) -> None:
+		self.process = process
+		self.job = job
+		self.gated = gated
+		self._assigned = False
+		self._aborted = False
+		self._closed = False
+		self._lock = Lock()
+
+	def assign(self, process_id: int | None = None) -> None:
+		with self._lock:
+			if self._aborted or self._closed:
+				raise PublicationError("command launch was cancelled before assignment")
+			if not self.gated:
+				return
+			if process_id is None or self.job is None:
+				raise PublicationError("command containment helper identity is unavailable")
+			self.job.assign(process_id)
+			self._assigned = True
+
+	def release(self) -> None:
+		with self._lock:
+			if self._aborted or self._closed:
+				raise PublicationError("command launch was cancelled before release")
+			if not self.gated:
+				return
+			if not self._assigned or self.process.stdin is None:
+				raise PublicationError("command launch gate is not assigned")
+			try:
+				written = self.process.stdin.write(WINDOWS_HELPER_GATE)
+				if written != len(WINDOWS_HELPER_GATE):
+					raise OSError("command launch gate write was incomplete")
+				self.process.stdin.flush()
+				self.process.stdin.close()
+			except (OSError, ValueError) as error:
+				self._terminate_locked()
+				raise PublicationError("command launch gate could not be released") from error
+
+	def terminate(self) -> None:
+		with self._lock:
+			if self._closed:
+				return
+			self._aborted = True
+			self._terminate_locked()
+
+	def _terminate_locked(self) -> None:
+		if self.job is not None and self._assigned:
+			job = self.job
+			job.close()
+			self.job = None
+		else:
+			if os.name == "nt":
+				try:
+					self.process.kill()
+				except OSError:
+					if self.process.poll() is None:
+						raise
+			else:
+				_kill_process_group(self.process.pid)
+		if self.gated and self.process.stdin is not None and not self.process.stdin.closed:
+			self.process.stdin.close()
+
+	def close(self) -> None:
+		with self._lock:
+			if self._closed:
+				return
+			self._aborted = True
+			try:
+				self._terminate_locked()
+			finally:
+				if self.job is not None:
+					job = self.job
+					job.close()
+					self.job = None
+			self._closed = True
+
+
+class _CommandSession:
+	"""Own a subprocess, its process tree, and any Windows launch gate."""
+
+	def __init__(
+		self,
+		process: subprocess.Popen[bytes],
+		control: _CommandControl,
+		*,
+		startup_prefix: bytes = b"",
+	) -> None:
+		self.process = process
+		self.control = control
+		self.startup_prefix = startup_prefix
+
+
+class _CommandOutput:
+	"""Collect bounded child output and wake the process supervisor on failure."""
+
+	def __init__(self) -> None:
+		self.stdout = bytearray()
+		self.stderr = bytearray()
+		self.startup_ready = Event()
+		self.changed = Event()
+		self.failures: list[str] = []
+		self.startup_process_id: int | None = None
+		self._lock = Lock()
+
+	def fail(self, detail: str, control: _CommandControl) -> None:
+		with self._lock:
+			self.failures.append(detail)
+			self.changed.set()
+		try:
+			control.terminate()
+		except Exception:
+			with self._lock:
+				self.failures.append("command process containment failed")
+				self.changed.set()
+
+	def failure(self) -> str | None:
+		with self._lock:
+			return self.failures[0] if self.failures else None
+
+	def ready(self, process_id: int) -> None:
+		with self._lock:
+			self.startup_process_id = process_id
+			self.startup_ready.set()
+			self.changed.set()
+
+	def helper_process_id(self) -> int | None:
+		with self._lock:
+			return self.startup_process_id
+
+	def failures_snapshot(self) -> tuple[str, ...]:
+		with self._lock:
+			return tuple(self.failures)
+
+
+def _spawn_bounded_command(command: list[str], environment: dict[str, str]) -> _CommandSession:
+	if os.name != "nt":
+		process = subprocess.Popen(
+			command,
+			stdin=subprocess.DEVNULL,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.PIPE,
+			env=environment,
+			start_new_session=True,
+		)
+		return _CommandSession(process, _CommandControl(process))
+
+	job = _WindowsJob()
+	helper = Path(__file__).with_name("_windows_command.py")
+	try:
+		process = subprocess.Popen(
+			[
+				sys.executable,
+				"-I",
+				"-S",
+				"-B",
+				str(helper),
+				WINDOWS_HELPER_MARKER,
+				*command,
+			],
+			stdin=subprocess.PIPE,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.PIPE,
+			env=environment,
+		)
+	except BaseException:
+		job.close()
+		raise
+	return _CommandSession(
+		process,
+		_CommandControl(process, job=job, gated=True),
+		startup_prefix=WINDOWS_HELPER_READY,
+	)
 
 
 class EscapeSequenceError(PublicationError):
@@ -147,8 +470,7 @@ class BoundedCommand:
 				input_file = Path(directory) / "input"
 				input_file.write_bytes(content)
 				command.extend(["--input", str(input_file)])
-			with (Path(directory) / "stderr").open("w+b") as errors:
-				return self._execute(command, errors, limit, deadline)
+			return self._execute(command, limit, deadline)
 
 	def _begin_aggregate_budget(self) -> float | None:
 		if self.aggregate_timeout_seconds is None:
@@ -170,15 +492,13 @@ class BoundedCommand:
 			)
 		return min(self.timeout_seconds, remaining)
 
-	def _execute(
-		self, command: list[str], errors: BinaryIO, limit: int, deadline: float | None
-	) -> bytes:
+	def _execute(self, command: list[str], limit: int, deadline: float | None) -> bytes:
 		operation = _operation(command)
 		environment = os.environ.copy()
 		environment.update(self.environment)
 		try:
 			self._remaining_timeout(operation, deadline)
-			return self._run_bounded(command, errors, limit, deadline, operation, environment)
+			return self._run_bounded(command, limit, deadline, operation, environment)
 		except subprocess.TimeoutExpired as error:
 			try:
 				self._raise_timeout(operation, deadline)
@@ -190,76 +510,370 @@ class BoundedCommand:
 	def _run_bounded(
 		self,
 		command: list[str],
-		errors: BinaryIO,
 		limit: int,
 		deadline: float | None,
 		operation: str,
 		environment: dict[str, str],
 	) -> bytes:
-		with subprocess.Popen(
-			command,
-			stdin=subprocess.DEVNULL,
-			stdout=subprocess.PIPE,
-			stderr=errors,
-			env=environment,
-		) as process:
-			command_timeout = self._process_timeout(process, operation, deadline)
-			timed_out = Event()
-
-			def terminate() -> None:
-				self._terminate(process, timed_out)
-
-			watchdog = Timer(command_timeout, terminate)
-			watchdog.start()
-			try:
-				output, code = self._read_and_wait(process, limit, operation, deadline)
-			finally:
-				watchdog.cancel()
-			if timed_out.is_set():
-				self._raise_timeout(operation, deadline)
-			if code:
-				self._raise_command_error(errors, operation, code)
-			return output
-
-	def _process_timeout(
-		self,
-		process: subprocess.Popen[bytes],
-		operation: str,
-		deadline: float | None,
-	) -> float:
+		command_deadline = monotonic() + self._remaining_timeout(operation, deadline)
+		session: _CommandSession | None = None
+		threads: list[Thread] = []
+		output = _CommandOutput()
 		try:
-			return self._remaining_timeout(operation, deadline)
-		except PublicationError:
-			process.kill()
+			session = _spawn_bounded_command(command, environment)
+			self._start_output_readers(session, output, limit, threads)
+			self._release_command(session, output, operation, command_deadline, deadline)
+			code = self._wait_for_command(session, operation, command_deadline, deadline)
+		except BaseException as error:
+			primary_error = self._cleanup_after_failure(
+				error, operation, deadline, session, threads, output
+			)
+			if primary_error is not None:
+				raise primary_error from error
 			raise
-
-	def _read_and_wait(
-		self,
-		process: subprocess.Popen[bytes],
-		limit: int,
-		operation: str,
-		deadline: float | None,
-	) -> tuple[bytes, int]:
-		output = self._read(process, limit)
-		try:
-			wait_timeout = self._remaining_timeout(operation, deadline)
-		except PublicationError:
-			process.kill()
-			raise
-		return output, process.wait(timeout=wait_timeout)
+		if session is None:
+			raise PublicationError(f"{operation}: command was not started")
+		return self._finish_command(session, threads, output, code, operation)
 
 	@staticmethod
-	def _terminate(process: subprocess.Popen[bytes], timed_out: Event) -> None:
-		timed_out.set()
+	def _start_output_readers(
+		session: _CommandSession,
+		output: _CommandOutput,
+		limit: int,
+		threads: list[Thread],
+	) -> None:
+		process = session.process
+		if process.stdout is None or process.stderr is None:
+			raise PublicationError("command has no readable output")
+		readers = (
+			Thread(
+				target=BoundedCommand._capture_stream,
+				args=(
+					process.stdout,
+					output.stdout,
+					limit,
+					"external command response exceeds its size limit",
+					output,
+					session.control,
+					"stdout",
+					session.startup_prefix,
+				),
+				daemon=True,
+			),
+			Thread(
+				target=BoundedCommand._capture_stream,
+				args=(
+					process.stderr,
+					output.stderr,
+					MAX_COMMAND_STDERR_BYTES,
+					"external command error output exceeds its size limit",
+					output,
+					session.control,
+					"stderr",
+					b"",
+				),
+				daemon=True,
+			),
+		)
+		for reader in readers:
+			try:
+				reader.start()
+			except RuntimeError as error:
+				raise PublicationError("external command output reader could not start") from error
+			threads.append(reader)
+
+	def _release_command(
+		self,
+		session: _CommandSession,
+		output: _CommandOutput,
+		operation: str,
+		command_deadline: float,
+		aggregate_deadline: float | None,
+	) -> None:
+		if session.startup_prefix:
+			self._await_helper_ready(
+				session, output, operation, command_deadline, aggregate_deadline
+			)
+			helper_process_id = output.helper_process_id()
+			if helper_process_id is None:
+				raise PublicationError("command containment helper identity is unavailable")
+			session.control.assign(helper_process_id)
+		else:
+			session.control.assign()
+		self._time_left(operation, command_deadline, aggregate_deadline)
+		session.control.release()
+
+	def _wait_for_command(
+		self,
+		session: _CommandSession,
+		operation: str,
+		command_deadline: float,
+		aggregate_deadline: float | None,
+	) -> int:
+		return session.process.wait(
+			timeout=self._time_left(operation, command_deadline, aggregate_deadline)
+		)
+
+	def _finish_command(
+		self,
+		session: _CommandSession,
+		threads: list[Thread],
+		output: _CommandOutput,
+		code: int,
+		operation: str,
+	) -> bytes:
+		cleanup_failure = self._cleanup_session(session, threads)
+		reader_failure = output.failure()
+		if reader_failure is not None:
+			primary_error = PublicationError(reader_failure)
+			if cleanup_failure is not None:
+				raise PublicationError(
+					f"{primary_error}; command cleanup did not complete: {cleanup_failure}"
+				) from primary_error
+			raise primary_error
+		if cleanup_failure is not None:
+			raise PublicationError(
+				f"{operation}: command cleanup did not complete: {cleanup_failure}"
+			)
+		if bytes(output.stderr).startswith(WINDOWS_HELPER_UNAVAILABLE):
+			raise PublicationError(f"{operation}: command unavailable")
+		if code:
+			self._raise_command_error(bytes(output.stderr), operation, code)
+		return bytes(output.stdout)
+
+	def _cleanup_after_failure(
+		self,
+		error: BaseException,
+		operation: str,
+		deadline: float | None,
+		session: _CommandSession | None,
+		threads: list[Thread],
+		output: _CommandOutput,
+	) -> PublicationError | None:
+		if session is None:
+			return None
+		reader_failures_before_cleanup = output.failures_snapshot()
+		primary_error: BaseException = error
+		if reader_failures_before_cleanup:
+			primary_error = PublicationError(reader_failures_before_cleanup[0])
+		elif isinstance(error, subprocess.TimeoutExpired):
+			try:
+				self._raise_timeout(operation, deadline)
+			except PublicationError as timeout_error:
+				primary_error = timeout_error
+
+		cleanup_failure = self._cleanup_session(session, threads)
+		reader_failures_after_cleanup = output.failures_snapshot()
+		secondary_reader_failures = reader_failures_after_cleanup[
+			len(reader_failures_before_cleanup) :
+		]
+		if (cleanup_failure is not None or secondary_reader_failures) and isinstance(
+			primary_error, OSError
+		):
+			primary_error = PublicationError(f"{operation}: command unavailable")
+		secondary_details = (
+			[f"{operation}: command cleanup did not complete: {cleanup_failure}"]
+			if cleanup_failure is not None
+			else []
+		)
+		secondary_details.extend(
+			f"{operation}: secondary output reader failure: {failure}"
+			for failure in secondary_reader_failures
+		)
+		if secondary_details:
+			return PublicationError(f"{primary_error}; {'; '.join(secondary_details)}")
+		if primary_error is error:
+			return None
+		return primary_error if isinstance(primary_error, PublicationError) else None
+
+	def _time_left(
+		self,
+		operation: str,
+		command_deadline: float,
+		aggregate_deadline: float | None,
+	) -> float:
+		remaining = command_deadline - monotonic()
+		if aggregate_deadline is not None:
+			remaining = min(remaining, aggregate_deadline - monotonic())
+		if remaining <= 0:
+			self._raise_timeout(operation, aggregate_deadline)
+		return remaining
+
+	@staticmethod
+	def _capture_stream(
+		stream: BinaryIO,
+		collected: bytearray,
+		limit: int,
+		overflow_message: str,
+		output: _CommandOutput,
+		control: _CommandControl,
+		name: str,
+		startup_prefix: bytes,
+	) -> None:
+		try:
+			if startup_prefix:
+				output.ready(BoundedCommand._read_helper_identity(stream, startup_prefix))
+			BoundedCommand._capture_response(stream, collected, limit, overflow_message)
+		except Exception as error:
+			detail = (
+				str(error)
+				if isinstance(error, PublicationError)
+				else f"external command {name} could not be read"
+			)
+			output.fail(detail, control)
+		finally:
+			try:
+				stream.close()
+			except (OSError, ValueError):
+				output.fail(f"external command {name} stream could not be closed", control)
+			output.changed.set()
+
+	@staticmethod
+	def _read_helper_identity(stream: BinaryIO, startup_prefix: bytes) -> int:
+		prefix = BoundedCommand._read_exact(
+			stream,
+			len(startup_prefix),
+			"command containment helper exited before it was assigned",
+		)
+		if prefix != startup_prefix:
+			raise PublicationError("command containment helper sent an invalid startup marker")
+		process_id = BoundedCommand._read_exact(
+			stream,
+			WINDOWS_HELPER_PID_BYTES,
+			"command containment helper omitted its process identity",
+		)
+		helper_process_id = int.from_bytes(process_id, "little")
+		if helper_process_id == 0:
+			raise PublicationError("command containment helper sent an invalid process identity")
+		return helper_process_id
+
+	@staticmethod
+	def _read_exact(stream: BinaryIO, size: int, failure_message: str) -> bytes:
+		content = bytearray()
+		while len(content) < size:
+			chunk = BoundedCommand._read_available(stream, size - len(content))
+			if not chunk:
+				raise PublicationError(failure_message)
+			content.extend(chunk)
+		return bytes(content)
+
+	@staticmethod
+	def _capture_response(
+		stream: BinaryIO, collected: bytearray, limit: int, overflow_message: str
+	) -> None:
+		while chunk := BoundedCommand._read_available(
+			stream, min(64 * 1024, limit - len(collected) + 1)
+		):
+			if len(collected) + len(chunk) > limit:
+				raise PublicationError(overflow_message)
+			collected.extend(chunk)
+
+	@staticmethod
+	def _read_available(stream: BinaryIO, size: int) -> bytes:
+		read = getattr(stream, "read1", stream.read)
+		return read(size)
+
+	def _await_helper_ready(
+		self,
+		session: _CommandSession,
+		output: _CommandOutput,
+		operation: str,
+		command_deadline: float,
+		aggregate_deadline: float | None,
+	) -> None:
+		while True:
+			output.changed.clear()
+			self._raise_reader_failure(output)
+			if output.startup_ready.is_set():
+				return
+			if session.process.poll() is not None:
+				if bytes(output.stderr).startswith(WINDOWS_HELPER_UNAVAILABLE):
+					raise PublicationError(f"{operation}: command unavailable")
+				raise PublicationError(f"{operation}: command containment helper failed to start")
+			output.changed.wait(
+				min(0.05, self._time_left(operation, command_deadline, aggregate_deadline))
+			)
+
+	@staticmethod
+	def _raise_reader_failure(output: _CommandOutput) -> None:
+		failure = output.failure()
+		if failure is not None:
+			raise PublicationError(failure)
+
+	@staticmethod
+	def _cleanup_session(session: _CommandSession, threads: list[Thread]) -> str | None:
+		"""Stop the process tree, reap its leader, and join readers within one grace period."""
+		deadline = monotonic() + COMMAND_CLEANUP_GRACE_SECONDS
+		failures: list[str] = []
+		for failure in (
+			BoundedCommand._terminate_process_tree(session),
+			BoundedCommand._reap_process(session.process, deadline),
+			BoundedCommand._join_readers(threads, deadline),
+		):
+			if failure is not None:
+				failures.append(failure)
+		return "; ".join(failures) or None
+
+	@staticmethod
+	def _terminate_process_tree(session: _CommandSession) -> str | None:
+		try:
+			session.control.close()
+		except Exception:
+			try:
+				session.control.terminate()
+			except Exception:
+				return "process-tree termination and fallback failed"
+			return "process-tree termination failed"
+		return None
+
+	@staticmethod
+	def _reap_process(process: subprocess.Popen[bytes], deadline: float) -> str | None:
+		try:
+			process.wait(timeout=min(0.25, max(0.0, deadline - monotonic()) / 4))
+		except subprocess.TimeoutExpired:
+			return BoundedCommand._terminate_and_reap(process, deadline)
+		except OSError:
+			failure = BoundedCommand._terminate_process(process)
+			if failure is not None:
+				return f"command process could not be inspected or reaped; {failure}"
+			return "command process could not be inspected or reaped"
+		return None
+
+	@staticmethod
+	def _terminate_and_reap(process: subprocess.Popen[bytes], deadline: float) -> str | None:
+		failure = BoundedCommand._terminate_process(process)
+		if failure is not None:
+			return failure
+		try:
+			process.wait(timeout=max(0.0, deadline - monotonic()))
+		except subprocess.TimeoutExpired:
+			return "command process did not exit after termination"
+		except OSError:
+			return "command process could not be reaped"
+		return None
+
+	@staticmethod
+	def _terminate_process(process: subprocess.Popen[bytes]) -> str | None:
 		try:
 			process.kill()
 		except OSError:
-			pass
+			try:
+				if process.poll() is None:
+					return "command process could not be terminated"
+			except OSError:
+				return "command process could not be inspected"
+		return None
 
 	@staticmethod
-	def _raise_command_error(errors: BinaryIO, operation: str, code: int) -> None:
-		errors.seek(0)
-		detail = errors.read(4096)
+	def _join_readers(threads: list[Thread], deadline: float) -> str | None:
+		for reader in threads:
+			reader.join(timeout=max(0.0, deadline - monotonic()))
+		if any(reader.is_alive() for reader in threads):
+			return "command output reader did not stop"
+		return None
+
+	@staticmethod
+	def _raise_command_error(detail: bytes, operation: str, code: int) -> None:
 		status = _http_status(detail)
 		if status == "404":
 			raise MissingResourceError(f"{operation}: resource is absent (HTTP 404)")
@@ -278,20 +892,6 @@ class BoundedCommand:
 				f"{budget_seconds:g} seconds is exhausted"
 			)
 		raise PublicationError(f"{operation}: timed out after {self.timeout_seconds:g} seconds")
-
-	@staticmethod
-	def _read(process: subprocess.Popen[bytes], limit: int) -> bytes:
-		if process.stdout is None:
-			raise PublicationError("command has no readable output")
-		chunks: list[bytes] = []
-		total = 0
-		while chunk := process.stdout.read(min(1024 * 1024, limit - total + 1)):
-			total += len(chunk)
-			if total > limit:
-				process.kill()
-				raise PublicationError("external command response exceeds its size limit")
-			chunks.append(chunk)
-		return b"".join(chunks)
 
 
 class GitHubCLI:

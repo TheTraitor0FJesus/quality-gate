@@ -652,6 +652,7 @@ class Publisher:
 			)
 		proof["artifact_attempt"] = attempt
 		proof["latest_attempt"] = latest_attempt
+		proof["producer"] = producer_name
 		return evidence, files, proof
 
 	def _verification_context(self, candidate: Mapping[str, object]) -> None:
@@ -762,6 +763,8 @@ class Publisher:
 				{
 					"verification": {
 						"run_id": self.context.run_id,
+						"provider_sha": self.context.provider_sha,
+						"producers": proofs,
 						"image_writer": {
 							"receipt": image_receipt,
 							"artifact_proof": image_writer_proof,
@@ -1139,7 +1142,55 @@ class Publisher:
 		return set(expected) - set(actual)
 
 	@staticmethod
+	def _image_producer_proofs(
+		candidate: Mapping[str, object], verification: Mapping[str, object]
+	) -> tuple[dict[str, dict[str, object]], dict[str, str]]:
+		config = record(candidate.get("config"), "candidate configuration")
+		producers = records(config.get("producers"), "required producers")
+		producer_proofs = records(verification.get("producers"), "retained producer proofs")
+		if len(producers) != len(producer_proofs):
+			raise PublicationError("retained producer proofs do not match source configuration")
+		proof_by_name: dict[str, dict[str, object]] = {}
+		image_producer_by_deliverable: dict[str, str] = {}
+		# Proofs are emitted in source configuration order; new receipts also name each proof.
+		for producer, proof in zip(producers, producer_proofs, strict=True):
+			name = producer.get("name")
+			if not isinstance(name, str) or name in proof_by_name:
+				raise PublicationError("retained producer proof identity is ambiguous")
+			if proof.get("producer") not in {None, name}:
+				raise PublicationError("retained producer proof differs from source configuration")
+			proof_by_name[name] = proof
+			if producer.get("kind") != "image":
+				continue
+			required = strings(producer.get("deliverables"), "required image deliverable")
+			if len(required) != 1:
+				raise PublicationError("image producer must retain one required deliverable")
+			deliverable = required[0].replace("{version}", str(candidate.get("version")))
+			if deliverable in image_producer_by_deliverable:
+				raise PublicationError("image producer deliverable identity is ambiguous")
+			image_producer_by_deliverable[deliverable] = name
+		return proof_by_name, image_producer_by_deliverable
+
+	@staticmethod
+	def _matches_image_producer_proof(
+		image_proof: Mapping[str, object], producer_proof: Mapping[str, object]
+	) -> bool:
+		return all(
+			(
+				positive(image_proof.get("artifact_id"), "writer producer artifact ID")
+				== positive(producer_proof.get("artifact_id"), "producer artifact ID"),
+				digest("sha256:" + str(image_proof.get("artifact_digest")))
+				== digest("sha256:" + str(producer_proof.get("digest"))),
+				positive(image_proof.get("job_id"), "writer producer job ID")
+				== positive(producer_proof.get("job_id"), "producer job ID"),
+				positive(image_proof.get("attempt"), "writer producer attempt")
+				== positive(producer_proof.get("artifact_attempt"), "producer artifact attempt"),
+			)
+		)
+
+	@classmethod
 	def _validate_image_writer_receipt(
+		cls: type[Publisher],
 		candidate: Mapping[str, object],
 		items: list[dict[str, object]],
 		receipt: Mapping[str, object],
@@ -1156,23 +1207,31 @@ class Publisher:
 		writer_record = record(writer, "image writer evidence")
 		writer_receipt = record(writer_record.get("receipt"), "retained image writer receipt")
 		artifact_proof = record(writer_record.get("artifact_proof"), "image writer artifact proof")
+		producer_proof_by_name, image_producer_by_deliverable = cls._image_producer_proofs(
+			candidate, verification
+		)
 		expected_candidate = hashlib.sha256(canonical(candidate)).hexdigest()
-		if (
-			writer_receipt.get("schema") != 1
-			or writer_receipt.get("candidate_sha256") != expected_candidate
-			or writer_receipt.get("repository") != candidate.get("repository")
-			or writer_receipt.get("pr") != candidate.get("pr")
-			or writer_receipt.get("source_sha") != candidate.get("source_sha")
-			or writer_receipt.get("version") != candidate.get("version")
-			or writer_receipt.get("candidate_provider_repository")
-			!= candidate.get("provider_repository")
-			or writer_receipt.get("candidate_provider_sha") != candidate.get("provider_sha")
-			or writer_receipt.get("writer_run_id") != verification.get("run_id")
-			or positive(writer_receipt.get("writer_attempt"), "writer attempt")
-			!= positive(artifact_proof.get("attempt"), "writer artifact attempt")
-			or positive(artifact_proof.get("artifact_id"), "writer artifact ID") <= 0
-			or positive(artifact_proof.get("job_id"), "writer job ID") <= 0
-		):
+		identity_matches = all(
+			(
+				writer_receipt.get("schema") == 1,
+				writer_receipt.get("candidate_sha256") == expected_candidate,
+				writer_receipt.get("repository") == candidate.get("repository"),
+				writer_receipt.get("pr") == candidate.get("pr"),
+				writer_receipt.get("source_sha") == candidate.get("source_sha"),
+				writer_receipt.get("version") == candidate.get("version"),
+				writer_receipt.get("candidate_provider_repository")
+				== candidate.get("provider_repository"),
+				writer_receipt.get("candidate_provider_sha") == candidate.get("provider_sha"),
+				writer_receipt.get("provider_repository") == candidate.get("provider_repository"),
+				sha(writer_receipt.get("provider_sha")) == sha(verification.get("provider_sha")),
+				writer_receipt.get("writer_run_id") == verification.get("run_id"),
+				positive(writer_receipt.get("writer_attempt"), "writer attempt")
+				== positive(artifact_proof.get("attempt"), "writer artifact attempt"),
+				positive(artifact_proof.get("artifact_id"), "writer artifact ID") > 0,
+				positive(artifact_proof.get("job_id"), "writer job ID") > 0,
+			)
+		)
+		if not identity_matches:
 			raise PublicationError("retained image writer receipt identity is invalid")
 		_ = digest("sha256:" + str(artifact_proof.get("artifact_digest")))
 		writer_images = records(writer_receipt.get("images"), "retained writer images")
@@ -1184,12 +1243,18 @@ class Publisher:
 				item.get("name"),
 				"retained writer receipt image identity is ambiguous",
 			)
+			producer_name = image_producer_by_deliverable.get(str(item.get("name")))
+			if producer_name is None or image.get("producer") != producer_name:
+				raise PublicationError("retained image producer differs from source configuration")
+			producer_proof = producer_proof_by_name[producer_name]
+			image_proof = record(image.get("producer_proof"), "retained writer producer proof")
 			if (
 				image.get("image_repository") != item.get("image_repository")
 				or image.get("reference") != item.get("reference")
 				or image.get("sha256") != item.get("sha256")
 				or image.get("archive_sha256") != item.get("archive_sha256")
 				or image.get("tag") != f"{item.get('image_repository')}:v{candidate.get('version')}"
+				or not cls._matches_image_producer_proof(image_proof, producer_proof)
 			):
 				raise PublicationError("retained image and writer receipt identities conflict")
 

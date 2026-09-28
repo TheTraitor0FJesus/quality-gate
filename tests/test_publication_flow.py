@@ -1082,6 +1082,52 @@ def test_completed_readback_binds_image_reference_to_source_package(tmp_path: Pa
 	assert api.writes == previous_writes
 
 
+@pytest.mark.parametrize(
+	("field", "value"),
+	[
+		("provider_sha", "f" * 40),
+		("provider_repository", "o/other-provider"),
+		("image_producer", "substituted"),
+		("image_producer_proof_artifact_id", 999),
+	],
+)
+def test_completed_readback_rejects_unbound_image_writer_provenance(
+	field: str, value: object, tmp_path: Path
+) -> None:
+	api = RegistryGitHub("image")
+	publisher, artifact_id = _ready(api)
+	assert publisher.write_images(7, artifact_id, tmp_path)["status"] == "images-written"
+	api.artifact(
+		"release-image-receipt-1",
+		{"image-receipt.json": (tmp_path / "image-receipt.json").read_bytes()},
+		"Write image / Push images",
+		["Write images"],
+	)
+	assert publisher.publish(7, artifact_id)["status"] == "published"
+	release = api.releases[-1]
+	prefix, marker, encoded = str(release["body"]).partition(RECEIPT_MARKER)
+	assert marker and encoded.endswith("-->\n")
+	receipt = json.loads(encoded.removesuffix("-->\n"))
+	writer = receipt["verification"]["image_writer"]["receipt"]
+	if field == "image_producer":
+		writer["images"][0]["producer"] = value
+	elif field == "image_producer_proof_artifact_id":
+		writer["images"][0]["producer_proof"]["artifact_id"] = value
+	else:
+		writer[field] = value
+	release["body"] = (
+		prefix
+		+ marker
+		+ json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+		+ "\n-->\n"
+	)
+	previous_writes = copy.deepcopy(api.writes)
+
+	with pytest.raises(PublicationError):
+		publisher.prepare(7, event=_event(api))
+	assert api.writes == previous_writes
+
+
 def test_source_archive_contract_rejects_image_evidence_before_release_writes() -> None:
 	api = RegistryGitHub("image")
 	api.files[(SOURCE, ".release/publisher.toml")] = api.files[
