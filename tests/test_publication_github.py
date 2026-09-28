@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import base64
+import ctypes
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import time
+import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-
+from quality_gate import publication_github
 from quality_gate.publication import PublicationError
-from quality_gate.publication_cli import main as publisher_main
+from quality_gate.publication_cli import _main as publisher_main
 from quality_gate.publication_github import (
+	MAX_IMAGE_WRITER_TIMEOUT_SECONDS,
 	BoundedCommand,
 	EscapeSequenceError,
 	GitHubCLI,
@@ -23,6 +28,8 @@ from quality_gate.publication_github import (
 	_operation,
 	registry_configuration,
 )
+
+WINDOWS_MODULE_PATH_BUFFER_CHARS = 32768
 
 
 class Command:
@@ -35,6 +42,75 @@ class Command:
 	) -> bytes:
 		self.calls.append(list(arguments))
 		return self.responses.pop(0)
+
+
+def _clocked_bounded_command(
+	monkeypatch: pytest.MonkeyPatch,
+	*,
+	launch_seconds: list[float],
+	wait_seconds: list[float],
+	exit_codes: list[int] | None = None,
+) -> tuple[BoundedCommand, dict[str, list[object]], list[float]]:
+	now = [0.0]
+	monitor: dict[str, list[object]] = {
+		"calls": [],
+		"waits": [],
+	}
+	codes = exit_codes or [0] * len(launch_seconds)
+
+	class FakeProcess:
+		def __init__(self, arguments: list[str]) -> None:
+			self.index = len(monitor["calls"])
+			self.pid = self.index + 1000
+			monitor["calls"].append(arguments)
+			now[0] += launch_seconds[self.index]
+			self.stdin = None
+			self.stdout = io.BytesIO()
+			self.stderr = io.BytesIO(b"HTTP 404\n" if codes[self.index] else b"")
+			self.code = codes[self.index]
+			self.waited = False
+
+		def wait(self, *, timeout: float) -> int:
+			if self.waited:
+				return self.code
+			monitor["waits"].append(timeout)
+			if wait_seconds[self.index] > timeout:
+				now[0] += timeout
+				raise subprocess.TimeoutExpired("command", timeout)
+			now[0] += wait_seconds[self.index]
+			self.waited = True
+			return self.code
+
+		def poll(self) -> int | None:
+			return self.code if self.waited else None
+
+		def kill(self) -> None:
+			self.waited = True
+			self.code = -9
+
+	class FakeControl:
+		def assign(self) -> None:
+			pass
+
+		def release(self) -> None:
+			pass
+
+		def terminate(self) -> None:
+			pass
+
+		def close(self) -> None:
+			pass
+
+	monkeypatch.setattr(publication_github, "monotonic", lambda: now[0])
+	monkeypatch.setattr(
+		publication_github,
+		"_spawn_bounded_command",
+		lambda arguments, _environment: publication_github._CommandSession(
+			FakeProcess(arguments),
+			FakeControl(),  # type: ignore[arg-type]
+		),
+	)
+	return BoundedCommand(10, aggregate_timeout_seconds=10), monitor, now
 
 
 def test_source_reads_exact_commit_as_data_through_gh() -> None:
@@ -71,6 +147,28 @@ def test_api_errors_are_not_interpreted_as_absent_resources() -> None:
 		GitHubCLI("o/r", timeout_seconds=120, command=command).get("/releases")
 
 
+def test_tag_creation_403_explains_fail_closed_manual_recovery() -> None:
+	class DeniedCommand:
+		def __call__(
+			self, _arguments: Sequence[str], *, content: bytes | None = None, limit: int
+		) -> bytes:
+			raise PublicationError(
+				"gh api POST repos/o/r/git/refs: command failed (exit 1, HTTP 403)"
+			)
+
+	api = GitHubCLI("o/r", timeout_seconds=60, command=DeniedCommand())
+	with pytest.raises(PublicationError) as error:
+		api.post("/git/refs", {"ref": "refs/tags/v2.3.0", "sha": "a" * 40})
+	message = str(error.value)
+	assert "Workflows: write restriction" in message
+	assert "keep the original candidate and its source SHA" in message
+	assert "create and push only that exact tag" in message
+	assert "rerun only the failed Publish release job in this original workflow run" in message
+	assert "do not dispatch a new run, rerun all jobs, or repush the image" in message
+	assert "artifact or upload log is missing or expired" in message
+	assert "Do not change the source or expand GITHUB_TOKEN permissions" in message
+
+
 def test_image_readback_uses_content_digest_without_running_product() -> None:
 	manifest = b"abc"
 	command = Command([manifest])
@@ -84,11 +182,76 @@ def test_image_readback_uses_content_digest_without_running_product() -> None:
 	]
 
 
-def test_release_api_reads_and_mutations_use_the_separate_release_command() -> None:
-	read_command = Command([b'{"id":1}'])
-	release_command = Command(
+def test_image_commands_use_a_separate_bounded_writer_timeout() -> None:
+	api_command = Command([b"{}"])
+	image_command = Command([b"manifest"])
+	api = GitHubCLI(
+		"o/r",
+		timeout_seconds=60,
+		command=api_command,
+		image_command=image_command,
+	)
+
+	assert api.get("/actions/runs/7") == {}
+	assert api.image_digest("ghcr.io/o/image@sha256:" + "c" * 64)
+	assert api_command.calls[0][:2] == ["gh", "api"]
+	assert image_command.calls[0][:3] == ["docker", "buildx", "imagetools"]
+	assert (
+		BoundedCommand(
+			MAX_IMAGE_WRITER_TIMEOUT_SECONDS,
+			maximum_timeout_seconds=MAX_IMAGE_WRITER_TIMEOUT_SECONDS,
+		).timeout_seconds
+		== MAX_IMAGE_WRITER_TIMEOUT_SECONDS
+	)
+	with pytest.raises(PublicationError, match="timeout exceeds its configured bound"):
+		BoundedCommand(MAX_IMAGE_WRITER_TIMEOUT_SECONDS)
+	settings = tomllib.loads(
+		(Path(__file__).resolve().parents[1] / ".release/release-tools.toml").read_text(
+			encoding="utf-8"
+		)
+	)
+	assert settings["timeouts"]["github_api_seconds"] == 60
+	assert settings["timeouts"]["image_writer_seconds"] == MAX_IMAGE_WRITER_TIMEOUT_SECONDS
+
+
+def test_sequential_image_commands_share_one_aggregate_deadline(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	command, monitor, _now = _clocked_bounded_command(
+		monkeypatch,
+		launch_seconds=[1, 1],
+		wait_seconds=[1.5, 1.5],
+	)
+	command(["docker", "load"], limit=64)
+	command(["docker", "push"], limit=64)
+
+	assert len(monitor["calls"]) == 2
+	assert monitor["waits"] == pytest.approx([9, 6.5])
+
+
+def test_image_command_failure_does_not_reset_or_bypass_exhausted_budget(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	command, monitor, _now = _clocked_bounded_command(
+		monkeypatch,
+		launch_seconds=[9, 0],
+		wait_seconds=[1, 0],
+		exit_codes=[1, 0],
+	)
+	with pytest.raises(MissingResourceError, match="resource is absent"):
+		command(["docker", "buildx", "imagetools", "inspect"], limit=64)
+	with pytest.raises(PublicationError, match="shared image-command budget.*exhausted"):
+		command(["docker", "push"], limit=64)
+
+	assert len(monitor["calls"]) == 1
+	assert monitor["waits"] == [1]
+
+
+def test_release_api_reads_and_mutations_use_the_same_caller_command() -> None:
+	command = Command(
 		[
-			b'[]',
+			b'{"id":1}',
+			b"[]",
 			b'{"id":3}',
 			b'{"ref":"refs/tags/v2.2.0"}',
 			b'{"id":2}',
@@ -99,8 +262,7 @@ def test_release_api_reads_and_mutations_use_the_separate_release_command() -> N
 	api = GitHubCLI(
 		"o/r",
 		timeout_seconds=120,
-		command=read_command,
-		release_command=release_command,
+		command=command,
 	)
 	api.get("/actions/runs/7")
 	assert api.get("/releases?per_page=100&page=1") == []
@@ -110,20 +272,22 @@ def test_release_api_reads_and_mutations_use_the_separate_release_command() -> N
 	api.patch("/releases/2", {"draft": False})
 	api.upload(2, "quality-gate.zip", b"asset")
 
-	assert len(read_command.calls) == 1
-	assert len(release_command.calls) == 6
-	assert [call[2] for call in release_command.calls[:5]] == [
+	assert len(command.calls) == 7
+	assert [call[2] for call in command.calls[1:6]] == [
 		"repos/o/r/releases?per_page=100&page=1",
 		"repos/o/r/releases/3",
 		"repos/o/r/git/refs",
 		"repos/o/r/releases",
 		"repos/o/r/releases/2",
 	]
-	assert release_command.calls[5][2].startswith("https://uploads.github.com/repos/o/r/releases/2")
+	assert command.calls[6][2].startswith("https://uploads.github.com/repos/o/r/releases/2")
 
 
-def test_bounded_command_can_scope_the_gh_token_to_release_mutations() -> None:
-	output = BoundedCommand(5, environment={"GH_TOKEN": "release-only"})(
+def test_bounded_command_inherits_the_automatically_issued_token(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	monkeypatch.setenv("GH_TOKEN", "built-in-token")
+	output = BoundedCommand(5)(
 		[
 			sys.executable,
 			"-B",
@@ -132,13 +296,307 @@ def test_bounded_command_can_scope_the_gh_token_to_release_mutations() -> None:
 		],
 		limit=64,
 	)
-	assert output.splitlines() == [b"release-only"]
+	assert output.splitlines() == [b"built-in-token"]
 
 
 @pytest.mark.parametrize("program", ["import time; time.sleep(30)", "print('x' * 1024)"])
 def test_external_command_deadline_and_size_limits_fail_closed(program: str) -> None:
 	with pytest.raises(PublicationError):
 		BoundedCommand(0.2)([sys.executable, "-B", "-c", program], limit=64)
+
+
+def test_external_command_stops_when_stderr_exceeds_its_size_limit() -> None:
+	program = "import sys, time; sys.stderr.write('x' * 4097); sys.stderr.flush(); time.sleep(30)"
+	with pytest.raises(PublicationError, match="error output exceeds its size limit"):
+		BoundedCommand(0.5)([sys.executable, "-B", "-c", program], limit=64)
+
+
+@pytest.mark.parametrize("inherited_stream", ["stdout", "stderr"])
+def test_external_command_stops_descendant_holding_output_pipe(
+	tmp_path: Path, inherited_stream: str
+) -> None:
+	marker = tmp_path / "descendant-finished"
+	child = (
+		f"import pathlib, time; time.sleep(1); pathlib.Path({str(marker)!r}).write_text('finished')"
+	)
+	stdout = "None" if inherited_stream == "stdout" else "subprocess.DEVNULL"
+	stderr = "None" if inherited_stream == "stderr" else "subprocess.DEVNULL"
+	program = (
+		"import subprocess, sys; "
+		f"subprocess.Popen([sys.executable, '-B', '-c', {child!r}], "
+		f"stdin=subprocess.DEVNULL, stdout={stdout}, stderr={stderr}); "
+		"print('finished')"
+	)
+
+	output = BoundedCommand(0.5)([sys.executable, "-B", "-c", program], limit=64)
+	time.sleep(1.2)
+
+	assert output.splitlines() == [b"finished"]
+	assert not marker.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object containment")
+def test_windows_job_assignment_failure_does_not_launch_target(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	marker = tmp_path / "uncontained-command-ran"
+	program = f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')"
+
+	def fail_assignment(_job: object, _process_id: int) -> None:
+		raise OSError("simulated Job Object assignment failure")
+
+	monkeypatch.setattr(publication_github._WindowsJob, "assign", fail_assignment)
+	with pytest.raises(PublicationError):
+		BoundedCommand(5)([sys.executable, "-B", "-c", program], limit=64)
+
+	assert not marker.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object containment")
+def test_windows_job_contains_the_helper_that_launches_the_target(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	assigned_process_ids: list[int] = []
+	original_assign = publication_github._WindowsJob.assign
+
+	def record_assignment(job: object, process_id: int) -> None:
+		original_assign(job, process_id)  # type: ignore[arg-type]
+		assigned_process_ids.append(process_id)
+
+	monkeypatch.setattr(publication_github._WindowsJob, "assign", record_assignment)
+	from ctypes import wintypes
+
+	kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+	get_module_file_name = kernel32.GetModuleFileNameW
+	get_module_file_name.argtypes = [wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD]
+	get_module_file_name.restype = wintypes.DWORD
+	executable_buffer = ctypes.create_unicode_buffer(WINDOWS_MODULE_PATH_BUFFER_CHARS)
+	path_length = get_module_file_name(None, executable_buffer, len(executable_buffer))
+	if path_length == 0:
+		error_code = ctypes.get_last_error()  # type: ignore[attr-defined]
+		raise OSError(error_code, "GetModuleFileNameW failed")
+	if path_length >= len(executable_buffer):
+		raise OSError("running Python executable path exceeds the Windows path limit")
+	current_executable = Path(executable_buffer.value)
+	output = BoundedCommand(5)(
+		[str(current_executable), "-B", "-c", "import os; print(os.getppid())"], limit=64
+	)
+
+	assert len(assigned_process_ids) == 1
+	assert output.splitlines() == [str(assigned_process_ids[0]).encode("ascii")]
+
+
+def test_timeout_stays_primary_when_reader_fails_during_cleanup(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	output = publication_github._CommandOutput()
+
+	class FakeControl:
+		@staticmethod
+		def terminate() -> None:
+			pass
+
+	class FakeProcess:
+		pid = 1
+		stdin = None
+
+	control = FakeControl()
+	session = publication_github._CommandSession(  # type: ignore[arg-type]
+		FakeProcess(), control
+	)
+
+	def fail_reader_during_cleanup(
+		_session: publication_github._CommandSession, _threads: list[object]
+	) -> None:
+		output.fail("external command stdout stream could not be closed", control)  # type: ignore[arg-type]
+		return None
+
+	monkeypatch.setattr(
+		BoundedCommand,
+		"_cleanup_session",
+		staticmethod(fail_reader_during_cleanup),
+	)
+	error = BoundedCommand(0.5)._cleanup_after_failure(
+		subprocess.TimeoutExpired("command", 0.5),
+		"external command",
+		None,
+		session,
+		[],
+		output,
+	)
+
+	assert error is not None
+	assert "external command: timed out after 0.5 seconds" in str(error)
+	assert "secondary output reader failure" in str(error)
+
+
+def test_target_exit_125_is_not_reported_as_helper_failure() -> None:
+	with pytest.raises(PublicationError, match=r"command failed \(exit 125\)"):
+		BoundedCommand(5)([sys.executable, "-B", "-c", "raise SystemExit(125)"], limit=64)
+
+
+def test_posix_process_group_kill_failure_is_not_ignored_after_leader_exit(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	class ExitedProcess:
+		pid = 17
+		stdin = None
+
+		@staticmethod
+		def poll() -> int:
+			return 0
+
+	def fail_killpg(_pid: int, _signal: int) -> None:
+		raise PermissionError("simulated process-group kill failure")
+
+	monkeypatch.setattr(publication_github.os, "name", "posix")
+	monkeypatch.setattr(publication_github.os, "killpg", fail_killpg, raising=False)
+	monkeypatch.setattr(publication_github.signal, "SIGKILL", 9, raising=False)
+	control = publication_github._CommandControl(ExitedProcess())  # type: ignore[arg-type]
+
+	with pytest.raises(PermissionError, match="process-group kill failure"):
+		control.close()
+
+
+def test_incomplete_process_cleanup_is_reported(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	class UnreapedProcess:
+		pid = 18
+		stdin = None
+
+		def __init__(self) -> None:
+			self.stdout = io.BytesIO()
+			self.stderr = io.BytesIO()
+
+		@staticmethod
+		def wait(*, timeout: float) -> int:
+			raise subprocess.TimeoutExpired("command", timeout)
+
+		@staticmethod
+		def poll() -> None:
+			return None
+
+		@staticmethod
+		def kill() -> None:
+			pass
+
+	class FailedControl:
+		@staticmethod
+		def assign() -> None:
+			pass
+
+		@staticmethod
+		def release() -> None:
+			pass
+
+		@staticmethod
+		def close() -> None:
+			raise OSError("simulated process-tree cleanup failure")
+
+		@staticmethod
+		def terminate() -> None:
+			raise OSError("simulated process-tree cleanup failure")
+
+	monkeypatch.setattr(
+		publication_github,
+		"_spawn_bounded_command",
+		lambda _arguments, _environment: publication_github._CommandSession(
+			UnreapedProcess(),
+			FailedControl(),  # type: ignore[arg-type]
+		),
+	)
+	with pytest.raises(PublicationError) as error:
+		BoundedCommand(0.5)(["command"], limit=64)
+	assert "timed out after 0.5 seconds" in str(error.value)
+	assert "command cleanup did not complete" in str(error.value)
+
+
+def test_output_limit_error_survives_cleanup_failure(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	class CompletedProcess:
+		pid = 19
+		stdin = None
+
+		def __init__(self) -> None:
+			self.stdout = io.BytesIO(b"x" * 65)
+			self.stderr = io.BytesIO()
+
+		@staticmethod
+		def wait(*, timeout: float) -> int:
+			return 0
+
+		@staticmethod
+		def poll() -> int:
+			return 0
+
+		@staticmethod
+		def kill() -> None:
+			pass
+
+	class FailingControl:
+		@staticmethod
+		def assign() -> None:
+			pass
+
+		@staticmethod
+		def release() -> None:
+			pass
+
+		@staticmethod
+		def close() -> None:
+			raise OSError("simulated process-tree cleanup failure")
+
+		@staticmethod
+		def terminate() -> None:
+			pass
+
+	monkeypatch.setattr(
+		publication_github,
+		"_spawn_bounded_command",
+		lambda _arguments, _environment: publication_github._CommandSession(
+			CompletedProcess(),
+			FailingControl(),  # type: ignore[arg-type]
+		),
+	)
+	with pytest.raises(PublicationError) as error:
+		BoundedCommand(5)(["command"], limit=64)
+	assert str(error.value).startswith("external command response exceeds its size limit")
+	assert "command cleanup did not complete" in str(error.value)
+
+
+def test_command_reader_errors_trigger_teardown() -> None:
+	class BrokenStream:
+		@staticmethod
+		def read(_size: int) -> bytes:
+			raise OSError("simulated output read failure")
+
+		@staticmethod
+		def close() -> None:
+			pass
+
+	class Control:
+		terminated = False
+
+		def terminate(self) -> None:
+			self.terminated = True
+
+	output = publication_github._CommandOutput()
+	control = Control()
+	BoundedCommand._capture_stream(
+		BrokenStream(),
+		bytearray(),
+		64,
+		"size limit",
+		output,
+		control,
+		"stdout",
+		b"",  # type: ignore[arg-type]
+	)
+
+	assert control.terminated
+	assert output.failure() == "external command stdout could not be read"
 
 
 def test_external_command_diagnostics_expose_stage_status_without_stderr() -> None:
@@ -161,6 +619,16 @@ def test_external_command_404_remains_optional_without_stderr() -> None:
 	message = str(error.value)
 	assert message == "external command: resource is absent (HTTP 404)"
 	assert "secret-token" not in message
+
+
+def test_registry_missing_tag_status_is_distinguished_without_diagnostics() -> None:
+	program = (
+		"import sys; sys.stderr.write("
+		"'response status code 404: Not Found secret-token\\n'); sys.exit(1)"
+	)
+	with pytest.raises(MissingResourceError) as error:
+		BoundedCommand(5)([sys.executable, "-B", "-c", program], limit=64)
+	assert "secret-token" not in str(error.value)
 
 
 def test_external_command_marks_gh_escape_guard_without_stderr() -> None:
@@ -273,9 +741,7 @@ def test_builtin_token_uses_isolated_config_and_restores_existing_docker_config(
 	assert json.loads(existing_config_path.read_text(encoding="utf-8")) == existing_config
 
 
-@pytest.mark.parametrize(
-	("token", "username"), [("", "actor"), ("token", ""), ("", "")]
-)
+@pytest.mark.parametrize(("token", "username"), [("", "actor"), ("token", ""), ("", "")])
 def test_ghcr_configuration_requires_both_caller_credentials(token: str, username: str) -> None:
 	with pytest.raises(PublicationError, match="GITHUB_TOKEN and actor are required"):
 		with registry_configuration(token, username):
@@ -342,8 +808,6 @@ def test_workflow_entrypoint_rejects_wrong_or_floating_helper_before_github(
 	environment.pop("GH_TOKEN", None)
 	environment.pop("GITHUB_TOKEN", None)
 	environment.pop("PUBLISHER_REGISTRY_AUTH", None)
-	environment["PUBLISHER_GHCR_TOKEN"] = "short-lived-token"
-	environment["PUBLISHER_GHCR_USERNAME"] = "github-actions[bot]"
 	result = subprocess.run(
 		[
 			sys.executable,
@@ -369,15 +833,54 @@ def test_workflow_entrypoint_rejects_wrong_or_floating_helper_before_github(
 	assert not result.stdout
 
 
-def test_publish_requires_a_dedicated_release_api_token(
+def test_publish_does_not_require_a_separate_release_api_token(
 	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-	monkeypatch.setenv("PUBLISHER_GHCR_TOKEN", "short-lived-token")
-	monkeypatch.setenv("PUBLISHER_GHCR_USERNAME", "github-actions[bot]")
-	monkeypatch.delenv("PUBLISHER_RELEASE_TOKEN", raising=False)
+	from quality_gate import publication_cli
 
-	assert publisher_main(["publish", "--pr", "7", "--candidate-id", "9"]) == 1
-	assert capsys.readouterr().err == "publication: refused - GitHub release API token is required\n"
+	class Publisher:
+		@staticmethod
+		def publish(_pr: int, _candidate_id: int) -> dict[str, str]:
+			return {"status": "already-complete", "version": "2.3.0"}
+
+	monkeypatch.setattr(publication_cli, "_publisher", lambda _root: Publisher())
+	monkeypatch.setenv("GH_TOKEN", "built-in-token")
+	monkeypatch.setenv("GITHUB_ACTOR", "github-actions[bot]")
+	monkeypatch.delenv("PUBLISHER_RELEASE_TOKEN", raising=False)
+	assert "PUBLISHER_RELEASE_TOKEN" not in Path(publication_cli.__file__).read_text(
+		encoding="utf-8"
+	)
+
+	assert publisher_main(["publish", "--pr", "7", "--candidate-id", "9"]) == 0
+	assert '"status": "already-complete"' in capsys.readouterr().out
+
+
+def test_image_writer_cli_passes_the_original_pull_request_number(
+	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+	from quality_gate import publication_cli
+
+	class Publisher:
+		@staticmethod
+		def write_images(_pr: int, _candidate_id: int, _output: Path) -> dict[str, str]:
+			return {"status": "images-written", "version": "2.3.0"}
+
+	monkeypatch.setattr(publication_cli, "_publisher", lambda _root: Publisher())
+	assert (
+		publisher_main(
+			[
+				"write-images",
+				"--pr",
+				"7",
+				"--candidate-id",
+				"9",
+				"--output",
+				str(tmp_path),
+			]
+		)
+		== 0
+	)
+	assert '"status": "images-written"' in capsys.readouterr().out
 
 
 def test_job_log_download_retries_escape_guard_with_gh_opt_in() -> None:

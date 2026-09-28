@@ -11,10 +11,28 @@ PUBLICATION = (
 VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 MAX_VERSION_LENGTH = 32
 MAX_BODY_BYTES = 64 * 1024
+MAX_IMAGE_TAGGED_REFERENCE_LENGTH = 256
+MAX_IMAGE_REPOSITORY_LENGTH = MAX_IMAGE_TAGGED_REFERENCE_LENGTH - MAX_VERSION_LENGTH - len(":v")
+_IMAGE_REPOSITORY = re.compile(r"ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*")
 
 
 class PublicationError(ValueError):
 	"""A candidate lacks matching authorization or verified release evidence."""
+
+
+class MissingResourceError(PublicationError):
+	"""A bounded external operation positively reported HTTP 404."""
+
+
+def image_repository(value: object) -> str:
+	"""Require one lowercase GHCR path that fits the longest supported version tag."""
+	if (
+		not isinstance(value, str)
+		or len(value) > MAX_IMAGE_REPOSITORY_LENGTH
+		or _IMAGE_REPOSITORY.fullmatch(value) is None
+	):
+		raise PublicationError("image repository must be one lowercase ghcr.io package path")
+	return value
 
 
 def _version(value: str) -> tuple[int, ...]:

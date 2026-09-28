@@ -62,6 +62,7 @@ def verify_run(
 	provider_repository: str,
 	provider_sha: str,
 	workflow: str,
+	helper_workflow: str = "release-prepare.yml",
 ) -> None:
 	"""Bind a producer to the actual caller and reusable workflow revision."""
 	if (
@@ -74,7 +75,9 @@ def verify_run(
 	):
 		raise PublicationError("run does not identify the trusted caller and source")
 	references = records(run.get("referenced_workflows"), "referenced workflows")
-	expected = f"{provider_repository}/.github/workflows/release-prepare.yml@"
+	if re.fullmatch(r"[A-Za-z0-9_-]+\.ya?ml", helper_workflow) is None:
+		raise PublicationError("invalid reusable helper workflow")
+	expected = f"{provider_repository}/.github/workflows/{helper_workflow}@"
 	matching = [item for item in references if str(item.get("path", "")).startswith(expected)]
 	if len(matching) != 1 or matching[0].get("sha") != provider_sha:
 		raise PublicationError("executed provider revision does not match the accepted helper")
@@ -143,6 +146,7 @@ def verify_producer(
 	job_name: str,
 	required_steps: Sequence[str],
 	artifact_name: str,
+	helper_workflow: str = "release-prepare.yml",
 ) -> dict[str, object]:
 	"""Verify API records and producer logs, independently of uploaded evidence JSON.
 
@@ -158,6 +162,7 @@ def verify_producer(
 		provider_repository=provider_repository,
 		provider_sha=provider_sha,
 		workflow=workflow,
+		helper_workflow=helper_workflow,
 	)
 	job = record(proof.get("job"), "job")
 	attempt = verify_job(

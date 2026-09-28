@@ -73,20 +73,19 @@ cancelling an active publisher. It checks out the helper at the actual reusable 
 runs `scripts/source_release.py`, a policy-free entry point to `quality_gate.publication_cli`.
 The publisher imports no product adapter and installs no product dependencies.
 
-Only the publication step receives the repository-owned `RELEASE_TOKEN`, through the shared
-publisher's release API channel. It authorizes release-tag mutations and all GitHub Release API
-access, including draft and published release readback. It needs `Contents: write`; creating a tag
-containing workflow changes may also require `Workflows: write`. Other GitHub metadata reads use the
-caller's short-lived `GITHUB_TOKEN`, with `Contents: read`, `Pull requests: read`, and
-`Actions: read`. Shared publisher callers also grant `Packages: read` so the same job token can
-authenticate GHCR readback through a temporary Docker configuration.
+The shared publisher uses the caller's job-scoped `GITHUB_TOKEN` for GitHub Release API reads and
+mutations. Only its `publish` call gets `Contents: write`; it also receives the read permissions
+needed for pull requests, Actions artifacts, and GHCR readback. A separate reusable image writer
+call is the only release-flow job with `Packages: write`. Its consumer call job has no additional
+steps. Neither path uses `RELEASE_TOKEN`, a GHCR PAT, or another long-lived credential.
 
-For a private GHCR package owned by another repository, grant the caller repository Read under that
-package's **Manage Actions access** settings. This is a one-time package setting. Image-producing
-jobs use their own job-scoped `GITHUB_TOKEN` with `Packages: write`; neither flow needs a separate
-registry credential. Administrative access and native GitHub immutable-release settings are
-optional publication conditions. Existing consumer installation and cache integrity contracts
-remain separately owned.
+Recovery may fail closed when the release target changes a workflow file and GitHub requires
+`Workflows: write`. That permission cannot be assigned to the built-in `GITHUB_TOKEN`; the original
+candidate remains available for the [original-run publisher recovery](publication.md#historical-403-requiring-workflows-write).
+For a private GHCR package owned by another repository, grant the caller repository access under
+that package's **Manage Actions access** settings. This is a package ACL setting. Administrative
+access and native GitHub immutable-release settings are optional publication conditions. Existing
+consumer installation and cache integrity contracts remain separately owned.
 
 The publisher creates or resumes an exact-source tag and draft, uploads missing matching files,
 verifies draft readiness, and then publishes. It reads back source, tag, notes/receipt, both assets,
@@ -98,14 +97,23 @@ candidate is verified before any nondeterministic rebuild, including after Actio
 Use an ordinary failed-jobs rerun for transient failures. Successful producers from an earlier
 attempt of that same run remain eligible; a later failed producer prevents publication.
 For repaired tooling, dispatch `release.yml` from the default branch with `pr_number` set to the
-original merged PR. Follow the envelope retention, lookup, and refusal rules in
-[the recovery contract](publication.md). The product source remains the original merged SHA.
+original merged PR only when no earlier image write left a GHCR version tag without a trusted draft
+receipt. For the historical 403 case, rerun only the failed publisher job in the original run after
+the exact missing Git tag is created; do not dispatch a new run or repeat the image write. Follow the
+envelope retention, lookup, and refusal rules in [the recovery contract](publication.md). The
+product source remains the original merged SHA.
 
-The provider self-hosts both reusable entry points through same-repository references. Record the
+The provider self-hosts all three reusable entry points through same-repository references. Record the
 actual `job.workflow_sha` after the final owner merge. That immutable source is consumer revision R
-only after the real release, both platform assets, and readback pass. Consumers pin both reusable
-entry points to that same full SHA; their policy/runtime versions change only through their own
+only after the real release, both platform assets, and readback pass. Consumers pin all three
+reusable entry points to that same full SHA; their policy/runtime versions change only through their own
 explicit rollout. A ticket PR or feature merge alone is not a completed provider handoff.
+
+The provider's `quality-gate.toml` stays on the latest published policy until the candidate's policy
+asset is published. The writer candidate temporarily waives only its three exact provider workflow
+findings under the current v2.1.0 policy; each waiver expires on 2026-10-09. After v2.3.0 policy
+publication, remove those waivers and advance the self-policy pin in a separate no-release PR. Do
+not make the provider depend on an unpublished policy asset.
 
 ## Verification and delivery boundaries
 

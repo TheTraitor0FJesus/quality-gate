@@ -363,6 +363,7 @@ class ArtifactReader:
 		workflow: str,
 		name: str,
 		checks: Sequence[str],
+		helper_workflow: str = "release-prepare.yml",
 	) -> dict[str, object]:
 		job_id = positive(job.get("id"), "job ID")
 		proof = {
@@ -383,4 +384,5 @@ class ArtifactReader:
 			job_name=str(job.get("name")),
 			required_steps=checks,
 			artifact_name=name,
+			helper_workflow=helper_workflow,
 		)

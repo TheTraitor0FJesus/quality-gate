@@ -2,6 +2,9 @@
 
 [timeouts]
 github_api_seconds = 60
+# Aggregate monotonic Docker/GHCR phase budget starts at the first image command.
+# The image jobs remain limited to 30 minutes.
+image_writer_seconds = 1500
 external_download_seconds = 120
 subprocess_seconds = 900
 check_wait_seconds = 900

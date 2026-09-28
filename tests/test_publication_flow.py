@@ -8,11 +8,11 @@ import io
 import json
 import zipfile
 from collections.abc import Mapping
+from pathlib import Path
 
 import pytest
-
 from quality_gate.publication import PublicationError
-from quality_gate.publication_flow import Context, Publisher
+from quality_gate.publication_flow import RECEIPT_MARKER, Context, Publisher
 
 SOURCE = "a" * 40
 PR_HEAD = "e" * 40
@@ -762,6 +762,9 @@ class RegistryGitHub(GitHub):
 		super().__init__()
 		self.kind = kind
 		self.available = True
+		self.image_pushes: list[dict[str, object]] = []
+		self.image_preflights: list[str] = []
+		self.conflicting_image_repository: str | None = None
 		self.files[(SOURCE, ".release/publisher.toml")] = (
 			'''schema = 1
 workflow = ".github/workflows/release.yml"
@@ -775,16 +778,26 @@ kind = "'''
 			+ """"
 """
 		)
+		if kind == "image":
+			self.files[(SOURCE, ".release/publisher.toml")] += (
+				'image_repository = "ghcr.io/o/product"\n'
+			)
 
 	def build(self, candidate: dict[str, object]) -> None:
 		content = b"verified delivery"
-		identity = {
+		identity: dict[str, object] = {
 			"name": "product-2.1.0",
 			"kind": self.kind,
-			"sha256": hashlib.sha256(content).hexdigest(),
 		}
 		if self.kind == "image":
-			identity["reference"] = "ghcr.io/o/product@sha256:" + identity["sha256"]
+			identity.update(
+				{
+					"archive": "image.tar",
+					"archive_sha256": hashlib.sha256(content).hexdigest(),
+				}
+			)
+		else:
+			identity["sha256"] = hashlib.sha256(content).hexdigest()
 		evidence = {
 			"schema": 1,
 			"repository": "o/r",
@@ -803,40 +816,420 @@ kind = "'''
 			"deliverables": [identity],
 		}
 		files = {"evidence.json": json.dumps(evidence).encode()}
-		if self.kind != "image":
+		if self.kind == "image":
+			files["image.tar"] = content
+		else:
 			files["product-2.1.0"] = content
 		self.artifact("release-evidence-delivery-1", files, "Verify delivery", ["Check runtime"])
+
+	def get(self, path: str) -> object:
+		result = super().get(path)
+		if path == "/actions/runs/100" and self.kind == "image":
+			assert isinstance(result, dict)
+			return {
+				**result,
+				"referenced_workflows": [
+					*result["referenced_workflows"],
+					{
+						"path": f"o/provider/.github/workflows/image-writer.yml@{PROVIDER}",
+						"sha": PROVIDER,
+					},
+				],
+			}
+		return result
+
+	def publish_image_archive(
+		self,
+		content: bytes,
+		source: str,
+		repository: str,
+		version: str,
+		producer: str,
+		*,
+		expected_digest: str | None = None,
+	) -> dict[str, str]:
+		self.image_pushes.append({"source": source, "repository": repository, "version": version})
+		assert content == b"verified delivery"
+		assert source == SOURCE
+		assert repository == "ghcr.io/o/product"
+		assert version == "2.1.0"
+		assert producer == "delivery"
+		digest_value = hashlib.sha256(b"registry-manifest").hexdigest()
+		return {
+			"reference": f"{repository}@sha256:{digest_value}",
+			"sha256": digest_value,
+			"tag": f"{repository}:v{version}",
+		}
+
+	def preflight_image_archive(
+		self,
+		content: bytes,
+		source: str,
+		repository: str,
+		version: str,
+		producer: str,
+		*,
+		expected_digest: str | None = None,
+	) -> None:
+		self.image_preflights.append(repository)
+		assert content == b"verified delivery"
+		assert source == SOURCE
+		assert version == "2.1.0"
+		assert producer
+		if repository == self.conflicting_image_repository:
+			raise PublicationError("existing image tag points to different image bytes")
 
 	def image_digest(self, reference: str) -> str:
 		assert reference.startswith("ghcr.io/o/product@sha256:")
 		return hashlib.sha256(
-			b"verified delivery" if self.available else b"substituted"
+			b"registry-manifest" if self.available else b"substituted"
 		).hexdigest()
 
 
-@pytest.mark.parametrize("kind", ["image", "package"])
-def test_shared_protocol_publishes_and_reads_back_other_delivery_kinds(kind: str) -> None:
-	api = RegistryGitHub(kind)
+class TagForbiddenRegistryGitHub(RegistryGitHub):
+	def __init__(self) -> None:
+		super().__init__("image")
+		self.deny_tag_creation = True
+
+	def post(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
+		if path == "/git/refs" and self.deny_tag_creation:
+			self.writes.append(path)
+			raise PublicationError("GitHub denied tag creation (HTTP 403)")
+		return super().post(path, payload)
+
+
+class MultiImageRegistryGitHub(RegistryGitHub):
+	def __init__(self) -> None:
+		super().__init__("image")
+		self.files[(SOURCE, ".release/publisher.toml")] = '''schema = 1
+workflow = ".github/workflows/release.yml"
+[[producers]]
+name = "first"
+job = "Verify first image"
+checks = ["Check runtime"]
+deliverables = ["first-{version}"]
+kind = "image"
+image_repository = "ghcr.io/o/first"
+[[producers]]
+name = "second"
+job = "Verify second image"
+checks = ["Check runtime"]
+deliverables = ["second-{version}"]
+kind = "image"
+image_repository = "ghcr.io/o/second"
+'''
+
+	def build(self, candidate: dict[str, object]) -> None:
+		content = b"verified delivery"
+		candidate_digest = hashlib.sha256(
+			(
+				json.dumps(candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+				+ "\n"
+			).encode()
+		).hexdigest()
+		for producer, job in (("first", "Verify first image"), ("second", "Verify second image")):
+			name = f"{producer}-2.1.0"
+			identity = {
+				"name": name,
+				"kind": "image",
+				"archive": f"{producer}.tar",
+				"archive_sha256": hashlib.sha256(content).hexdigest(),
+			}
+			evidence = {
+				"schema": 1,
+				"repository": "o/r",
+				"pr": 7,
+				"source_sha": SOURCE,
+				"version": "2.1.0",
+				"provider_sha": PROVIDER,
+				"run_id": 100,
+				"attempt": 1,
+				"candidate_sha256": candidate_digest,
+				"deliverables": [identity],
+			}
+			self.artifact(
+				f"release-evidence-{producer}-1",
+				{
+					"evidence.json": json.dumps(evidence).encode(),
+					f"{producer}.tar": content,
+				},
+				job,
+				["Check runtime"],
+			)
+
+
+def test_shared_protocol_publishes_and_reads_back_image_delivery(tmp_path: Path) -> None:
+	api = RegistryGitHub("image")
 	publisher, artifact_id = _ready(api)
+	assert publisher.write_images(7, artifact_id, tmp_path)["status"] == "images-written"
+	api.artifact(
+		"release-image-receipt-1",
+		{"image-receipt.json": (tmp_path / "image-receipt.json").read_bytes()},
+		"Write image / Push images",
+		["Write images"],
+	)
 	assert publisher.publish(7, artifact_id)["status"] == "published"
-	assert len(api.uploads) == (0 if kind == "image" else 1)
+	assert api.uploads == {}
 	before = copy.deepcopy(api.writes)
 	assert publisher.prepare(7, event=_event(api))["status"] == "already-complete"
 	assert api.writes == before
-	if kind == "image":
-		api.available = False
-		with pytest.raises(PublicationError, match="digest"):
-			publisher.prepare(7, event=_event(api))
-		assert api.writes == before
+	api.available = False
+	with pytest.raises(PublicationError, match="digest"):
+		publisher.prepare(7, event=_event(api))
+	assert api.writes == before
 
 
-def test_source_contract_prevents_replacing_archive_with_image() -> None:
+def test_historical_403_reuses_original_image_writer_on_publisher_only_rerun(
+	tmp_path: Path,
+) -> None:
+	api = TagForbiddenRegistryGitHub()
+	publisher, candidate_artifact_id = _ready(api)
+	assert publisher.write_images(7, candidate_artifact_id, tmp_path)["status"] == "images-written"
+	api.artifact(
+		"release-image-receipt-1",
+		{"image-receipt.json": (tmp_path / "image-receipt.json").read_bytes()},
+		"Write image / Push images",
+		["Write images"],
+	)
+
+	with pytest.raises(PublicationError, match="HTTP 403"):
+		publisher.publish(7, candidate_artifact_id)
+	assert "v2.1.0" not in api.tags
+
+	api.tags["v2.1.0"] = SOURCE
+	api.deny_tag_creation = False
+	api.run_overrides["run_attempt"] = 2
+	rerun = _publisher(api, attempt=2, evidence_wait_seconds=0.05, evidence_poll_seconds=0.001)
+
+	assert rerun.publish(7, candidate_artifact_id)["status"] == "published"
+	assert api.tags["v2.1.0"] == SOURCE
+	assert api.writes.count("/git/refs") == 1
+	assert len(api.image_preflights) == len(api.image_pushes) == 1
+	receipt_json = str(api.releases[-1]["body"]).split(RECEIPT_MARKER, 1)[1].removesuffix("-->\n")
+	receipt = json.loads(receipt_json)
+	verification = receipt["verification"]
+	assert verification["run_id"] == 100
+	assert verification["image_writer"]["receipt"]["writer_run_id"] == 100
+	assert verification["image_writer"]["receipt"]["writer_attempt"] == 1
+	assert verification["image_writer"]["artifact_proof"]["attempt"] == 1
+	assert verification["producers"][0]["artifact_attempt"] == 1
+
+
+def test_shared_protocol_publishes_and_reads_back_package_delivery() -> None:
+	api = RegistryGitHub("package")
+	publisher, artifact_id = _ready(api)
+	assert publisher.publish(7, artifact_id)["status"] == "published"
+	assert len(api.uploads) == 1
+	before = copy.deepcopy(api.writes)
+	assert publisher.prepare(7, event=_event(api))["status"] == "already-complete"
+	assert api.writes == before
+
+
+def test_writer_receipt_reference_must_use_source_configured_package(tmp_path: Path) -> None:
+	api = RegistryGitHub("image")
+	publisher, artifact_id = _ready(api)
+	assert publisher.write_images(7, artifact_id, tmp_path)["status"] == "images-written"
+	image_receipt = json.loads((tmp_path / "image-receipt.json").read_bytes())
+	image = image_receipt["images"][0]
+	assert image["image_repository"] == "ghcr.io/o/product"
+	assert image["tag"] == "ghcr.io/o/product:v2.1.0"
+	image["reference"] = f"ghcr.io/o/other@sha256:{image['sha256']}"
+	api.artifact(
+		"release-image-receipt-1",
+		{"image-receipt.json": json.dumps(image_receipt).encode()},
+		"Write image / Push images",
+		["Write images"],
+	)
+
+	with pytest.raises(PublicationError, match="image repository or reference differs"):
+		publisher.publish(7, artifact_id)
+	assert api.writes == []
+
+
+def test_completed_readback_binds_image_reference_to_source_package(tmp_path: Path) -> None:
+	api = RegistryGitHub("image")
+	publisher, artifact_id = _ready(api)
+	assert publisher.write_images(7, artifact_id, tmp_path)["status"] == "images-written"
+	api.artifact(
+		"release-image-receipt-1",
+		{"image-receipt.json": (tmp_path / "image-receipt.json").read_bytes()},
+		"Write image / Push images",
+		["Write images"],
+	)
+	assert publisher.publish(7, artifact_id)["status"] == "published"
+	release = api.releases[-1]
+	body = str(release["body"])
+	prefix, marker, encoded = body.partition(RECEIPT_MARKER)
+	assert marker and encoded.endswith("-->\n")
+	receipt = json.loads(encoded.removesuffix("-->\n"))
+	item = receipt["deliverables"][0]
+	writer_image = receipt["verification"]["image_writer"]["receipt"]["images"][0]
+	assert item["image_repository"] == writer_image["image_repository"] == "ghcr.io/o/product"
+	assert writer_image["tag"] == "ghcr.io/o/product:v2.1.0"
+	foreign_reference = f"ghcr.io/o/other@sha256:{item['sha256']}"
+	item["reference"] = foreign_reference
+	writer_image["reference"] = foreign_reference
+	release["body"] = (
+		prefix
+		+ marker
+		+ json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+		+ "\n-->\n"
+	)
+	previous_writes = copy.deepcopy(api.writes)
+
+	with pytest.raises(PublicationError, match="image repository or reference differs"):
+		publisher.prepare(7, event=_event(api))
+	assert api.writes == previous_writes
+
+
+@pytest.mark.parametrize(
+	("field", "value"),
+	[
+		("provider_sha", "f" * 40),
+		("provider_repository", "o/other-provider"),
+		("image_producer", "substituted"),
+		("image_producer_proof_artifact_id", 999),
+	],
+)
+def test_completed_readback_rejects_unbound_image_writer_provenance(
+	field: str, value: object, tmp_path: Path
+) -> None:
+	api = RegistryGitHub("image")
+	publisher, artifact_id = _ready(api)
+	assert publisher.write_images(7, artifact_id, tmp_path)["status"] == "images-written"
+	api.artifact(
+		"release-image-receipt-1",
+		{"image-receipt.json": (tmp_path / "image-receipt.json").read_bytes()},
+		"Write image / Push images",
+		["Write images"],
+	)
+	assert publisher.publish(7, artifact_id)["status"] == "published"
+	release = api.releases[-1]
+	prefix, marker, encoded = str(release["body"]).partition(RECEIPT_MARKER)
+	assert marker and encoded.endswith("-->\n")
+	receipt = json.loads(encoded.removesuffix("-->\n"))
+	writer = receipt["verification"]["image_writer"]["receipt"]
+	if field == "image_producer":
+		writer["images"][0]["producer"] = value
+	elif field == "image_producer_proof_artifact_id":
+		writer["images"][0]["producer_proof"]["artifact_id"] = value
+	else:
+		writer[field] = value
+	release["body"] = (
+		prefix
+		+ marker
+		+ json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+		+ "\n-->\n"
+	)
+	previous_writes = copy.deepcopy(api.writes)
+
+	with pytest.raises(PublicationError):
+		publisher.prepare(7, event=_event(api))
+	assert api.writes == previous_writes
+
+
+def test_source_archive_contract_rejects_image_evidence_before_release_writes() -> None:
 	api = RegistryGitHub("image")
 	api.files[(SOURCE, ".release/publisher.toml")] = api.files[
 		(SOURCE, ".release/publisher.toml")
-	].replace('kind = "image"', 'kind = "archive"')
+	].replace(
+		'kind = "image"\nimage_repository = "ghcr.io/o/product"', 'kind = "archive"'
+	)
 	publisher, artifact_id = _ready(api)
-	with pytest.raises(PublicationError, match="kind"):
+	with pytest.raises(PublicationError, match="SHA-256 digest"):
+		publisher.publish(7, artifact_id)
+	assert api.writes == []
+
+
+def test_conflicting_retained_draft_blocks_image_tag_write(tmp_path: Path) -> None:
+	api = RegistryGitHub("image")
+	publisher, artifact_id = _ready(api)
+	api.releases.append(
+		{
+			"id": 2,
+			"tag_name": "v2.1.0",
+			"draft": True,
+			"prerelease": False,
+			"target_commitish": SOURCE,
+			"body": NOTES
+			+ RECEIPT_MARKER
+			+ json.dumps({"candidate": {"source_sha": "f" * 40}})
+			+ "-->\n",
+			"assets": [],
+		}
+	)
+
+	with pytest.raises(PublicationError, match="different retained candidate"):
+		publisher.write_images(7, artifact_id, tmp_path)
+
+	assert api.image_pushes == []
+	assert api.writes == []
+
+
+def test_conflicting_version_tag_blocks_image_tag_write(tmp_path: Path) -> None:
+	api = RegistryGitHub("image")
+	publisher, artifact_id = _ready(api)
+	api.tags["v2.1.0"] = BASE
+
+	with pytest.raises(PublicationError, match="version tag identifies a different source"):
+		publisher.write_images(7, artifact_id, tmp_path)
+
+	assert api.image_pushes == []
+	assert api.writes == []
+
+
+def test_second_image_tag_conflict_is_found_before_any_image_push(tmp_path: Path) -> None:
+	api = MultiImageRegistryGitHub()
+	publisher, artifact_id = _ready(api)
+	api.conflicting_image_repository = "ghcr.io/o/second"
+
+	with pytest.raises(PublicationError, match="different image bytes"):
+		publisher.write_images(7, artifact_id, tmp_path)
+
+	assert api.image_preflights == ["ghcr.io/o/first", "ghcr.io/o/second"]
+	assert api.image_pushes == []
+	assert api.writes == []
+
+
+@pytest.mark.parametrize(
+	("field", "value"),
+	[
+		("candidate_sha256", "f" * 64),
+		("candidate_artifact_id", 999),
+		("source_sha", "f" * 40),
+		("provider_sha", "f" * 40),
+		("writer_run_id", 101),
+		("image_producer", "substituted"),
+		("image_producer_proof_artifact_id", 999),
+		("image_archive_sha256", "f" * 64),
+		("image_registry_digest", "f" * 64),
+	],
+)
+def test_image_receipt_conflicts_fail_before_github_release_mutations(
+	field: str, value: object, tmp_path: Path
+) -> None:
+	api = RegistryGitHub("image")
+	publisher, artifact_id = _ready(api)
+	assert publisher.write_images(7, artifact_id, tmp_path)["status"] == "images-written"
+	receipt = json.loads((tmp_path / "image-receipt.json").read_bytes())
+	image = receipt["images"][0]
+	if field == "image_registry_digest":
+		image["sha256"] = value
+		image["reference"] = f"ghcr.io/o/product@sha256:{value}"
+	elif field == "image_producer_proof_artifact_id":
+		image["producer_proof"]["artifact_id"] = value
+	elif field.startswith("image_"):
+		image[field.removeprefix("image_")] = value
+	else:
+		receipt[field] = value
+	api.artifact(
+		"release-image-receipt-1",
+		{"image-receipt.json": json.dumps(receipt).encode()},
+		"Write image / Push images",
+		["Write images"],
+	)
+
+	with pytest.raises(PublicationError):
 		publisher.publish(7, artifact_id)
 	assert api.writes == []
 

@@ -1799,7 +1799,11 @@ def _check_snapshot(
 			repository=repository_root or actual_root,
 			index_file=index_file,
 		),
-		workflow_result(actual_root, manifest),
+		workflow_result(
+			actual_root,
+			manifest,
+			repository_root=repository_root or actual_root,
+		),
 		*documentation_results(actual_root, manifest),
 	]
 	results = [contract_result, *repository_results]

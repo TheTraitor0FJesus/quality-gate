@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
-from .publication import PublicationError
+from .publication import PublicationError, image_repository
 from .publication_evidence import record, records
 
 MAX_ENTRIES = 32
@@ -45,19 +45,41 @@ def validate_config(config: Mapping[str, object]) -> None:
 	strings([producer.get("job") for producer in producers], "producer jobs")
 	for producer in producers:
 		_validate_producer(producer)
+	image_repositories = [
+		str(producer["image_repository"])
+		for producer in producers
+		if producer.get("kind") == "image"
+	]
+	if len(image_repositories) != len(set(image_repositories)):
+		raise PublicationError("image producers must use distinct GHCR package paths")
 	for projection in records(config.get("projections", []), "projections"):
 		_validate_projection(projection)
 
 
 def _validate_producer(producer: Mapping[str, object]) -> None:
-	if set(producer) - {"name", "job", "checks", "deliverables", "kind"}:
+	if set(producer) - {
+		"name",
+		"job",
+		"checks",
+		"deliverables",
+		"kind",
+		"image_repository",
+	}:
 		raise PublicationError("unknown producer configuration field")
 	if re.fullmatch(r"[a-z][a-z0-9-]{0,31}", str(producer.get("name"))) is None:
 		raise PublicationError("unsafe producer name")
-	if producer.get("kind", "archive") not in {"archive", "package", "image"}:
+	kind = producer.get("kind", "archive")
+	if kind not in {"archive", "package", "image"}:
 		raise PublicationError("unknown producer deliverable kind")
+	if kind == "image":
+		image_repository(producer.get("image_repository"))
+	elif "image_repository" in producer:
+		raise PublicationError("image_repository is only valid for image producers")
 	strings(producer.get("checks"), "required producer checks")
-	for name in strings(producer.get("deliverables"), "required deliverables"):
+	deliverables = strings(producer.get("deliverables"), "required deliverables")
+	if kind == "image" and len(deliverables) != 1:
+		raise PublicationError("each image producer must declare exactly one image deliverable")
+	for name in deliverables:
 		if (
 			re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name.replace("{version}", "1.0.0"))
 			is None
