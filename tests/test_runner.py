@@ -590,15 +590,18 @@ def _web_fixture(
 	return _web_policy(tmp_path, binary=binary)
 
 
-def _fake_biome_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _fake_biome_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 	script = tmp_path / "fake_biome.py"
 	config = tmp_path / "fake-biome.json"
 	config.write_text("{}\n", encoding="utf-8")
 	script.write_text(
 		"""from pathlib import Path
 import sys
+import json
 
 args = sys.argv[1:]
+with Path(__file__).with_suffix(".jsonl").open("a", encoding="utf-8") as log:
+    log.write(json.dumps(args) + "\\n")
 if not args or args[0] != "ci" or "--config-path" not in args:
     raise SystemExit(90)
 if "--write" in args or "--fix" in args:
@@ -622,6 +625,22 @@ for path in asset_paths:
 		"_biome_command",
 		lambda _prepared: [sys.executable, str(script), "ci", "--config-path", str(config)],
 	)
+	return script.with_suffix(".jsonl")
+
+
+def _assert_biome_invocations(log_path: Path, expected_assets: set[str]) -> None:
+	invocations = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+	assert len(invocations) == 2
+	for args in invocations:
+		assert "--write" not in args
+		assert "--fix" not in args
+		assert {value for value in args if value.endswith((".js", ".css"))} == expected_assets
+		assert "--assist-enabled=false" in args
+
+	lint_args = next(args for args in invocations if "--linter-enabled=true" in args)
+	format_args = next(args for args in invocations if "--formatter-enabled=true" in args)
+	assert "--formatter-enabled=false" in lint_args
+	assert "--linter-enabled=false" in format_args
 
 
 def _web_prepared(policy_root: Path) -> SimpleNamespace:
@@ -646,7 +665,7 @@ def test_check_runs_read_only_biome_lint_and_format_for_declared_assets(
 ) -> None:
 	policy_root = _web_fixture(tmp_path)
 	prepared = _web_prepared(policy_root)
-	_fake_biome_command(tmp_path, monkeypatch)
+	argv_log = _fake_biome_command(tmp_path, monkeypatch)
 	(tmp_path / "assets/other/undeclared.js").parent.mkdir(parents=True, exist_ok=True)
 	(tmp_path / "assets/other/undeclared.js").write_text("const unused = 1;\n", encoding="utf-8")
 	before = {
@@ -669,6 +688,7 @@ def test_check_runs_read_only_biome_lint_and_format_for_declared_assets(
 		if ".biome_" in result.check_id
 	)
 	assert {relative: (tmp_path / relative).read_bytes() for relative in before} == before
+	_assert_biome_invocations(argv_log, {"assets/js/app.js", "assets/css/app.css"})
 
 
 @pytest.mark.parametrize(
@@ -682,7 +702,7 @@ def test_check_runs_biome_for_components_with_one_declared_web_language(
 	css: bool,
 ) -> None:
 	policy_root = _web_fixture(tmp_path, javascript=javascript, css=css)
-	_fake_biome_command(tmp_path, monkeypatch)
+	argv_log = _fake_biome_command(tmp_path, monkeypatch)
 	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
 	monkeypatch.setattr(runner, "prepare", lambda *args, **kwargs: _web_prepared(policy_root))
 
@@ -690,6 +710,8 @@ def test_check_runs_biome_for_components_with_one_declared_web_language(
 
 	biome_results = [result for result in verdict.results if ".biome_" in result.check_id]
 	assert [result.status for result in biome_results] == [runner.Status.PASSED] * 2
+	expected_assets = {"assets/js/app.js"} if javascript else {"assets/css/app.css"}
+	_assert_biome_invocations(argv_log, expected_assets)
 
 
 def test_biome_policy_is_version_locked_to_stable_raw_asset_checks() -> None:

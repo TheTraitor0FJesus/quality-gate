@@ -1,4 +1,4 @@
-"""Contract checks for the user-level typed test-runner configuration."""
+"""Prompt-contract checks and manifest/Node fixtures with locally controlled sequencing."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from time import perf_counter
 
@@ -17,25 +18,61 @@ from quality_gate.contracts import load_manifest
 REPOSITORY = Path(__file__).resolve().parents[1]
 
 
-def _test_runner_instructions() -> str:
-	configured_root = os.environ.get("CODEX_HOME")
-	candidates = (
-		Path(configured_root) / "agents" / "test-runner.toml"
-		if configured_root
-		else Path.home() / ".codex" / "agents" / "test-runner.toml",
-		Path(r"C:\Users\Traitor\.codex\agents\test-runner.toml"),
-	)
-	path = next((candidate for candidate in candidates if candidate.is_file()), None)
-	if path is None:
-		pytest.skip("the user-level typed test-runner configuration is not installed")
+def _selected_settings_root(environment: Mapping[str, str], profile: Path) -> Path:
+	configured_root = environment.get("CODEX_HOME")
+	if configured_root:
+		return Path(configured_root)
+	return profile / ".codex"
+
+
+def _test_runner_instructions(settings_root: Path) -> str:
+	path = settings_root / "agents" / "test-runner.toml"
+	if not path.is_file():
+		pytest.skip(f"typed test-runner configuration is missing under selected settings root: {path}")
 	document = tomllib.loads(path.read_text(encoding="utf-8"))
 	if "developer_instructions" in document:
 		return document["developer_instructions"]
 	return document["skills"]["config"][-1]["developer_instructions"]
 
 
-def test_manifest_full_scope_collects_supplementals_before_the_staged_gate() -> None:
-	instructions = _test_runner_instructions()
+def _write_runner_config(settings_root: Path, instructions: str) -> None:
+	config = settings_root / "agents" / "test-runner.toml"
+	config.parent.mkdir(parents=True, exist_ok=True)
+	config.write_text(f'developer_instructions = """{instructions}"""\n', encoding="utf-8")
+
+
+def test_explicit_settings_root_selects_runner_instructions(tmp_path: Path) -> None:
+	selected_root = tmp_path / "selected"
+	profile_root = tmp_path / "profile"
+	_write_runner_config(selected_root, "selected root")
+	_write_runner_config(profile_root / ".codex", "profile fallback")
+
+	assert _selected_settings_root({"CODEX_HOME": str(selected_root)}, profile_root) == selected_root
+	assert _test_runner_instructions(selected_root) == "selected root"
+
+
+def test_profile_settings_root_is_used_when_codex_home_is_unset(tmp_path: Path) -> None:
+	profile = tmp_path / "profile"
+	selected_root = profile / ".codex"
+	_write_runner_config(selected_root, "profile fallback")
+
+	assert _selected_settings_root({}, profile) == selected_root
+	assert _test_runner_instructions(selected_root) == "profile fallback"
+
+
+def test_missing_explicit_settings_root_does_not_fall_back_to_profile(tmp_path: Path) -> None:
+	missing_root = tmp_path / "missing-selected-root"
+	profile_root = tmp_path / "profile" / ".codex"
+	_write_runner_config(profile_root, "must not be read")
+	selected_root = _selected_settings_root({"CODEX_HOME": str(missing_root)}, tmp_path / "profile")
+
+	with pytest.raises(pytest.skip.Exception, match="typed test-runner configuration is missing"):
+		_test_runner_instructions(selected_root)
+
+
+def test_prompt_contract_orders_supplementals_before_the_staged_gate() -> None:
+	settings_root = _selected_settings_root(os.environ, Path.home())
+	instructions = _test_runner_instructions(settings_root)
 	preflight = instructions.index("first select `quality-gate --root <repo> validate`")
 	declarations = instructions.index("read only the validated manifest's `supplemental_tests`")
 	expansion = instructions.index("expand each validated repository-relative target")
@@ -46,8 +83,9 @@ def test_manifest_full_scope_collects_supplementals_before_the_staged_gate() -> 
 	assert "A supplemental failure never suppresses the later staged gate" in instructions
 
 
-def test_manifestless_full_scope_keeps_ordinary_suite_discovery() -> None:
-	instructions = _test_runner_instructions()
+def test_manifestless_full_scope_prompt_contract_keeps_ordinary_suite_discovery() -> None:
+	settings_root = _selected_settings_root(os.environ, Path.home())
+	instructions = _test_runner_instructions(settings_root)
 
 	assert "For `full` without `quality-gate.toml`" in instructions
 	assert "ordinary full suite" in instructions
@@ -177,7 +215,8 @@ def _report_integration_timings(timings: dict[str, float]) -> None:
 	)
 
 
-def test_full_scope_collects_each_supplemental_result_before_the_gate() -> None:
+def test_node_fixture_runs_supplementals_before_a_locally_authored_gate_stub() -> None:
+	"""Exercise Node fixtures and local sequencing; this does not invoke the typed runner."""
 	temporary = tempfile.TemporaryDirectory(prefix="quality-gate-runner-contract-")
 	timings: dict[str, float] = {}
 	try:
@@ -240,7 +279,7 @@ def test_full_scope_collects_each_supplemental_result_before_the_gate() -> None:
 			capture_output=True,
 			text=True,
 		)
-		timings["staged gate"] = perf_counter() - started
+		timings["local staged-gate stub"] = perf_counter() - started
 		supplemental_log = (root / "supplemental.log").read_text(encoding="utf-8")
 		gate_log = (root / "staged-gate.log").read_text(encoding="utf-8")
 	finally:

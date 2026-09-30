@@ -7,6 +7,7 @@ import tarfile
 from collections.abc import Sequence
 
 import pytest
+
 from quality_gate import publication_writer
 from quality_gate.publication import (
 	MAX_IMAGE_REPOSITORY_LENGTH,
@@ -86,11 +87,21 @@ def _registry_manifest(config_digest: str) -> bytes:
 
 
 class _DockerCommand:
-	def __init__(self, *, existing_manifest: bytes | None = None) -> None:
+	def __init__(
+		self,
+		*,
+		existing_manifest: bytes | None = None,
+		loaded_config_digest: str | None = None,
+		loaded_layers: tuple[str, ...] | None = None,
+	) -> None:
 		self.calls: list[list[str]] = []
 		self.pushed = False
 		self.existing_manifest = existing_manifest
 		self.config_digest, self.layers = _config_digest(_archive())
+		self.loaded_config_digest = (
+			self.config_digest if loaded_config_digest is None else loaded_config_digest
+		)
+		self.loaded_layers = self.layers if loaded_layers is None else loaded_layers
 
 	def __call__(self, arguments: Sequence[str], *, limit: int) -> bytes:
 		call = list(arguments)
@@ -98,7 +109,10 @@ class _DockerCommand:
 		if call[:3] == ["docker", "image", "inspect"]:
 			if call[4] == "{{json .}}":
 				return json.dumps(
-					{"Id": self.config_digest, "RootFS": {"Layers": self.layers}}
+					{
+						"Id": self.loaded_config_digest,
+						"RootFS": {"Layers": self.loaded_layers},
+					}
 				).encode()
 			return (SOURCE + "\n").encode()
 		if call[:5] == [
@@ -273,6 +287,50 @@ def test_writer_loads_inspects_pushes_and_returns_manifest_digest() -> None:
 		["docker", "buildx"],
 	]
 	assert not any("run" in call for call in command.calls)
+
+
+@pytest.mark.parametrize(
+	("loaded_config_digest", "loaded_layers"),
+	[
+		("sha256:" + "f" * 64, None),
+		(None, ("sha256:" + "f" * 64,)),
+	],
+	ids=["config-digest", "layer-identity"],
+)
+def test_loaded_image_identity_mismatch_stops_before_registry_or_delivery(
+	loaded_config_digest: str | None, loaded_layers: tuple[str, ...] | None
+) -> None:
+	command = _DockerCommand(
+		loaded_config_digest=loaded_config_digest,
+		loaded_layers=loaded_layers,
+	)
+
+	with pytest.raises(
+		PublicationError, match="^loaded image bytes differ from the verified archive$"
+	):
+		push_image_archive(
+			_archive(), SOURCE, "ghcr.io/owner/project:v2.3.0", command
+		)
+
+	assert len(command.calls) == 3
+	assert command.calls[0][:3] == ["docker", "load", "--input"]
+	assert command.calls[0][3].endswith("image.tar")
+	assert command.calls[1] == [
+		"docker",
+		"image",
+		"inspect",
+		"--format",
+		'{{ index .Config.Labels "org.opencontainers.image.revision" }}',
+		"source/image:v1",
+	]
+	assert command.calls[2] == [
+		"docker",
+		"image",
+		"inspect",
+		"--format",
+		"{{json .}}",
+		"source/image:v1",
+	]
 
 
 def test_existing_tag_with_different_image_bytes_is_not_mutated() -> None:

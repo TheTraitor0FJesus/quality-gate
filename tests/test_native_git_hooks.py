@@ -2,13 +2,29 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
-HOOKS = Path(r"C:\Users\Traitor\.codex\MY-SETTINGS\hooks")
-SETUP = HOOKS / "setup_native_hooks.py"
-HOOKS_DOCUMENTATION = HOOKS.parent / "HOOKS.md"
+
+def _settings_root(
+	environment: Mapping[str, str] | None = None, profile: Path | None = None
+) -> Path:
+	selected_environment = os.environ if environment is None else environment
+	configured_root = selected_environment.get("CODEX_HOME")
+	if configured_root:
+		return Path(configured_root)
+	return (Path.home() if profile is None else profile) / ".codex"
+
+
+def _hook_paths(
+	environment: Mapping[str, str] | None = None, profile: Path | None = None
+) -> tuple[Path, Path, Path]:
+	hooks = _settings_root(environment, profile) / "MY-SETTINGS" / "hooks"
+	return hooks, hooks / "setup_native_hooks.py", hooks.parent / "HOOKS.md"
+
+
 MANIFEST = """\
 waivers = []
 
@@ -49,9 +65,38 @@ jobs:
 """
 
 
-def _hook_environment() -> dict[str, str]:
+def test_native_hook_paths_follow_explicit_settings_root(tmp_path: Path) -> None:
+	selected_root = tmp_path / "selected"
+	profile = tmp_path / "profile"
+	assert _hook_paths({"CODEX_HOME": str(selected_root)}, profile) == (
+		selected_root / "MY-SETTINGS" / "hooks",
+		selected_root / "MY-SETTINGS" / "hooks" / "setup_native_hooks.py",
+		selected_root / "MY-SETTINGS" / "HOOKS.md",
+	)
+
+
+def test_native_hook_paths_use_profile_root_when_unset(tmp_path: Path) -> None:
+	profile = tmp_path / "profile"
+	assert _hook_paths({}, profile)[0] == profile / ".codex" / "MY-SETTINGS" / "hooks"
+
+
+def test_missing_explicit_native_root_does_not_select_profile_files(tmp_path: Path) -> None:
+	selected_root = tmp_path / "missing"
+	profile = tmp_path / "profile"
+	(profile / ".codex" / "MY-SETTINGS" / "hooks").mkdir(parents=True)
+	(profile / ".codex" / "MY-SETTINGS" / "hooks" / "pre-push").write_text(
+		"decoy\n", encoding="utf-8"
+	)
+	selected_hooks = _hook_paths({"CODEX_HOME": str(selected_root)}, profile)[0]
+
+	assert selected_hooks == selected_root / "MY-SETTINGS" / "hooks"
+	assert not (selected_hooks / "pre-push").exists()
+
+
+def _hook_environment(settings_root: Path) -> dict[str, str]:
 	environment = os.environ.copy()
-	environment.setdefault("LOCALAPPDATA", str(HOOKS.parents[2] / "AppData" / "Local"))
+	environment["CODEX_HOME"] = str(settings_root)
+	environment.setdefault("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
 	return environment
 
 
@@ -75,6 +120,7 @@ def _git(
 
 
 def _commit(root: Path, message: str) -> None:
+	hooks, _, _ = _hook_paths()
 	_git(
 		root,
 		"-c",
@@ -82,22 +128,23 @@ def _commit(root: Path, message: str) -> None:
 		"-c",
 		"user.email=native-hook@example.invalid",
 		"-c",
-		f"core.hooksPath={HOOKS}",
+		f"core.hooksPath={hooks}",
 		"commit",
 		"-m",
 		message,
-		environment=_hook_environment(),
+		environment=_hook_environment(_settings_root()),
 	)
 
 
 def _run_pre_commit(root: Path) -> subprocess.CompletedProcess[str]:
+	hooks, _, _ = _hook_paths()
 	return subprocess.run(
-		["python", str(HOOKS / "git_pre_commit.py")],
+		["python", str(hooks / "git_pre_commit.py")],
 		cwd=root,
 		capture_output=True,
 		text=True,
 		check=False,
-		env=_hook_environment(),
+		env=_hook_environment(_settings_root()),
 	)
 
 
@@ -111,8 +158,11 @@ def _write_contract(root: Path) -> None:
 
 @pytest.mark.skipif(os.name != "nt", reason="machine native wrappers use Windows paths")
 def test_real_git_commit_preserves_staged_and_unstaged_state(tmp_path: Path) -> None:
-	if not (HOOKS / "pre-commit").is_file():
-		pytest.skip("machine native hooks are not installed")
+	hooks, _, _ = _hook_paths()
+	if not (hooks / "pre-commit").is_file():
+		pytest.skip(
+			f"native pre-commit wrapper is unavailable under selected settings root: {hooks}"
+		)
 	_git(tmp_path, "init", "-b", "main")
 	_write_contract(tmp_path)
 	_git(tmp_path, "add", ".")
@@ -140,8 +190,9 @@ def test_real_git_commit_preserves_staged_and_unstaged_state(tmp_path: Path) -> 
 def test_real_git_pre_push_blocks_default_updates_and_allows_feature_pushes(
 	tmp_path: Path,
 ) -> None:
-	if not (HOOKS / "pre-push").is_file():
-		pytest.skip("machine native hooks are not installed")
+	hooks, _, _ = _hook_paths()
+	if not (hooks / "pre-push").is_file():
+		pytest.skip(f"native pre-push wrapper is unavailable under selected settings root: {hooks}")
 	remote = tmp_path / "remote.git"
 	_git(tmp_path, "init", "--bare", str(remote))
 	_git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
@@ -162,12 +213,12 @@ def test_real_git_pre_push_blocks_default_updates_and_allows_feature_pushes(
 	protected = _git(
 		tmp_path,
 		"-c",
-		f"core.hooksPath={HOOKS}",
+		f"core.hooksPath={hooks}",
 		"push",
 		"origin",
 		"main",
 		check=False,
-		environment=_hook_environment(),
+		environment=_hook_environment(_settings_root()),
 	)
 	assert protected.returncode == 1
 	assert "default branch" in protected.stderr.lower()
@@ -179,23 +230,23 @@ def test_real_git_pre_push_blocks_default_updates_and_allows_feature_pushes(
 	_git(
 		tmp_path,
 		"-c",
-		f"core.hooksPath={HOOKS}",
+		f"core.hooksPath={hooks}",
 		"push",
 		"-u",
 		"origin",
 		"feature/native-hook",
-		environment=_hook_environment(),
+		environment=_hook_environment(_settings_root()),
 	)
 
 	deletion = _git(
 		tmp_path,
 		"-c",
-		f"core.hooksPath={HOOKS}",
+		f"core.hooksPath={hooks}",
 		"push",
 		"origin",
 		":main",
 		check=False,
-		environment=_hook_environment(),
+		environment=_hook_environment(_settings_root()),
 	)
 	assert deletion.returncode == 1
 	assert "default branch" in deletion.stderr.lower()
@@ -205,8 +256,9 @@ def test_real_git_pre_push_blocks_default_updates_and_allows_feature_pushes(
 def test_native_hook_setup_preserves_unrelated_files_and_refuses_conflicts(
 	tmp_path: Path,
 ) -> None:
-	if not SETUP.is_file():
-		pytest.skip("machine setup wrapper is not installed")
+	_, setup, _ = _hook_paths()
+	if not setup.is_file():
+		pytest.skip(f"native setup wrapper is unavailable under selected settings root: {setup}")
 	empty_global_config = tmp_path / "empty-global-gitconfig"
 	empty_global_config.write_text("", encoding="utf-8")
 	setup_environment = os.environ.copy()
@@ -219,7 +271,7 @@ def test_native_hook_setup_preserves_unrelated_files_and_refuses_conflicts(
 	(target / "post-commit").parent.mkdir()
 	(target / "post-commit").write_text("unrelated\n", encoding="utf-8")
 	first = subprocess.run(
-		["python", str(SETUP), "--repository", str(root), "--hooks-dir", str(target)],
+		["python", str(setup), "--repository", str(root), "--hooks-dir", str(target)],
 		capture_output=True,
 		text=True,
 		check=False,
@@ -232,7 +284,7 @@ def test_native_hook_setup_preserves_unrelated_files_and_refuses_conflicts(
 
 	(target / "pre-push").write_text("conflict\n", encoding="utf-8")
 	second = subprocess.run(
-		["python", str(SETUP), "--repository", str(root), "--hooks-dir", str(target)],
+		["python", str(setup), "--repository", str(root), "--hooks-dir", str(target)],
 		capture_output=True,
 		text=True,
 		check=False,
@@ -246,7 +298,7 @@ def test_native_hook_setup_preserves_unrelated_files_and_refuses_conflicts(
 	third = subprocess.run(
 		[
 			"python",
-			str(SETUP),
+			str(setup),
 			"--repository",
 			str(not_a_repository),
 			"--hooks-dir",
@@ -268,7 +320,7 @@ def test_native_hook_setup_preserves_unrelated_files_and_refuses_conflicts(
 	local_hook_result = subprocess.run(
 		[
 			"python",
-			str(SETUP),
+			str(setup),
 			"--repository",
 			str(local_hook_root),
 			"--hooks-dir",
@@ -285,9 +337,13 @@ def test_native_hook_setup_preserves_unrelated_files_and_refuses_conflicts(
 
 @pytest.mark.skipif(os.name != "nt", reason="machine native wrappers use Windows paths")
 def test_native_hook_documentation_records_local_bypass_limits() -> None:
-	if not HOOKS_DOCUMENTATION.is_file():
-		pytest.skip("native hook documentation is not installed")
-	documentation = HOOKS_DOCUMENTATION.read_text(encoding="utf-8")
+	_, _, documentation_path = _hook_paths()
+	if not documentation_path.is_file():
+		pytest.skip(
+			"native hook documentation is unavailable under selected settings root: "
+			f"{documentation_path}"
+		)
+	documentation = documentation_path.read_text(encoding="utf-8")
 
 	assert "git commit --no-verify" in documentation
 	assert "git push --no-verify" in documentation
