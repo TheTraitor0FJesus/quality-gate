@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from quality_gate import integrity, runner
 from quality_gate.cli import main
 from quality_gate.contracts import Manifest, load_manifest
@@ -798,9 +799,21 @@ def test_provider_self_policy_uses_only_exact_short_lived_v21_bootstrap_waivers(
 	assert manifest.policy_release == "v2.1.0"
 	assert {waiver.target for waiver in waivers} == bootstrap_targets | {parity_target}
 	bootstrap_waivers = [waiver for waiver in waivers if waiver.target in bootstrap_targets]
+	assert len(manifest.waivers) == 4
 	assert len(bootstrap_waivers) == 3
 	assert {waiver.target for waiver in bootstrap_waivers} == bootstrap_targets
 	assert all(waiver.kind == "standard" for waiver in bootstrap_waivers)
+	assert {waiver.target: waiver.reason for waiver in bootstrap_waivers} == {
+		".github/workflows/image-writer.yml": (
+			"Bootstrap the provider writer under v2.1; remove after v2.3.0 policy publication."
+		),
+		".github/workflows/release-publish.yml": (
+			"Bootstrap the provider publisher under v2.1; remove after v2.3.0 policy publication."
+		),
+		".github/workflows/release.yml": (
+			"Bootstrap the provider release route under v2.1; remove after v2.3.0 policy publication."
+		),
+	}
 	assert all(waiver.approved_by == "TheTraitor0FJesus" for waiver in bootstrap_waivers)
 	assert all(waiver.reviewed_on.isoformat() == "2026-09-25" for waiver in bootstrap_waivers)
 	assert all(waiver.expires_on.isoformat() == "2026-10-09" for waiver in bootstrap_waivers)

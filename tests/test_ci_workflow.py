@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -10,13 +11,12 @@ import stat
 import subprocess
 import sys
 import tomllib
-from contextlib import nullcontext
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+
 from quality_gate import runner
-from quality_gate.contracts import CheckResult, Status
+from quality_gate.ci_parity import compare_results
 from quality_gate.distribution import DistributionError, PolicyCache
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -429,49 +429,100 @@ def test_consumer_templates_pin_the_caller_and_schedule_updates() -> None:
 	assert "auto-merge" not in dependabot.casefold()
 
 
-def test_ci_and_local_check_return_the_same_public_result_contract(
-	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def _valid_parity_result() -> dict[str, object]:
+	return {
+		"policy_release": "v2.0.0",
+		"tool_names_versions": [["gitleaks", "8.30.1"]],
+		"supplemental_tests": [],
+		"check_surface": {"secrets.candidate": "passed", "secrets.history": "failed"},
+		"pr_history_verdict": "failed",
+		"redaction": {
+			"full_secret_absent": True,
+			"meaningful_substring_absent": True,
+		},
+		"shallow_history": {"history_verdict": "unchecked"},
+		"unavailable_scanner": {
+			"exit_code": runner.EXIT_UNCHECKED,
+			"candidate": "unchecked",
+			"history": "unchecked",
+		},
+	}
+
+
+def _write_parity_pair(
+	tmp_path: Path, left: dict[str, object], right: dict[str, object]
+) -> tuple[Path, Path]:
+	left_path = tmp_path / "left.json"
+	right_path = tmp_path / "right.json"
+	left_path.write_text(json.dumps(left), encoding="utf-8")
+	right_path.write_text(json.dumps(right), encoding="utf-8")
+	return left_path, right_path
+
+
+def test_compare_results_accepts_valid_equal_pair(tmp_path: Path) -> None:
+	"""Accept equal platform results that satisfy every parity probe."""
+
+	left_path, right_path = _write_parity_pair(
+		tmp_path, _valid_parity_result(), _valid_parity_result()
+	)
+
+	compare_results(left_path, right_path)
+
+
+def test_compare_results_rejects_unequal_contract_field(tmp_path: Path) -> None:
+	"""Identify a differing release value while all other fields remain valid."""
+
+	left = _valid_parity_result()
+	right = _valid_parity_result()
+	right["policy_release"] = "v2.0.1"
+	left_path, right_path = _write_parity_pair(tmp_path, left, right)
+
+	diagnostic = re.escape("parity mismatch in policy_release")
+	with pytest.raises(RuntimeError, match=f"^{diagnostic}$"):
+		compare_results(left_path, right_path)
+
+
+@pytest.mark.parametrize(
+	("field", "invalid_value", "diagnostic"),
+	[
+		(
+			"redaction",
+			{"full_secret_absent": False, "meaningful_substring_absent": True},
+			"parity redaction contract failed",
+		),
+		(
+			"redaction",
+			{"full_secret_absent": True, "meaningful_substring_absent": False},
+			"parity redaction contract failed",
+		),
+		(
+			"shallow_history",
+			{"history_verdict": "failed"},
+			"shallow history must be unchecked",
+		),
+		(
+			"unavailable_scanner",
+			{"exit_code": runner.EXIT_UNCHECKED, "candidate": "failed", "history": "unchecked"},
+			"unavailable scanner must be unchecked",
+		),
+	],
+)
+def test_compare_results_rejects_equal_invalid_probe(
+	tmp_path: Path,
+	field: str,
+	invalid_value: object,
+	diagnostic: str,
 ) -> None:
-	"""Verify CI and local invocations share check IDs and statuses at the CLI seam."""
+	"""Reject matching invalid probe results at their specific contract guard."""
 
-	root = REPOSITORY / "tests" / "fixtures" / "no-python"
-	monkeypatch.setattr(
-		runner,
-		"candidate_snapshot",
-		lambda _root: nullcontext(SimpleNamespace(root=root)),
-	)
-	monkeypatch.setattr(
-		runner,
-		"prepare",
-		lambda *_args, **_kwargs: SimpleNamespace(
-			policy_root=REPOSITORY, release_manifest=None, runtimes=()
-		),
-	)
-	monkeypatch.setattr(
-		runner,
-		"secret_candidate_result",
-		lambda *_args, **_kwargs: CheckResult(
-			"secrets.candidate", Status.PASSED, "no credentials detected"
-		),
-	)
-	monkeypatch.setattr(
-		runner,
-		"secret_history_result",
-		lambda *_args, **_kwargs: CheckResult(
-			"secrets.history",
-			Status.NOT_APPLICABLE,
-			"history range not requested",
-			recovery_action="provide a verified CI base reference when range scanning applies",
-		),
-	)
+	left = _valid_parity_result()
+	right = _valid_parity_result()
+	left[field] = invalid_value
+	right[field] = invalid_value
+	left_path, right_path = _write_parity_pair(tmp_path, left, right)
 
-	local = runner.check(root)
-	ci = runner.check(root, base="HEAD", head="HEAD")
-	capsys.readouterr()
-
-	assert [(item.check_id, item.status) for item in local.results] == [
-		(item.check_id, item.status) for item in ci.results
-	]
+	with pytest.raises(RuntimeError, match=f"^{re.escape(diagnostic)}$"):
+		compare_results(left_path, right_path)
 
 
 def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(

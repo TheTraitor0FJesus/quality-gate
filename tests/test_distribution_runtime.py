@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import tempfile
 import time
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
 import quality_gate.distribution as distribution
 from quality_gate.cli import main
 from quality_gate.contracts import load_manifest
@@ -20,6 +23,13 @@ from quality_gate.runtime import (
 	runtime_fingerprint,
 	runtime_identity,
 )
+
+
+@pytest.fixture
+def runtime_root() -> Iterator[Path]:
+	# Keep hashed cache paths below Windows' limit inside nested staged Gate workspaces.
+	with tempfile.TemporaryDirectory(prefix="runtime-") as directory:
+		yield Path(directory)
 
 
 def _release(source: Path, version: str = "v2.0.0") -> None:
@@ -320,7 +330,7 @@ def test_missing_dependency_input_is_unchecked(tmp_path: Path) -> None:
 		runtime_identity(tmp_path, manifest, component)
 
 
-def test_missing_python_executable_is_unchecked(tmp_path: Path) -> None:
+def test_missing_python_executable_is_unchecked(runtime_root: Path) -> None:
 	manifest = load_manifest(Path(__file__).parent / "fixtures" / "valid")
 	component = manifest.python[0].__class__(
 		manifest.python[0].name,
@@ -332,14 +342,14 @@ def test_missing_python_executable_is_unchecked(tmp_path: Path) -> None:
 		"missing Python test",
 		manifest.python[0].timeout_seconds,
 	)
-	manager = RuntimeManager(tmp_path / "cache")
+	manager = RuntimeManager(runtime_root / "cache")
 
 	with pytest.raises(RuntimeUnavailable, match="Python executable is unavailable"):
 		manager.ensure(
-			tmp_path,
+			runtime_root,
 			manifest,
 			component,
-			python_executable=tmp_path / "missing-python",
+			python_executable=runtime_root / "missing-python",
 		)
 
 
@@ -366,7 +376,7 @@ def test_runtime_inspection_is_unchecked_until_metadata_and_python_exist(tmp_pat
 
 
 def test_setup_creates_an_isolated_runtime_and_identity_change_makes_it_stale(
-	tmp_path: Path,
+	runtime_root: Path,
 ) -> None:
 	manifest_root = Path(__file__).parent / "fixtures" / "valid"
 	manifest = load_manifest(manifest_root)
@@ -381,10 +391,10 @@ def test_setup_creates_an_isolated_runtime_and_identity_change_makes_it_stale(
 		"runtime setup test has no test suite",
 		component.timeout_seconds,
 	)
-	manager = RuntimeManager(tmp_path / "cache")
+	manager = RuntimeManager(runtime_root / "cache")
 
 	prepared = manager.ensure(
-		tmp_path,
+		runtime_root,
 		manifest,
 		component,
 		python_executable=Path(sys.executable),
@@ -399,7 +409,7 @@ def test_setup_creates_an_isolated_runtime_and_identity_change_makes_it_stale(
 		component.tests_reason,
 		component.timeout_seconds + 1,
 	)
-	stale = manager.inspect(tmp_path, runtime_identity(tmp_path, manifest, changed))
+	stale = manager.inspect(runtime_root, runtime_identity(runtime_root, manifest, changed))
 
 	assert prepared.current
 	assert prepared.python is not None
