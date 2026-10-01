@@ -110,9 +110,8 @@ reusable entry points to that same full SHA; their policy/runtime versions chang
 explicit rollout. A ticket PR or feature merge alone is not a completed provider handoff.
 
 The provider's `quality-gate.toml` stays on the latest published policy until the candidate's policy
-asset is published. The writer candidate temporarily waives only its three exact provider workflow
-findings under the current v2.1.0 policy; each waiver expires on 2026-10-09. After v2.3.0 policy
-publication, remove those waivers and advance the self-policy pin in a separate no-release PR.
+asset is published. After publication, advance the self-policy pin and remove any temporary provider
+workflow waivers used to validate the candidate in a separate no-release PR.
 Update the active provider pin assertion in `tests/test_ci_workflow.py` and waiver assertion
 in `tests/test_integrity.py` in the same candidate. Do not make the provider depend on an
 unpublished policy asset.
