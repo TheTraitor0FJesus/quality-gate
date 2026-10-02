@@ -27,6 +27,17 @@ different helper is rejected. The provider self-hosts through same-repository re
 executed shared-code identity is the final merged source containing all three workflows and helper.
 Record that source as consumer R only after provider publication/readback and acceptance.
 
+A later provider self-policy activation keeps the accepted published R and product version.
+External consumers continue pinning the accepted release helper; the provider's same-repository
+calls execute the activation's merged source. The acceptance handoff records these identities
+separately, together with the policy release and platform asset digests.
+
+ARGUS_BRAIN consumes the Quality Gate for checks only. Its required application and isolated
+service checks use the accepted policy/helper pair without release validation, preparation,
+writer, publisher, or recovery callers. Historical releases and backup responsibilities remain
+unchanged. TG and Tracker retain image releases, Trading retains ZIP, and Web retains tar.gz;
+their product adapters use the declaration and publication protocol below.
+
 ## Caller wiring
 
 An open-PR caller targets the repository's live default branch and handles `opened`, `synchronize`,
