@@ -113,8 +113,19 @@ The provider's `quality-gate.toml` stays on the latest published policy until th
 asset is published. After publication, advance the self-policy pin and remove any temporary provider
 workflow waivers used to validate the candidate in a separate no-release PR.
 Update the active provider pin assertion in `tests/test_ci_workflow.py` and waiver assertion
-in `tests/test_integrity.py` in the same candidate. Do not make the provider depend on an
-unpublished policy asset.
+in `tests/test_integrity.py` in the same candidate. Select the accepted published policy in
+`tests/fixtures/release-parity/quality-gate.toml` as well, so platform parity exercises that
+policy. Preserve the comparator's expected outcomes and the non-gating parity waiver. This
+activation and its fixture update keep the published helper R and product version unchanged.
+Do not make the provider depend on an unpublished policy asset.
+
+For an existing qualified release, verify its complete retained receipt, exact-source platform
+verification jobs, tag, notes, helper R, and both downloadable ZIP byte digests before recording
+acceptance. Reuse the existing release when only activation, fixtures, tests, or instructions
+change. Record affected qualification reruns and consumer handoff in a provider acceptance audit
+under `docs/audits/`, as in [v2.3.0 acceptance](audits/provider-v2.3.0-acceptance.md); an open
+correction PR remains pending owner integration. The shared
+[caller contract](publication.md#entry-points-and-ownership) also defines Brain's checks-only role.
 
 ## Verification and delivery boundaries
 

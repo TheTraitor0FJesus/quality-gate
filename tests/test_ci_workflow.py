@@ -259,6 +259,11 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	template = tomllib.loads(
 		(REPOSITORY / "templates" / "quality-gate.toml").read_text(encoding="utf-8")
 	)
+	fixture = tomllib.loads(
+		(REPOSITORY / "tests" / "fixtures" / "release-parity" / "quality-gate.toml").read_text(
+			encoding="utf-8"
+		)
+	)
 	publisher = tomllib.loads(
 		(REPOSITORY / ".release" / "publisher.toml").read_text(encoding="utf-8")
 	)
@@ -300,7 +305,8 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert "manifest_python.outputs.versions" in workflow
 	assert 'default: "3.12"' not in workflow
 	assert manifest["quality"]["policy_release"] == "v2.3.0"
-	assert template["quality"]["policy_release"] == "v2.3.0"
+	assert template["quality"]["policy_release"] == manifest["quality"]["policy_release"]
+	assert fixture["quality"]["policy_release"] == manifest["quality"]["policy_release"]
 	assert all(item["path"] != "quality-gate.toml" for item in publisher["projections"])
 	assert any(item["path"] == "templates/quality-gate.toml" for item in publisher["projections"])
 
