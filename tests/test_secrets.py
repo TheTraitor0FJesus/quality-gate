@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -212,7 +213,52 @@ def test_malformed_scanner_report_is_unchecked(
 	assert result.status is Status.UNCHECKED
 
 
-def test_audit_finding_uses_commit_location_and_hash(tmp_path: Path) -> None:
+def test_audit_finding_uses_commit_location_and_hash(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	secret = "audit-synthetic-credential-value"
+	commit = "a" * 40
+	report = [
+		{
+			"File": "config.env",
+			"StartLine": 7,
+			"Commit": commit,
+			"Secret": secret,
+			"Description": secret,
+		}
+	]
+	scanner = _scanner(tmp_path)
+	release = tmp_path / "release"
+	release.mkdir()
+	(release / scanner.name).write_bytes(scanner.read_bytes())
+	prepared = _prepared(tmp_path, scanner)
+	monkeypatch.setattr("quality_gate.secrets._is_shallow", lambda *args: False)
+
+	def run_scanner(command: list[str], *args: object, report_path: Path, **kwargs: object) -> int:
+		assert command[1] == "git"
+		assert command[command.index("--log-opts") + 1] == "--all"
+		return _run_fake_scanner(report_path, report)
+
+	monkeypatch.setattr("quality_gate.secrets._run_scanner", run_scanner)
+	result = secret_audit_result(tmp_path, _manifest(tmp_path), prepared)
+
+	assert result.check_id == "secrets.audit"
+	assert result.status is Status.FAILED
+	assert len(result.findings) == 1
+	finding = result.findings[0]
+	assert finding.path == f"{commit}:config.env:7"
+	fingerprint = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+	assert finding.message == f"secret detected (fingerprint: {fingerprint})"
+	assert secret not in str(finding)
+	for verbose in (False, True):
+		output = render(Verdict((result,)), verbose=verbose)
+		assert finding.path in output
+		assert fingerprint in output
+		assert secret not in output
+
+
+def test_audit_requires_complete_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+	monkeypatch.setattr("quality_gate.secrets._is_shallow", lambda *args: True)
 	result = secret_audit_result(
 		tmp_path,
 		_manifest(tmp_path),
@@ -222,4 +268,6 @@ def test_audit_finding_uses_commit_location_and_hash(tmp_path: Path) -> None:
 		),
 	)
 
-	assert result.status.value == "unchecked"
+	assert result.check_id == "secrets.audit"
+	assert result.status is Status.UNCHECKED
+	assert result.summary == "complete Git history is unavailable"
