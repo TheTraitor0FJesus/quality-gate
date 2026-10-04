@@ -379,6 +379,7 @@ class _WorkflowJob:
 @dataclass(frozen=True, slots=True)
 class _Workflow:
 	path: str
+	source: str
 	uses: tuple[str, ...]
 	jobs: tuple[_WorkflowJob, ...]
 	on_text: str
@@ -699,6 +700,7 @@ def _parse_workflow(path: Path, relative: str) -> _Workflow:
 	concurrency_group, concurrency_cancel = _workflow_concurrency(keys)
 	return _Workflow(
 		relative,
+		text,
 		uses,
 		tuple(jobs),
 		on_text,
@@ -772,6 +774,7 @@ def _workflow_permission_findings(
 	workflow: _Workflow, is_pull_request: bool, is_quality_gate_provider: bool
 ) -> list[Finding]:
 	findings: list[Finding] = []
+	metadata_review = _approved_dependabot_review_workflow(workflow)
 	if not workflow.permissions:
 		findings.append(
 			_workflow_finding(
@@ -802,6 +805,7 @@ def _workflow_permission_findings(
 		and is_pull_request
 		and not _approved_release_writer_route(workflow, is_quality_gate_provider)
 		and not provider_internal
+		and not metadata_review
 	):
 		findings.append(
 			_workflow_finding(
@@ -814,6 +818,7 @@ def _workflow_permission_findings(
 		write_permissions
 		and not _approved_release_writer_route(workflow, is_quality_gate_provider)
 		and not provider_internal
+		and not metadata_review
 	):
 		unrelated_scopes = sorted(
 			{scope or "write-all" for scope, _job_id in write_permissions}
@@ -844,6 +849,57 @@ def _workflow_permission_findings(
 	if write_permissions and provider_internal:
 		findings.extend(_provider_internal_permission_findings(workflow))
 	return findings
+
+
+_DEPENDABOT_REVIEW_WORKFLOW = """name: Dependabot review
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  request-review:
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.user.type == 'Bot' &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Request review from the repository owner
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEWER: ${{ github.repository_owner }}
+        run: |
+          reviewers=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" \\
+            --json reviewRequests,reviews \\
+            --jq '[.reviewRequests[].login, .reviews[].author.login] | unique | .[]')
+          if grep -Fx "$REVIEWER" <<< "$reviewers" >/dev/null; then
+            exit 0
+          fi
+          gh api --method POST "repos/$GH_REPO/pulls/$PR_NUMBER/requested_reviewers" \\
+            -f "reviewers[]=$REVIEWER" --silent
+"""
+
+
+def _approved_dependabot_review_workflow(workflow: _Workflow) -> bool:
+	"""Allow only the exact metadata-only Dependabot owner-review workflow template."""
+	return workflow.path == ".github/workflows/dependabot-review.yml" and (
+		workflow.source.rstrip("\r\n") == _DEPENDABOT_REVIEW_WORKFLOW.rstrip("\r\n")
+	)
 
 
 _QUALITY_GATE_PROVIDER = "TheTraitor0FJesus/quality-gate"
