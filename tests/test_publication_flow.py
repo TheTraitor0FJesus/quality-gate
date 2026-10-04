@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+
 from quality_gate.publication import PublicationError
 from quality_gate.publication_flow import RECEIPT_MARKER, Context, Publisher
 
@@ -65,6 +66,7 @@ class GitHub:
 		]
 		self.tags = {"v2.0.6": BASE}
 		self.writes: list[str] = []
+		self.source_reads: list[tuple[str, str]] = []
 		self.uploads: dict[str, bytes] = {}
 		self.artifacts: dict[int, dict[str, object]] = {}
 		self.archives: dict[int, bytes] = {}
@@ -252,6 +254,7 @@ class GitHub:
 		raise AssertionError(f"unexpected API read: {path}")
 
 	def source(self, sha: str, path: str) -> str:
+		self.source_reads.append((sha, path))
 		return self.files[(sha, path)]
 
 	def post(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
@@ -324,6 +327,111 @@ def _publisher(
 
 def _event(api: GitHub) -> dict[str, object]:
 	return {"action": "closed", "pull_request": copy.deepcopy(api.pull)}
+
+
+@pytest.fixture
+def projected_api(tmp_path: Path) -> GitHub:
+	api = GitHub()
+	api.files[(SOURCE, ".release/publisher.toml")] = (
+		CONFIG
+		+ """
+[[projections]]
+path = "pyproject.toml"
+format = "toml"
+key = "project.version"
+prefix = "v"
+[[projections]]
+path = "package.json"
+format = "json"
+key = "release.version"
+[[projections]]
+path = "product/version.py"
+format = "python"
+key = "__version__"
+"""
+	)
+	api.files[(SOURCE, "pyproject.toml")] = '[project]\nversion = "v2.1.0"\n'
+	api.files[(SOURCE, "package.json")] = '{"release": {"version": "2.1.0"}}\n'
+	marker = tmp_path / "python-projection-executed"
+	api.files[(SOURCE, "product/version.py")] = (
+		"from pathlib import Path\n"
+		f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n"
+		'__version__ = "2.1.0"\n'
+	)
+	# Valid decoys let the read assertions detect a wrong revision directly.
+	for (revision, path), content in list(api.files.items()):
+		if revision == SOURCE:
+			for decoy in (PR_HEAD, "main"):
+				api.files[(decoy, path)] = content
+	return api
+
+
+def test_prepare_accepts_native_projections_from_exact_source_without_execution(
+	projected_api: GitHub, tmp_path: Path
+) -> None:
+	result = _publisher(projected_api).prepare(7, event=_event(projected_api))
+	assert result["status"] == "build-required"
+	assert result["version"] == "2.1.0"
+	assert result["source_sha"] == SOURCE
+	assert set(projected_api.source_reads) == {
+		(SOURCE, ".release/version.toml"),
+		(SOURCE, ".release/publisher.toml"),
+		(SOURCE, "pyproject.toml"),
+		(SOURCE, "package.json"),
+		(SOURCE, "product/version.py"),
+		(SOURCE, ".release/notes.md"),
+		(BASE, ".release/version.toml"),
+	}
+	assert not (tmp_path / "python-projection-executed").exists()
+	assert projected_api.writes == []
+
+
+@pytest.mark.parametrize(
+	("path", "content"),
+	[
+		("pyproject.toml", '[project]\nversion = "v2.1.1"\n'),
+		("package.json", '{"release": {"version": "2.1.1"}}\n'),
+		("product/version.py", '__version__ = "2.1.1"\n'),
+	],
+	ids=["toml", "json", "python"],
+)
+def test_prepare_rejects_native_projection_mismatch_before_mutation(
+	projected_api: GitHub, path: str, content: str
+) -> None:
+	projected_api.files[(SOURCE, path)] = content
+	with pytest.raises(
+		PublicationError, match="native version projections disagree with the authority"
+	):
+		_publisher(projected_api).prepare(7, event=_event(projected_api))
+	assert (SOURCE, path) in projected_api.source_reads
+	assert projected_api.writes == []
+
+
+@pytest.mark.parametrize(
+	("path", "content", "message"),
+	[
+		("package.json", '{"release": {}}\n', "version projection is missing or invalid"),
+		(
+			"pyproject.toml",
+			'[project]\nversion = "2.1.0"\n',
+			"version projection is missing or invalid",
+		),
+		(
+			"product/version.py",
+			'__version__ = "2.1.0"\n__version__ = "2.1.0"\n',
+			"Python projection requires one literal assignment",
+		),
+	],
+	ids=["missing-json-key", "missing-toml-prefix", "duplicate-python-literal"],
+)
+def test_prepare_rejects_invalid_native_projection_before_mutation(
+	projected_api: GitHub, path: str, content: str, message: str
+) -> None:
+	projected_api.files[(SOURCE, path)] = content
+	with pytest.raises(PublicationError, match=message):
+		_publisher(projected_api).prepare(7, event=_event(projected_api))
+	assert (SOURCE, path) in projected_api.source_reads
+	assert projected_api.writes == []
 
 
 def test_post_merge_preserves_original_candidate_before_product_work() -> None:
