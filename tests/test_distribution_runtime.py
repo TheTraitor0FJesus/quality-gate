@@ -313,6 +313,46 @@ def test_runtime_fingerprint_ignores_dependency_line_ending_conversion(tmp_path:
 	assert windows_fingerprint == git_fingerprint
 
 
+def test_runtime_identity_rejects_dependency_symlink_outside_repository(tmp_path: Path) -> None:
+	root = tmp_path / "repository"
+	root.mkdir()
+	manifest = load_manifest(Path(__file__).parent / "fixtures" / "valid")
+	component = manifest.python[0]
+	component = component.__class__(
+		component.name,
+		component.path,
+		component.python_version,
+		("requirements.txt",),
+		component.test_paths,
+		component.tests_applicable,
+		component.tests_reason,
+		component.timeout_seconds,
+	)
+	content = b"package==1.0\n"
+	dependency = root / "requirements.txt"
+	dependency.write_bytes(content)
+	identity = runtime_identity(root, manifest, component)
+	assert identity.dependency_inputs == (
+		{"path": "requirements.txt", "sha256": hashlib.sha256(content).hexdigest()},
+	)
+
+	external = tmp_path / "external-requirements.txt"
+	external.write_bytes(content)
+	dependency.unlink()
+	try:
+		dependency.symlink_to(external)
+	except OSError:
+		pytest.skip("symbolic links are unavailable on this platform")
+	assert dependency.is_symlink()
+	assert dependency.resolve() == external.resolve()
+
+	with pytest.raises(
+		RuntimeUnavailable,
+		match="^dependency input escapes the repository: requirements\\.txt$",
+	):
+		runtime_identity(root, manifest, component)
+
+
 def test_missing_dependency_input_is_unchecked(tmp_path: Path) -> None:
 	manifest = load_manifest(Path(__file__).parent / "fixtures" / "valid")
 	component = manifest.python[0].__class__(
@@ -415,6 +455,75 @@ def test_setup_creates_an_isolated_runtime_and_identity_change_makes_it_stale(
 	assert prepared.python is not None
 	assert not stale.current
 	assert stale.reason == "runtime is missing"
+
+
+def test_failed_runtime_dependency_install_leaves_no_partial_runtime_and_can_retry(
+	runtime_root: Path,
+) -> None:
+	manifest = load_manifest(Path(__file__).parent / "fixtures" / "valid")
+	component = manifest.python[0]
+	component = component.__class__(
+		component.name,
+		component.path,
+		f"{sys.version_info.major}.{sys.version_info.minor}",
+		(),
+		(),
+		False,
+		"runtime retry test has no test suite",
+		component.timeout_seconds,
+	)
+	manager = RuntimeManager(runtime_root / "cache")
+	identity = runtime_identity(runtime_root, manifest, component)
+	staging_parents: list[Path] = []
+
+	def fail_install(python: Path, root: Path, inputs: tuple[str, ...]) -> None:
+		assert python.is_file()
+		staged = python.parent.parent
+		assert (staged / "pyvenv.cfg").is_file()
+		assert root == runtime_root
+		assert inputs == ()
+		staging_parents.append(staged.parent)
+		raise RuntimeUnavailable("simulated dependency installation failure")
+
+	with pytest.raises(RuntimeUnavailable, match="^simulated dependency installation failure$"):
+		manager.ensure(
+			runtime_root,
+			manifest,
+			component,
+			python_executable=Path(sys.executable),
+			install=fail_install,
+		)
+
+	failed = manager.inspect(runtime_root, identity)
+	assert not failed.current
+	assert failed.reason == "runtime is missing"
+	assert not failed.path.exists()
+	assert len(staging_parents) == 1
+	assert staging_parents[0].parent == failed.path.parent
+	assert not staging_parents[0].exists()
+	successful_installs: list[Path] = []
+
+	def successful_install(python: Path, root: Path, inputs: tuple[str, ...]) -> None:
+		assert python.is_file()
+		assert root == runtime_root
+		assert inputs == ()
+		successful_installs.append(python)
+
+	assert runtime_identity(runtime_root, manifest, component) == identity
+	prepared = manager.ensure(
+		runtime_root,
+		manifest,
+		component,
+		python_executable=Path(sys.executable),
+		install=successful_install,
+	)
+	current = manager.inspect(runtime_root, identity)
+	assert len(successful_installs) == 1
+	assert prepared.current
+	assert prepared.path == failed.path
+	assert current.current
+	assert current.python is not None
+	assert current.python.is_file()
 
 
 def test_sync_cli_requires_an_explicit_source_and_installs_release(
