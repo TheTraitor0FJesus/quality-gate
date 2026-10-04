@@ -17,6 +17,14 @@ This repository is the source of truth for shared Python quality checks.
 - `quality-gate.toml` in each consumer repository is the schema 2 contract: repository obligations,
   component metadata, limits, defaults, policy release identity, and typed waivers.
 
+Workflow permission checks allow the `pull-requests: write` permission for the exact
+`.github/workflows/dependabot-review.yml` metadata-review template only. Changes to its trigger,
+bot guard, permissions, environment, command, or steps require a separately reviewed policy change.
+Publish the policy exception before enabling this workflow, including in the provider repository.
+Then synchronize each repository to that published policy and its compatible full workflow SHA
+before staging the review workflow. Older policies reject its pull-request write permission;
+do not bypass that rejection with a waiver or mutate a cached release.
+
 The reusable workflow and local launcher must consume an immutable policy release. CI selects a
 platform-specific asset from that release so Windows and Linux receive compatible wheels and
 scanner binaries. GitHub release
