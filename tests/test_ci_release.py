@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+
 from quality_gate import ci_release, runner
 from quality_gate.release_contract import (
 	UNIFIED_RELEASE_DEPENDENCIES,
@@ -83,7 +84,9 @@ def _write_metadata(path: Path, value: dict[str, object]) -> None:
 	path.write_text(json.dumps(value), encoding="utf-8")
 
 
-def _unified_archive(path: Path, *, extra_member: bool = False) -> None:
+def _unified_archive(
+	path: Path, *, extra_member: bool = False, compression: int = zipfile.ZIP_STORED
+) -> None:
 	version = "v2.0.6"
 	files = [
 		("quality_gate-2.0.6-py3-none-any.whl", "artifact"),
@@ -125,7 +128,7 @@ def _unified_archive(path: Path, *, extra_member: bool = False) -> None:
 				"",
 			]
 		)
-	with zipfile.ZipFile(path, "w") as archive:
+	with zipfile.ZipFile(path, "w", compression=compression) as archive:
 		archive.writestr("release.toml", "\n".join(manifest))
 		for member_path, content in payloads.items():
 			archive.writestr(member_path, content)
@@ -150,6 +153,83 @@ def test_ci_release_verifier_accepts_an_exact_unified_inventory(tmp_path: Path) 
 	)
 
 	assert wheel == target / "quality_gate-2.0.6-py3-none-any.whl"
+
+
+@pytest.mark.parametrize("limited_resource", ["entries", "size"])
+def test_ci_release_verifier_accepts_archive_at_resource_bound(
+	limited_resource: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	archive = tmp_path / "quality-gate-v2.0.6-Windows.zip"
+	metadata = tmp_path / "release.json"
+	target = tmp_path / "at-bound"
+	_unified_archive(archive, compression=zipfile.ZIP_DEFLATED)
+	_write_metadata(metadata, _metadata(archive, release="v2.0.6", asset=archive.name))
+	with zipfile.ZipFile(archive) as release_archive:
+		members = release_archive.infolist()
+	entry_count = len(members)
+	expanded_size = sum(member.file_size for member in members)
+	assert sum(member.compress_size for member in members) < expanded_size
+	entry_limit = entry_count if limited_resource == "entries" else entry_count + 1
+	size_limit = expanded_size if limited_resource == "size" else expanded_size + 1
+	monkeypatch.setattr(ci_release, "MAX_ARCHIVE_ENTRIES", entry_limit)
+	monkeypatch.setattr(ci_release, "MAX_ARCHIVE_BYTES", size_limit)
+
+	wheel = ci_release.verify_release_asset(
+		metadata,
+		archive,
+		target,
+		expected_release="v2.0.6",
+		expected_name=archive.name,
+	)
+
+	assert wheel == target / "quality_gate-2.0.6-py3-none-any.whl"
+	assert wheel.read_bytes() == b"payload:quality_gate-2.0.6-py3-none-any.whl"
+	assert (target / "gitleaks.exe").read_bytes() == b"tool:gitleaks"
+
+
+@pytest.mark.parametrize("limited_resource", ["entries", "size"])
+@pytest.mark.parametrize("existing_target", [False, True], ids=["absent", "existing"])
+def test_ci_release_verifier_rejects_archive_one_over_resource_bound(
+	limited_resource: str,
+	existing_target: bool,
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	archive = tmp_path / "quality-gate-v2.0.6-Windows.zip"
+	metadata = tmp_path / "release.json"
+	target = tmp_path / "over-bound"
+	_unified_archive(archive, compression=zipfile.ZIP_DEFLATED)
+	_write_metadata(metadata, _metadata(archive, release="v2.0.6", asset=archive.name))
+	with zipfile.ZipFile(archive) as release_archive:
+		members = release_archive.infolist()
+	entry_count = len(members)
+	expanded_size = sum(member.file_size for member in members)
+	entry_limit = entry_count - 1 if limited_resource == "entries" else entry_count + 1
+	size_limit = expanded_size - 1 if limited_resource == "size" else expanded_size + 1
+	monkeypatch.setattr(ci_release, "MAX_ARCHIVE_ENTRIES", entry_limit)
+	monkeypatch.setattr(ci_release, "MAX_ARCHIVE_BYTES", size_limit)
+	sentinel = target / "preserved.txt"
+	if existing_target:
+		target.mkdir()
+		sentinel.write_bytes(b"preserve existing contents")
+
+	limit = "entry" if limited_resource == "entries" else "size"
+	with pytest.raises(
+		ci_release.CiReleaseError, match=f"^release archive exceeds the {limit} limit$"
+	):
+		ci_release.verify_release_asset(
+			metadata,
+			archive,
+			target,
+			expected_release="v2.0.6",
+			expected_name=archive.name,
+		)
+
+	if existing_target:
+		assert list(target.iterdir()) == [sentinel]
+		assert sentinel.read_bytes() == b"preserve existing contents"
+	else:
+		assert not target.exists()
 
 
 def test_ci_release_verifier_rejects_an_unexpected_unified_file(tmp_path: Path) -> None:
