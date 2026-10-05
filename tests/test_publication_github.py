@@ -113,6 +113,25 @@ def _clocked_bounded_command(
 	return BoundedCommand(10, aggregate_timeout_seconds=10), monitor, now
 
 
+def _controlled_exit_command(
+	monkeypatch: pytest.MonkeyPatch, *, detail: bytes, exit_code: int = 1
+) -> list[list[str]]:
+	original_spawn = publication_github._spawn_bounded_command
+	calls: list[list[str]] = []
+
+	def spawn(arguments: list[str], environment: dict[str, str]) -> publication_github._CommandSession:
+		calls.append(arguments)
+		program = (
+			"import sys; "
+			f"sys.stderr.buffer.write({detail!r}); "
+			f"sys.exit({exit_code})"
+		)
+		return original_spawn([sys.executable, "-B", "-c", program], environment)
+
+	monkeypatch.setattr(publication_github, "_spawn_bounded_command", spawn)
+	return calls
+
+
 def test_source_reads_exact_commit_as_data_through_gh() -> None:
 	command = Command(
 		[
@@ -238,13 +257,45 @@ def test_image_command_failure_does_not_reset_or_bypass_exhausted_budget(
 		wait_seconds=[1, 0],
 		exit_codes=[1, 0],
 	)
-	with pytest.raises(MissingResourceError, match="resource is absent"):
+	with pytest.raises(PublicationError, match="command failed") as error:
 		command(["docker", "buildx", "imagetools", "inspect"], limit=64)
+	assert not isinstance(error.value, MissingResourceError)
 	with pytest.raises(PublicationError, match="shared image-command budget.*exhausted"):
 		command(["docker", "push"], limit=64)
 
 	assert len(monitor["calls"]) == 1
 	assert monitor["waits"] == [1]
+
+
+def test_github_api_404_keeps_its_missing_resource_semantics(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	calls = _controlled_exit_command(monkeypatch, detail=b"HTTP 404\n")
+	api = GitHubCLI("o/r", timeout_seconds=5, command=BoundedCommand(5))
+
+	assert api.get("/releases") is None
+	assert calls[0][:3] == ["gh", "api", "repos/o/r/releases"]
+
+
+def test_docker_image_readback_does_not_treat_manifest_absence_as_missing_target(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	reference = "ghcr.io/o/image@sha256:" + "a" * 64
+	detail = f"ERROR: {reference}: manifest unknown\n".encode()
+	calls = _controlled_exit_command(monkeypatch, detail=detail)
+	api = GitHubCLI("o/r", timeout_seconds=5, image_command=BoundedCommand(5))
+
+	with pytest.raises(PublicationError) as error:
+		api.image_digest(reference)
+	assert not isinstance(error.value, MissingResourceError)
+	assert calls[0] == [
+		"docker",
+		"buildx",
+		"imagetools",
+		"inspect",
+		reference,
+		"--raw",
+	]
 
 
 def test_release_api_reads_and_mutations_use_the_same_caller_command() -> None:
