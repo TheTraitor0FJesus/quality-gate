@@ -74,6 +74,15 @@ def _operation(command: Sequence[str]) -> str:
 			return f"gh api {method} {endpoint}"
 		return f"gh api {method} <endpoint>"
 	if command and command[0] == "docker":
+		docker_subcommands = tuple(command[1:])
+		if docker_subcommands[:2] in {
+			("buildx", "imagetools"),
+			("image", "inspect"),
+			("image", "tag"),
+		}:
+			return f"docker {docker_subcommands[0]} {docker_subcommands[1]}"
+		if docker_subcommands and docker_subcommands[0] in {"load", "pull", "push"}:
+			return f"docker {docker_subcommands[0]}"
 		return "docker command"
 	if command and command[0] == "git":
 		return "git command"
@@ -987,11 +996,14 @@ def _exact_missing_manifest_response(detail: bytes, target: str) -> bool:
 		text = text[:-1]
 	if "\r" in text or "\n" in text:
 		return False
+	if text.startswith("ERROR: "):
+		text = text.removeprefix("ERROR: ")
 	return text in {
-		f"ERROR: {target}: manifest unknown",
-		f"ERROR: {target}: manifest_unknown",
-		f"ERROR: {target}: no such manifest",
-		f"ERROR: no such manifest: {target}",
+		f"{target}: manifest unknown",
+		f"{target}: manifest_unknown",
+		f"{target}: no such manifest",
+		f"no such manifest: {target}",
+		f"{target}: not found",
 	}
 
 
