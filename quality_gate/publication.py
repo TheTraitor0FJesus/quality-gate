@@ -21,7 +21,7 @@ class PublicationError(ValueError):
 
 
 class MissingResourceError(PublicationError):
-	"""A bounded external operation positively reported HTTP 404."""
+	"""A bounded external operation positively identified an absent resource."""
 
 
 def image_repository(value: object) -> str:

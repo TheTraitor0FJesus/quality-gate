@@ -20,10 +20,16 @@ from time import monotonic
 from typing import BinaryIO, NoReturn, Protocol
 from urllib.parse import quote
 
-from .publication import MissingResourceError, PublicationError
+from .publication import (
+	MAX_VERSION_LENGTH,
+	VERSION,
+	MissingResourceError,
+	PublicationError,
+	image_repository,
+)
 from .publication_artifacts import MAX_BUNDLE_BYTES, json_record
 from .publication_evidence import positive, record
-from .publication_writer import image_repository, preflight_image_archive, push_image_archive
+from .publication_writer import preflight_image_archive, push_image_archive
 
 JSON_LIMIT = 16 * 1024 * 1024
 MAX_TIMEOUT_SECONDS = 300
@@ -463,6 +469,27 @@ class BoundedCommand:
 	def __call__(
 		self, arguments: Sequence[str], *, content: bytes | None = None, limit: int
 	) -> bytes:
+		return self._call(arguments, content=content, limit=limit)
+
+	def inspect_image_manifest(self, target: str, *, allow_missing: bool, limit: int) -> bytes:
+		"""Inspect one version tag, optionally identifying its exact absence at preflight."""
+		arguments = ["docker", "buildx", "imagetools", "inspect", target, "--raw"]
+		expected_missing_target = target if allow_missing else None
+		return self._call(
+			arguments,
+			content=None,
+			limit=limit,
+			expected_missing_target=expected_missing_target,
+		)
+
+	def _call(
+		self,
+		arguments: Sequence[str],
+		*,
+		content: bytes | None,
+		limit: int,
+		expected_missing_target: str | None = None,
+	) -> bytes:
 		deadline = self._begin_aggregate_budget()
 		with tempfile.TemporaryDirectory(prefix="publisher-") as directory:
 			command = list(arguments)
@@ -470,7 +497,7 @@ class BoundedCommand:
 				input_file = Path(directory) / "input"
 				input_file.write_bytes(content)
 				command.extend(["--input", str(input_file)])
-			return self._execute(command, limit, deadline)
+			return self._execute(command, limit, deadline, expected_missing_target)
 
 	def _begin_aggregate_budget(self) -> float | None:
 		if self.aggregate_timeout_seconds is None:
@@ -492,13 +519,28 @@ class BoundedCommand:
 			)
 		return min(self.timeout_seconds, remaining)
 
-	def _execute(self, command: list[str], limit: int, deadline: float | None) -> bytes:
+	def _execute(
+		self,
+		command: list[str],
+		limit: int,
+		deadline: float | None,
+		expected_missing_target: str | None,
+	) -> bytes:
 		operation = _operation(command)
+		if expected_missing_target is not None:
+			_validate_expected_missing_target(command, expected_missing_target)
 		environment = os.environ.copy()
 		environment.update(self.environment)
 		try:
 			self._remaining_timeout(operation, deadline)
-			return self._run_bounded(command, limit, deadline, operation, environment)
+			return self._run_bounded(
+				command,
+				limit,
+				deadline,
+				operation,
+				environment,
+				expected_missing_target,
+			)
 		except subprocess.TimeoutExpired as error:
 			try:
 				self._raise_timeout(operation, deadline)
@@ -514,6 +556,7 @@ class BoundedCommand:
 		deadline: float | None,
 		operation: str,
 		environment: dict[str, str],
+		expected_missing_target: str | None,
 	) -> bytes:
 		command_deadline = monotonic() + self._remaining_timeout(operation, deadline)
 		session: _CommandSession | None = None
@@ -533,7 +576,9 @@ class BoundedCommand:
 			raise
 		if session is None:
 			raise PublicationError(f"{operation}: command was not started")
-		return self._finish_command(session, threads, output, code, operation)
+		return self._finish_command(
+			session, threads, output, code, operation, command, expected_missing_target
+		)
 
 	@staticmethod
 	def _start_output_readers(
@@ -621,6 +666,8 @@ class BoundedCommand:
 		output: _CommandOutput,
 		code: int,
 		operation: str,
+		command: Sequence[str],
+		expected_missing_target: str | None,
 	) -> bytes:
 		cleanup_failure = self._cleanup_session(session, threads)
 		reader_failure = output.failure()
@@ -638,7 +685,9 @@ class BoundedCommand:
 		if bytes(output.stderr).startswith(WINDOWS_HELPER_UNAVAILABLE):
 			raise PublicationError(f"{operation}: command unavailable")
 		if code:
-			self._raise_command_error(bytes(output.stderr), operation, code)
+			self._raise_command_error(
+				bytes(output.stderr), operation, code, command, expected_missing_target
+			)
 		return bytes(output.stdout)
 
 	def _cleanup_after_failure(
@@ -873,9 +922,23 @@ class BoundedCommand:
 		return None
 
 	@staticmethod
-	def _raise_command_error(detail: bytes, operation: str, code: int) -> None:
+	def _raise_command_error(
+		detail: bytes,
+		operation: str,
+		code: int,
+		command: Sequence[str],
+		expected_missing_target: str | None,
+	) -> None:
 		status = _http_status(detail)
-		if status == "404":
+		is_docker = bool(command and command[0] == "docker")
+		if (
+			is_docker
+			and code == 1
+			and expected_missing_target is not None
+			and _exact_missing_manifest_response(detail, expected_missing_target)
+		):
+			raise MissingResourceError(f"{operation}: image target is absent")
+		if not is_docker and status == "404":
 			raise MissingResourceError(f"{operation}: resource is absent (HTTP 404)")
 		if status is None and GH_ESCAPE_SEQUENCE_ERROR in detail:
 			raise EscapeSequenceError(
@@ -892,6 +955,44 @@ class BoundedCommand:
 				f"{budget_seconds:g} seconds is exhausted"
 			)
 		raise PublicationError(f"{operation}: timed out after {self.timeout_seconds:g} seconds")
+
+
+def _validate_expected_missing_target(command: Sequence[str], target: str) -> None:
+	if command != ["docker", "buildx", "imagetools", "inspect", target, "--raw"]:
+		raise PublicationError("expected missing target is not an exact GHCR manifest inspection")
+	repository, separator, tag = target.rpartition(":")
+	try:
+		image_repository(repository)
+	except PublicationError as error:
+		raise PublicationError(
+			"expected missing target is not a version-tagged GHCR reference"
+		) from error
+	if (
+		not separator
+		or not tag.startswith("v")
+		or len(tag[1:]) > MAX_VERSION_LENGTH
+		or VERSION.fullmatch(tag[1:]) is None
+	):
+		raise PublicationError("expected missing target is not a version-tagged GHCR reference")
+
+
+def _exact_missing_manifest_response(detail: bytes, target: str) -> bool:
+	try:
+		text = detail.decode("ascii")
+	except UnicodeDecodeError:
+		return False
+	if text.endswith("\r\n"):
+		text = text[:-2]
+	elif text.endswith("\n"):
+		text = text[:-1]
+	if "\r" in text or "\n" in text:
+		return False
+	return text in {
+		f"ERROR: {target}: manifest unknown",
+		f"ERROR: {target}: manifest_unknown",
+		f"ERROR: {target}: no such manifest",
+		f"ERROR: no such manifest: {target}",
+	}
 
 
 class GitHubCLI:

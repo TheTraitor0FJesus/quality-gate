@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import sys
 import tarfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from threading import Thread
+from typing import BinaryIO
 
 import pytest
-
-from quality_gate import publication_writer
+from quality_gate import publication_github, publication_writer
 from quality_gate.publication import (
 	MAX_IMAGE_REPOSITORY_LENGTH,
 	MAX_IMAGE_TAGGED_REFERENCE_LENGTH,
@@ -17,6 +19,7 @@ from quality_gate.publication import (
 	PublicationError,
 	image_repository,
 )
+from quality_gate.publication_github import BoundedCommand
 from quality_gate.publication_writer import (
 	inspect_image_archive,
 	preflight_image_archive,
@@ -26,6 +29,7 @@ from quality_gate.publication_writer import (
 SOURCE = "a" * 40
 LAYER = b"layer-data"
 DIFF_ID = "sha256:" + hashlib.sha256(LAYER).hexdigest()
+TARGET = "ghcr.io/owner/project:v2.4.1"
 
 
 def _archive(
@@ -73,6 +77,254 @@ def _config_digest(content: bytes) -> tuple[str, tuple[str, ...]]:
 	return "sha256:" + hashlib.sha256(config_content).hexdigest(), tuple(
 		config["rootfs"]["diff_ids"]
 	)
+
+
+def _install_bounded_child(
+	monkeypatch: pytest.MonkeyPatch,
+	respond: Callable[[list[str]], tuple[bytes, bytes, int]],
+) -> list[list[str]]:
+	original_spawn = publication_github._spawn_bounded_command
+	calls: list[list[str]] = []
+
+	def spawn(command: list[str], environment: dict[str, str]) -> publication_github._CommandSession:
+		call = list(command)
+		calls.append(call)
+		stdout, stderr, exit_code = respond(call)
+		program = (
+			"import sys; "
+			f"sys.stdout.buffer.write({stdout!r}); "
+			f"sys.stderr.buffer.write({stderr!r}); "
+			f"sys.exit({exit_code})"
+		)
+		return original_spawn([sys.executable, "-B", "-c", program], environment)
+
+	monkeypatch.setattr(publication_github, "_spawn_bounded_command", spawn)
+	return calls
+
+
+@pytest.mark.parametrize(
+	("stderr", "exit_code", "sleep", "expected_absence"),
+	[
+		(b"ERROR: " + TARGET.encode() + b": manifest unknown\n", 1, False, True),
+		(b"ERROR: " + TARGET.encode() + b": manifest_unknown\n", 1, False, True),
+		(b"ERROR: " + TARGET.encode() + b": no such manifest\n", 1, False, True),
+		(b"ERROR: no such manifest: " + TARGET.encode() + b"\n", 1, False, True),
+		(b"ERROR: " + TARGET.encode() + b": not found\n", 1, False, False),
+		(b"ERROR: ghcr.io/other/project:v2.4.1: manifest unknown\n", 1, False, False),
+		(b"ERROR: ghcr.io/owner/project:v2.4.0: manifest unknown\n", 1, False, False),
+		(b"ERROR: blob sha256:" + b"a" * 64 + b": manifest unknown\n", 1, False, False),
+		(b"unauthorized: authentication required\n", 1, False, False),
+		(b"denied: requested access to the resource is denied\n", 1, False, False),
+		(b"lookup ghcr.io: no such host\n", 1, False, False),
+		(b"x509: certificate signed by unknown authority\n", 1, False, False),
+		(b"unexpected status code: 404\n", 1, False, False),
+		(b"429 Too Many Requests\n", 1, False, False),
+		(b"500 Internal Server Error\n", 1, False, False),
+		(
+			b"unexpected status from HEAD request to "
+			b"https://ghcr.io/v2/owner/project/manifests/v2.4.1: 404 Not Found\n",
+			1,
+			False,
+			False,
+		),
+		(b"ERROR: " + TARGET.encode() + b": manifest unknown\n", 143, False, False),
+		(b"ERROR: " + TARGET.encode() + b": manifest unknown\n" + b"x" * 5000, 1, False, False),
+		(b"ERROR: " + TARGET.encode() + b": manifest unknown\n", 1, True, False),
+	],
+)
+def test_bounded_preflight_classifies_only_exact_missing_manifest(
+	monkeypatch: pytest.MonkeyPatch,
+	stderr: bytes,
+	exit_code: int,
+	sleep: bool,
+	expected_absence: bool,
+) -> None:
+	"""Exercise the writer through BoundedCommand and a real controlled child process."""
+	original_spawn = publication_github._spawn_bounded_command
+	commands: list[list[str]] = []
+
+	def spawn(command: list[str], environment: dict[str, str]) -> publication_github._CommandSession:
+		commands.append(command)
+		program = (
+			"import sys, time; "
+			f"sys.stderr.buffer.write({stderr!r}); "
+			"sys.stderr.flush(); "
+			f"time.sleep(5) if {sleep!r} else None; "
+			f"sys.exit({exit_code})"
+		)
+		return original_spawn([sys.executable, "-B", "-c", program], environment)
+
+	monkeypatch.setattr(publication_github, "_spawn_bounded_command", spawn)
+	command = BoundedCommand(1 if sleep else 5)
+	call = ["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]
+
+	if expected_absence:
+		preflight_image_archive(_archive(), SOURCE, TARGET, command)
+		with pytest.raises(PublicationError) as error:
+			preflight_image_archive(
+				_archive(), SOURCE, TARGET, command, expected_digest="f" * 64
+			)
+		assert not isinstance(error.value, MissingResourceError)
+		assert TARGET not in str(error.value)
+		assert commands == [call, call]
+	else:
+		with pytest.raises(PublicationError) as error:
+			preflight_image_archive(_archive(), SOURCE, TARGET, command)
+		assert not isinstance(error.value, MissingResourceError)
+		assert TARGET not in str(error.value)
+		assert commands == [call]
+
+
+@pytest.mark.parametrize("transport_failure", ["reader", "cleanup"])
+def test_bounded_preflight_does_not_reclassify_transport_failures(
+	monkeypatch: pytest.MonkeyPatch,
+	transport_failure: str,
+) -> None:
+	original_spawn = publication_github._spawn_bounded_command
+	commands: list[list[str]] = []
+	missing_response = f"ERROR: {TARGET}: manifest unknown\n".encode()
+	program = (
+		"import sys; "
+		f"sys.stderr.buffer.write({missing_response!r}); "
+		"sys.stderr.flush(); sys.exit(1)"
+	)
+
+	def spawn(command: list[str], environment: dict[str, str]) -> publication_github._CommandSession:
+		commands.append(command)
+		return original_spawn([sys.executable, "-B", "-c", program], environment)
+
+	monkeypatch.setattr(publication_github, "_spawn_bounded_command", spawn)
+	if transport_failure == "reader":
+		capture_response = publication_github.BoundedCommand._capture_response
+
+		def fail_stderr_reader(
+			_stream: BinaryIO, _collected: bytearray, limit: int, _overflow_message: str
+		) -> None:
+			if limit == publication_github.MAX_COMMAND_STDERR_BYTES:
+				raise PublicationError("simulated bounded stderr reader failure")
+			capture_response(_stream, _collected, limit, _overflow_message)
+
+		monkeypatch.setattr(
+			publication_github.BoundedCommand,
+			"_capture_response",
+			staticmethod(fail_stderr_reader),
+		)
+	else:
+		cleanup = publication_github.BoundedCommand._cleanup_session
+
+		def fail_cleanup(
+			session: publication_github._CommandSession,
+			threads: list[Thread],
+		) -> str:
+			cleanup(session, threads)
+			return "simulated process-tree cleanup failure"
+
+		monkeypatch.setattr(
+			publication_github.BoundedCommand,
+			"_cleanup_session",
+			staticmethod(fail_cleanup),
+		)
+
+	with pytest.raises(PublicationError) as error:
+		preflight_image_archive(_archive(), SOURCE, TARGET, BoundedCommand(5))
+	assert not isinstance(error.value, MissingResourceError)
+	assert commands == [["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]]
+
+
+def test_bounded_preflight_does_not_classify_a_signaled_child(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	original_spawn = publication_github._spawn_bounded_command
+	commands: list[list[str]] = []
+	missing_response = f"ERROR: {TARGET}: manifest unknown\n".encode()
+	program = (
+		"import os, signal, sys; "
+		f"sys.stderr.buffer.write({missing_response!r}); "
+		"sys.stderr.flush(); os.kill(os.getpid(), signal.SIGTERM)"
+	)
+
+	def spawn(command: list[str], environment: dict[str, str]) -> publication_github._CommandSession:
+		commands.append(command)
+		return original_spawn([sys.executable, "-B", "-c", program], environment)
+
+	monkeypatch.setattr(publication_github, "_spawn_bounded_command", spawn)
+	with pytest.raises(PublicationError) as error:
+		preflight_image_archive(_archive(), SOURCE, TARGET, BoundedCommand(5))
+	assert not isinstance(error.value, MissingResourceError)
+	assert commands == [["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]]
+
+
+@pytest.mark.parametrize("failure_stage", ["local inspection", "push", "readback"])
+def test_missing_manifest_text_is_accepted_only_at_the_remote_preflight(
+	monkeypatch: pytest.MonkeyPatch,
+	failure_stage: str,
+) -> None:
+	config_digest, layers = _config_digest(_archive())
+	image_identity = json.dumps({"Id": config_digest, "RootFS": {"Layers": list(layers)}}).encode()
+	missing = f"ERROR: {TARGET}: manifest unknown\n".encode()
+
+	def respond(call: list[str]) -> tuple[bytes, bytes, int]:
+		if call[:2] == ["docker", "load"]:
+			return b"loaded", b"", 0
+		if call[:4] == ["docker", "image", "inspect", "--format"]:
+			if call[4] == "{{json .}}":
+				return image_identity, b"", 0
+			if call[-1] == TARGET and failure_stage == "local inspection":
+				return b"", missing, 1
+			return (SOURCE + "\n").encode(), b"", 0
+		if call == ["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]:
+			return b"", missing, 1
+		if call[:3] == ["docker", "image", "tag"]:
+			return b"", b"", 0
+		if call[:2] == ["docker", "push"] and failure_stage == "push":
+			return b"", missing, 1
+		return b"", b"", 0
+
+	calls = _install_bounded_child(monkeypatch, respond)
+	with pytest.raises(PublicationError) as error:
+		push_image_archive(_archive(), SOURCE, TARGET, BoundedCommand(5))
+	assert not isinstance(error.value, MissingResourceError)
+	assert calls[0][:3] == ["docker", "load", "--input"]
+	assert len(calls[0]) == 4
+	assert calls[0][3].endswith("image.tar")
+	assert calls[3] == ["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]
+	assert calls[-1][0] == "docker"
+	if failure_stage == "local inspection":
+		assert calls[-1][:3] == ["docker", "image", "inspect"]
+		assert not any(call[:2] == ["docker", "push"] for call in calls)
+	elif failure_stage == "push":
+		assert calls[-1] == ["docker", "push", TARGET]
+		assert sum(call[:2] == ["docker", "push"] for call in calls) == 1
+	else:
+		assert calls[-1] == ["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]
+		assert sum(call[:2] == ["docker", "push"] for call in calls) == 1
+
+
+def test_pull_failure_cannot_be_classified_as_missing_manifest(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	config_digest, _layers = _config_digest(_archive())
+	manifest = _registry_manifest(config_digest)
+	digest = hashlib.sha256(manifest).hexdigest()
+	missing = f"ERROR: {TARGET}: manifest unknown\n".encode()
+
+	def respond(call: list[str]) -> tuple[bytes, bytes, int]:
+		if call == ["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]:
+			return manifest, b"", 0
+		if call == ["docker", "pull", TARGET]:
+			return b"", missing, 1
+		return b"", b"", 0
+
+	calls = _install_bounded_child(monkeypatch, respond)
+	with pytest.raises(PublicationError) as error:
+		preflight_image_archive(
+			_archive(), SOURCE, TARGET, BoundedCommand(5), expected_digest=digest
+		)
+	assert not isinstance(error.value, MissingResourceError)
+	assert calls == [
+		["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"],
+		["docker", "pull", TARGET],
+	]
 
 
 def _registry_manifest(config_digest: str) -> bytes:

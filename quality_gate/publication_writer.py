@@ -218,10 +218,18 @@ def _existing_image_digest(
 	expected_digest: str | None,
 ) -> str | None:
 	try:
-		manifest = command(
-			["docker", "buildx", "imagetools", "inspect", target, "--raw"],
-			limit=16 * 1024 * 1024,
-		)
+		inspect_manifest = getattr(command, "inspect_image_manifest", None)
+		if callable(inspect_manifest):
+			manifest = inspect_manifest(
+				target,
+				allow_missing=expected_digest is None,
+				limit=16 * 1024 * 1024,
+			)
+		else:
+			manifest = command(
+				["docker", "buildx", "imagetools", "inspect", target, "--raw"],
+				limit=16 * 1024 * 1024,
+			)
 	except MissingResourceError as error:
 		if expected_digest is not None:
 			raise PublicationError(

@@ -108,6 +108,14 @@ contents are limited to 512 MiB. The image-writer and release-publisher jobs eac
 job timeout. That job limit includes setup before the first image command, so the 25-minute phase
 budget is not a reservation from CLI start and leaves no guaranteed five-minute setup window.
 
+Before a new version-tag push, the bounded writer may treat only a complete exit-1 response that
+names the exact validated GHCR `vMAJOR.MINOR.PATCH` target and explicitly says its manifest is
+unknown or absent as an expected missing tag, and only when no retained digest is expected. A
+generic Docker HTTP 404 or `not found` response is fatal; the exception does not apply to a digest
+reference, another repository or tag, a blob/config request, local image inspection, pull, push, or
+post-push readback. Ordinary GitHub API 404 handling remains unchanged. Truncated output, command
+timeouts, process signals, and reader or cleanup failures are fatal before this classification runs.
+
 Administration access and native Immutable Releases are not required. The publisher job installs no
 dependencies and starts no product code.
 
