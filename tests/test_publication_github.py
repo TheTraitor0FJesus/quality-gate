@@ -759,6 +759,36 @@ def test_gh_operation_removes_query_and_untrusted_endpoint_text() -> None:
 	)
 
 
+@pytest.mark.parametrize(
+	("command", "expected"),
+	[
+		(
+			["docker", "buildx", "imagetools", "inspect", "ghcr.io/owner/image:v1.2.3", "--raw"],
+			"docker buildx imagetools",
+		),
+		(
+			["docker", "image", "inspect", "--format", "{{json .}}", "private-reference"],
+			"docker image inspect",
+		),
+		(
+			["docker", "image", "tag", "private-source", "private-target"],
+			"docker image tag",
+		),
+		(["docker", "load", "--input", "private-path"], "docker load"),
+		(["docker", "push", "private-target"], "docker push"),
+		(["docker", "unexpected", "--token=secret"], "docker command"),
+	],
+)
+def test_docker_operation_uses_only_an_allowlisted_subcommand(
+	command: list[str], expected: str
+) -> None:
+	operation = _operation(command)
+
+	assert operation == expected
+	assert "private" not in operation
+	assert "secret" not in operation
+
+
 def test_builtin_token_uses_isolated_config_and_restores_existing_docker_config(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
