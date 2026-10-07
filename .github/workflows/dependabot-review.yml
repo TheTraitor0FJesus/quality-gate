@@ -1,0 +1,41 @@
+name: Dependabot review
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  request-review:
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.user.type == 'Bot' &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Request review from the repository owner
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEWER: ${{ github.repository_owner }}
+        run: |
+          reviewers=$(gh pr view "$PR_NUMBER" --repo "$GH_REPO" \
+            --json reviewRequests,reviews \
+            --jq '[.reviewRequests[].login, .reviews[].author.login] | unique | .[]')
+          if grep -Fx "$REVIEWER" <<< "$reviewers" >/dev/null; then
+            exit 0
+          fi
+          gh api --method POST "repos/$GH_REPO/pulls/$PR_NUMBER/requested_reviewers" \
+            -f "reviewers[]=$REVIEWER" --silent

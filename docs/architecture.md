@@ -16,6 +16,15 @@ Use this map before non-trivial codebase questions, design work, or code changes
 
 ## Flows
 
+- **Dependabot owner review** — `.github/workflows/dependabot-review.yml` handles non-draft
+  Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
+  `pull-requests: write`, requests the repository owner's review, and skips duplicate requests
+  when the owner is already requested or has reviewed. It checks out and executes no PR code.
+  `.github/dependabot.yml` assigns issues separately; provider calls here use same-repository
+  references, so external-provider update grouping is unnecessary.
+  [The v2.4.2 acceptance audit](audits/provider-v2.4.2-acceptance.md) records the immutable
+  provider handoff, activation reruns and remaining consumer/live-event acceptance.
+
 - **Local and CI checking** — `quality-gate check` → `quality_gate/temp_workspace.py` → `quality_gate/snapshot.py` → `quality_gate/runner.py` → validated manifest → structured verdict → Git hygiene, Gitleaks, workflow/documentation checks, staged web asset budgets, standalone Biome lint and formatting, Ruff, mypy, deptry dependency hygiene, pytest, and report-only coverage when pinned. `.github/workflows/quality.yml` verifies and installs the release wheel, syncs the manifest release, prepares declared Python versions, and passes pull-request base/head SHAs; `quality_gate/ci_parity.py` invokes that installed console entry point against one release-backed fixture and emits the comparison surface; `quality-gate audit` adds full reachable-history secret scanning and complete lessons.
 - **Release and runtime preparation** — `quality-gate sync` → verified immutable release cache → `quality-gate setup` → repository-keyed runtime fingerprint → isolated Python environment; `quality-gate doctor` reports missing prerequisites as unchecked.
 - **Project bootstrap** — `$setup-repo` → `quality-gate.toml` and a CI caller → reusable `quality.yml`.
