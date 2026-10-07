@@ -80,6 +80,7 @@ writing code; use the sections below as reference for every affected contract.
 
 ## Security and delivery
 
+- Keep secrets and recoverable credentials out of logs and external responses.
 - For served HTML, apply a Content Security Policy that allows only the resource origins and capabilities required by the deployment. Pin external scripts with integrity metadata or self-host them.
 - Record any CSP exception in architecture documentation. Turn documented security invariants into a runtime check or test; add malformed-input negative tests for authentication guards.
 - Pin third-party CI actions to full commit SHAs, set least-privilege job permissions, and isolate secret-bearing or write-capable jobs from unpinned dependency installation.
@@ -87,9 +88,21 @@ writing code; use the sections below as reference for every affected contract.
 - For systemd services, apply `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, and an explicit `CapabilityBoundingSet=` where the service contract permits them; document required exceptions.
 - When a change requires a human action outside version control, report a concrete action list in the completion message.
 
+## Test selection
+
+Cover new logic, fixed defects, and documented fragile invariants with behavioral tests. Prefer strengthening an existing test when it can distinguish the regression; add a test when an independently meaningful outcome would otherwise lack protection. Apply these rules before writing tests and during review.
+
+Do not write tests that:
+
+- Exercise code only for coverage, with no check that catches a plausible defect.
+- Compare a value with itself or derive the expected answer from the tested code or a copy of its algorithm; use an independent contract.
+- Merely confirm a result supplied by a mock or fixture, without testing a real production decision or effect.
+- Pass without reaching the claimed behavior, or reject input for a reason other than the one being tested.
+- Freeze source text, private call shapes, or copied lists without an independent contract requiring those details.
+- Repeat existing protection without a distinct failure mode, faster feedback, clearer diagnosis, or useful edge-case specification.
+
 ## Verification and maintenance
 
-- Cover new logic, fixed defects, and documented fragile invariants with behavioral tests. Prefer strengthening an existing test when it can distinguish the regression; add a test when an independently meaningful outcome would otherwise lack protection. Derive expected results from the contract or an independent invariant, not by repeating the implementation.
 - Leave at least one runnable behavioral check for every non-trivial logic change. Use the existing test infrastructure; where none exists, use an assert-based self-check instead of adding a framework or fixtures solely for that check. Cover every distinct outcome required below. A trivial one-line change needs no new test when it adds no logic, fixes no defect, and affects no invariant or boundary requiring protection.
 - Before test cleanup changes production behavior, map affected tests to their contract, production branch, observable outcome, independent expected result, and failure domain. Retain the strongest evidence for each distinct outcome, preferably at a public seam. Preserve separate success, rejection, security, concurrency, persistence, protocol, resource, numerical, and supported compatibility semantics. Remove redundant tests and their exclusive fixtures and helpers; removing production behavior requires separate evidence.
 - Before removing a production/test cluster, resolve its purpose against explicit current requirements, real callers, public contracts, specifications, history, or boundary invariants. Trace runtime reachability from a non-test producer; test-injected configuration alone is insufficient. Preserve the cluster while evidence is unresolved. Remove code and tests that only justify each other once the absence of an independent purpose is established. A test can itself specify public behavior; change that behavior only with positive evidence that its contract has changed or ended. Explicit current requirements take precedence over conflicting historical tests.
@@ -103,6 +116,7 @@ writing code; use the sections below as reference for every affected contract.
 - Measure the focused scope and full suite in the same environment before and after a test optimization. Record wall time, slowest operations, and percentage change; require explicit ticket justification for a full-suite regression over 10% or 10 seconds.
 - Run the complete project verification suite before committing. Every skipped or expected-failure test states its reason.
 - Keep documentation current when behavior, interfaces, architecture, configuration, or feature specifications change.
+- When a shared contract changes, update the affected sibling-project documentation in the same change. If a required sibling repository is unreachable, report the blocker before proceeding.
 - When removing a feature, remove its orphaned dependencies, configuration, files, and selectors in the same change.
 - Finish only when every applicable rule above is satisfied, required checks have returned, and each claimed outcome has supporting evidence. Report a failed or unavailable check with its affected contract and next action; an unavailable check does not establish completion.
 
