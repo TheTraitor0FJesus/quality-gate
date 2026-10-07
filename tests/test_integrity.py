@@ -10,7 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from quality_gate import integrity, runner
 from quality_gate.cli import main
 from quality_gate.contracts import Manifest, load_manifest
@@ -786,12 +785,12 @@ def test_provider_only_workflow_exception_does_not_inherit_parent_repository_ori
 	assert not integrity._is_quality_gate_origin(nested_temp)
 
 
-def test_provider_self_policy_v23_uses_only_the_parity_waiver() -> None:
+def test_provider_self_policy_v242_uses_only_the_parity_waiver() -> None:
 	manifest = load_manifest(Path(__file__).resolve().parents[1])
 	waivers = [waiver for waiver in manifest.waivers if waiver.check_id == "repository.workflow"]
 	parity_target = ".github/workflows/parity.yml"
 
-	assert manifest.policy_release == "v2.3.0"
+	assert manifest.policy_release == "v2.4.2"
 	assert {waiver.target for waiver in waivers} == {parity_target}
 	assert len(manifest.waivers) == 1
 	parity_waivers = [waiver for waiver in waivers if waiver.target == parity_target]
