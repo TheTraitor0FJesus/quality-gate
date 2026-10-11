@@ -1,122 +1,259 @@
 # Quality Gate
 
-Quality Gate applies the same versioned quality contract to the staged Git candidate and to GitHub Actions.
+Quality Gate проверяет изменения перед коммитом и в GitHub Actions по одному набору
+правил. Версия правил закрепляется в каждом подключённом репозитории: обновление
+инструмента не меняет его требования автоматически.
 
-## Requirements
+Инструмент проверяет состояние Git, секреты, документацию и workflows. Для Python
+добавляет линтинг, форматирование, проверку типов, зависимостей и тесты; для JavaScript
+и CSS — линтинг, форматирование и ограничения размера файлов.
 
-- Git.
-- Python 3.11 or newer for the launcher.
-- The `quality-gate` launcher and native Git hooks installed on the workstation.
-- Access to the immutable release asset selected for the repository. Network access is needed only for the first synchronization.
+## Подключить репозиторий
 
-## Configure a repository
+### Что понадобится
 
-1. Copy [templates/quality-gate.toml](templates/quality-gate.toml) to `quality-gate.toml` in the repository root.
-2. Set the repository name, required documents, limits, timeouts, and immutable `quality.policy_release`.
-3. Add one `[[python]]` table for each Python component. Omit these tables when the repository has no Python code.
+- Git и Python 3.11 или новее для запуска Quality Gate.
+- Установленная команда `quality-gate` и настроенные Git-хуки `pre-commit` и `pre-push`
+  на рабочей машине. Приведённые ниже шаги предполагают, что они уже доступны.
+- Для Python-компонентов — установленные версии Python, указанные в их настройках.
+- ZIP-архив неизменяемого релиза для вашей платформы или URL его загрузки.
+  Загрузка релиза требует сети; подготовка Python-окружений также может потребовать
+  доступа к источникам зависимостей проекта.
 
-   ```toml
-   [[python]]
-   name = "application"
-   path = "src"
-   python_version = "3.11"
-   dependency_inputs = ["pyproject.toml"]
-   test_paths = ["tests"]
-   tests_applicable = true
-   timeout_seconds = 300
-   ```
+### Первоначальная настройка
 
-4. Add one `[[web]]` table for each project-owned JavaScript/CSS boundary. Patterns and explicit exclusions are relative to the component root.
+Выполняйте команды из корня репозитория, который подключаете к Quality Gate.
 
-   ```toml
-   [[web]]
-   name = "frontend"
-   root = "static"
-   javascript = ["js/**/*.js"]
-   css = ["css/**/*.css"]
-   exclude = ["vendor/**", "generated/**"]
-   ```
+1. Скопируйте [шаблон манифеста](templates/quality-gate.toml) в `quality-gate.toml`
+   в корне подключаемого репозитория.
 
-   Optional `[web.limits]` values are expressed in KiB. Defaults are 100 per JavaScript file, 50 per CSS file, 250 total JavaScript, and 100 total CSS.
+2. Укажите имя репозитория, обязательные документы, лимиты и таймауты.
+   В `quality.policy_release` закрепите точную версию релиза в формате
+   `vMAJOR.MINOR.PATCH`. Настройте компоненты по примерам в разделе
+   [«Настроить проверки»](#настроить-проверки).
 
-5. Optionally add `[[supplemental_tests]]` declarations for repository-owned functional tests. The only supported runner is `node-test`, and each declaration must list one or more matching repository-relative targets. Quality Gate validates these entries but leaves their execution to the typed test-runner and repository CI; see [the agent reference](docs/agent-reference.md) for the manifest contract.
-6. Copy [templates/quality.yml](templates/quality.yml) to `.github/workflows/quality.yml` and replace `<40-character-commit-sha>` with the exact commit SHA of the reusable workflow.
-7. Copy [templates/dependabot.yml](templates/dependabot.yml) to `.github/dependabot.yml`.
-8. Synchronize the release named by `quality.policy_release`, prepare its isolated runtimes, and verify the repository.
+3. Добавьте `/temp/` в `.gitignore`. Quality Gate использует этот каталог для
+   временных файлов проверки и удаляет каталог своего запуска после завершения.
+
+4. Скопируйте [шаблон workflow](templates/quality.yml) в
+   `.github/workflows/quality.yml`. Замените `<40-character-commit-sha>` полным
+   SHA коммита с совместимым переиспользуемым workflow. Возьмите SHA из проверенного
+   тега релиза или записи о его публикации.
+
+5. Скопируйте [шаблон Dependabot](templates/dependabot.yml) в
+   `.github/dependabot.yml` для обновления зависимостей GitHub Actions.
+
+6. Загрузите закреплённый релиз и подготовьте окружения. В примере для PowerShell
+   замените оба значения на URL ZIP-архива для вашей платформы и версию из
+   `quality.policy_release`:
 
    ```powershell
-   quality-gate sync --url "<release-asset-url>" --version <release>
+   $ReleaseUrl = "<URL ZIP-архива релиза>"
+   $ReleaseVersion = "<vMAJOR.MINOR.PATCH>"
+   quality-gate sync --url $ReleaseUrl --version $ReleaseVersion
    quality-gate validate
    quality-gate setup
    quality-gate doctor
+   ```
+
+   Если архив уже скачан, вместо команды с `--url` используйте локальный путь:
+
+   ```powershell
+   quality-gate sync --source "<путь к ZIP-архиву релиза>" --version $ReleaseVersion
+   ```
+
+   Продолжайте после успешного завершения каждой команды. Сообщения `setup: ready`
+   и `doctor: ready` подтверждают готовность выбранного релиза и окружений.
+
+7. Добавьте конфигурацию и остальные проверяемые изменения в индекс, затем
+   выполните первоначальный аудит:
+
+   ```powershell
+   git add -- quality-gate.toml .github/workflows/quality.yml .github/dependabot.yml .gitignore
+   git add -- <остальные проверяемые файлы>
    quality-gate audit
    ```
 
-`quality-gate audit` performs the initial full-history security scan. Normal work uses `quality-gate check`:
+   `audit` выполняет обычные проверки, ищет секреты во всей достижимой истории Git
+   и требует завершённых записей об устранённых дефектах. Подключение проверено,
+   когда аудит завершается с кодом `0`.
+
+Версия `quality.policy_release` выбирает локальный пакет, правила и инструменты.
+SHA в workflow выбирает реализацию CI. При обновлении нужно согласованно менять
+оба значения; порядок описан в [руководстве по обновлению потребителя](docs/agent-reference.md#consumer-release-update).
+
+## Работать с изменениями
+
+Перед коммитом добавьте нужные файлы в индекс Git и запустите проверку:
 
 ```powershell
-git add <files>
+git add -- <изменённые файлы>
 quality-gate check
 git commit
 ```
 
-The manual check is the first line of defense. The commit hook repeats the check against the exact staged candidate. GitHub Actions runs the same contract again in CI.
+`check` проверяет содержимое индекса Git — будущего коммита. Правки, которые ещё
+не добавлены через `git add`, в эту проверку не входят. Если после проверки вы
+изменили файлы, добавьте их в индекс и запустите проверку заново.
 
-## Checks
+Ручной запуск помогает исправить ошибки до коммита. Хук `pre-commit` повторяет
+проверку точного содержимого индекса, а GitHub Actions проверяет тот же контракт
+в CI. Изменение индекса во время проверки блокирует её результат.
 
-### Repository and Git candidate
+### Читать результат и исправлять ошибки
 
-- The manifest uses schema 2 and contains valid repository, Python, and web component declarations.
-- Declared component paths, test paths, dependency inputs, limits, and timeouts are valid.
-- The staged candidate has no unresolved index merge entries or intent-to-add entries.
-- The Git index does not change while the check is running.
-- Text files contain no unresolved merge-conflict markers.
-- Tracked files contain no caches, temporary files, editor backups, or other known repository junk.
-- Git blobs do not exceed `repository.limits.max_blob_size_mib`, which defaults to 5 MiB.
-- Tracked paths do not collide on case-insensitive file systems.
-- Symbolic links do not use absolute targets or resolve outside the repository.
+| Статус | Что означает | Следующее действие |
+| --- | --- | --- |
+| `passed` | Проверка пройдена | Продолжить работу |
+| `failed` | Найдено нарушение | Исправить причину, добавить правки в индекс и повторить проверку |
+| `unchecked` | Проверка не выполнена: недоступен релиз, инструмент, окружение или другой необходимый ресурс | Восстановить ресурс по инструкции из отчёта и повторить проверку |
+| `not_applicable` | Проверка неприменима к этой конфигурации | Проверить, что состав компонентов указан верно |
+| `waived` | К конкретному замечанию применено оформленное исключение | Соблюдать условия и срок действия исключения |
 
-### Security and GitHub Actions
+Код завершения `0` означает отсутствие блокирующих результатов, `1` — нарушение,
+`2` — невозможность завершить проверку. `unchecked` блокирует успешный итог.
 
-- Gitleaks scans the staged candidate for passwords, tokens, keys, and other secrets.
-- `audit` scans all reachable Git history; CI scans the verified base-to-head range.
-- Secret values are redacted from normal and verbose output.
-- Every external action and reusable workflow is pinned to a full 40-character commit SHA.
-- Workflows declare explicit top-level permissions and do not grant broader-than-read access without an isolated deployment case.
-- Write-capable jobs are not reachable from pull requests and use only permitted deployment scopes.
-- Non-reusable jobs have a positive `timeout-minutes` value.
-- Workflows declare explicit concurrency cancellation; pull-request workflows cancel superseded runs.
-- Exactly one stable `Quality Gate` job runs for pull requests and default-branch pushes.
+Для диагностики используйте:
 
-### Documentation
+```powershell
+quality-gate validate
+quality-gate doctor
+quality-gate check --verbose
+quality-gate version
+```
 
-- Every document listed in `repository.required_documents` exists, is a readable file, and is not empty.
-- Markdown files are readable UTF-8, and their relative links resolve inside the repository.
-- Every Python component path declared in the manifest appears in Markdown documentation.
+`validate` проверяет манифест, `doctor` — выбранный релиз и Python-окружения,
+`--verbose` раскрывает подробности замечаний, а `version` показывает версию
+исполняемого Quality Gate. Значения найденных секретов скрываются и в обычном,
+и в подробном выводе.
 
-Quality Gate checks only these objective documentation properties. It does not grade writing style, visual design, badges, or the subjective completeness of a document.
+Для форматирования Python укажите конкретные пути, затем добавьте результат
+в индекс и повторите проверку:
 
-### Python components
+```powershell
+quality-gate format <путь к Python-файлу или каталогу>
+git add -- <отформатированные файлы>
+quality-gate check
+```
 
-- Ruff checks each declared component for lint violations using the policy release configuration.
-- Ruff checks formatting without changing files.
-- mypy checks types in every declared component.
-- deptry compares imports with declared runtime and development dependencies for components that declare dependency inputs.
-- pytest runs the declared test paths sequentially and treats collection errors, failures, and timeouts as blocking results.
-- Coverage is report-only and never blocks the verdict. It runs only when the selected policy release includes a pinned coverage provider.
-- Each component runs with its declared Python version in an isolated, fingerprinted runtime built from its dependency inputs and pinned policy tools.
+## Настроить проверки
 
-### Web components
+[Шаблон `quality-gate.toml`](templates/quality-gate.toml) задаёт структуру манифеста
+схемы 2. В `repository.domains` всегда включайте `repository`; добавляйте `python`
+и `web` только при наличии соответствующих компонентов. После изменения манифеста
+запускайте `quality-gate validate`.
 
-- Each component declares a bounded root and JavaScript and/or CSS asset patterns.
-- Generated and vendor assets remain in scope unless an explicit component exclusion matches them.
-- Staged file bytes are checked against per-file and component-total budgets.
-- The pinned standalone Biome binary lints and checks formatting for every declared asset without Node.js.
-- Biome uses only stable JavaScript and CSS rules; nursery, experimental, SCSS, and embedded-language checks are excluded.
-- Findings use repository-relative forward-slash paths on every supported platform.
+### Python
 
-### Escaped-defect lessons
+Добавьте одну таблицу `[[python]]` на каждый Python-компонент. Если Python-кода
+нет, эти таблицы не нужны. Для проекта с исходниками в `src/`, тестами в `tests/`
+и зависимостями в `pyproject.toml` настройка выглядит так:
 
-- Lesson files must use the defined Markdown front matter, contain every required field, have unique IDs, and stay within the file and collection limits.
-- Normal checks keep incomplete lessons visible without blocking the verdict.
-- `audit` and release validation require every recorded lesson to contain both a policy adaptation and verification evidence.
+```toml
+# Поле в существующей таблице [repository]
+domains = ["repository", "python"]
+
+[[python]]
+name = "application"
+path = "src"
+python_version = "3.11"
+dependency_inputs = ["pyproject.toml"]
+test_paths = ["tests"]
+tests_applicable = true
+timeout_seconds = 300
+```
+
+Пути задаются относительно корня репозитория. Для компонента без тестов укажите
+`tests_applicable = false`, пустой `test_paths` и непустое объяснение в `tests_reason`.
+Каждый компонент проверяется в отдельном окружении с указанной версией Python;
+окружение зависит от релиза правил и входных файлов зависимостей.
+
+### JavaScript и CSS
+
+Добавьте одну таблицу `[[web]]` на каждую границу файлов проекта. Включите `web`
+в `repository.domains`; если есть и Python-компоненты, используйте
+`["repository", "python", "web"]`.
+
+Пример объявления web-компонента есть в [шаблоне манифеста](templates/quality-gate.toml).
+
+`root` задаётся относительно корня репозитория, шаблоны файлов и исключений —
+относительно `root`. Сгенерированные файлы и сторонние библиотеки проверяются,
+пока не исключены явно.
+
+Необязательная таблица `[web.limits]` задаёт лимиты в KiB. По умолчанию:
+
+| Лимит | Ключ | Значение |
+| --- | --- | ---: |
+| Один JavaScript-файл | `javascript_file_kib` | 100 |
+| Один CSS-файл | `css_file_kib` | 50 |
+| Все JavaScript-файлы компонента | `javascript_total_kib` | 250 |
+| Все CSS-файлы компонента | `css_total_kib` | 100 |
+
+### Дополнительные тесты
+
+Дополнительные функциональные тесты объявляются через `[[supplemental_tests]]`
+с runner `node-test`. Quality Gate проверяет объявления, но не запускает эти тесты:
+за выполнение отвечают типизированный `test-runner` и CI репозитория. Синтаксис,
+ограничения и порядок выполнения описаны в [контракте манифеста](docs/agent-reference.md#manifest-maintenance).
+
+## Что проверяется
+
+| Область | Проверки |
+| --- | --- |
+| Манифест | Схема 2, состав компонентов, пути, входные файлы зависимостей, пути тестов, лимиты и таймауты |
+| Индекс Git | Отсутствие неразрешённых конфликтов и записей `intent-to-add`; неизменность индекса во время проверки |
+| Файлы | Маркеры конфликтов, кэши, временные файлы и резервные копии редакторов; совпадения путей без учёта регистра; небезопасные символические ссылки |
+| Размер Git-файлов | Лимит `repository.limits.max_blob_size_mib`, по умолчанию 5 MiB |
+| Секреты | Gitleaks проверяет будущий коммит; `audit` — всю достижимую историю; CI — проверенный диапазон от базового до конечного коммита |
+| GitHub Actions | Полные SHA внешних actions и workflows, явные права доступа, таймауты и правила отмены параллельных запусков; один стабильный статус `Quality Gate` для pull request и push в основную ветку |
+| Документация | Наличие непустых читаемых обязательных документов, UTF-8 в Markdown, относительные ссылки внутри репозитория и упоминание путей Python-компонентов |
+| Python | Ruff: линтинг и проверка форматирования; mypy: типы; deptry: соответствие импортов зависимостям при наличии их деклараций; pytest: последовательный запуск объявленных тестов |
+| JavaScript и CSS | Размер файлов из индекса и суммарные бюджеты компонентов; Biome: линтинг и проверка форматирования |
+| Записи о дефектах | Структура Markdown с метаданными, обязательные поля, уникальные ID, лимиты файлов и всей коллекции |
+
+Для workflows обычные права ограничены чтением. Расширенные права допускаются
+только в предусмотренных изолированных сценариях; задания с правами записи
+проверяются на допустимые разрешения и недоступность из pull request. Обычным
+заданиям нужен положительный `timeout-minutes`, а workflows для pull request
+должны отменять устаревшие запуски.
+
+Символические ссылки с абсолютной целью или выходом за пределы репозитория
+блокируются. Ошибки сбора тестов, падения и таймауты pytest также блокируют итог.
+
+Версии инструментов и их общие настройки закреплены в релизе правил. Biome
+использует отдельный исполняемый файл и не требует Node.js для проверки JavaScript
+и CSS. В его область входят стабильные правила JavaScript и CSS; экспериментальные
+правила, nursery, SCSS и встроенные языки исключены. Пути в замечаниях записываются
+относительно репозитория с разделителем `/` на всех поддерживаемых платформах.
+
+Покрытие тестами выводится только как отчёт и не влияет на итог. Оно собирается,
+если выбранный релиз содержит закреплённый инструмент coverage.
+
+Проверка документации оценивает перечисленные технические свойства. Стиль текста,
+визуальное оформление, бейджи и содержательную полноту она не оценивает.
+
+Незавершённые записи о дефектах видны при обычной проверке и сами по себе не
+блокируют её. Для `audit` и валидации релиза каждая запись должна содержать изменение
+правил и подтверждение его проверки. Формат описан в [документации уроков](docs/lessons.md).
+
+## Обслуживать подключение
+
+[Порядок обновления и отката](docs/agent-reference.md#consumer-release-update)
+включает подготовку окружений и проверку кандидата перед коммитом. Команда
+`quality-gate sync --rollback` меняет состояние кэша, но не заменяет версию
+в манифесте и SHA workflow.
+
+Если репозиторий использует схему 1, команда `quality-gate migrate` выводит
+предложение для схемы 2 без изменения файлов. Проверьте предложение и примените
+его по [порядку миграции](docs/agent-reference.md#migration-audit-and-lessons).
+
+## Документация проекта
+
+| Документ | Когда использовать |
+| --- | --- |
+| [Справочник по эксплуатации](docs/agent-reference.md) | Настройка манифеста, диагностика, обновление, откат, миграция и исключения |
+| [Карта архитектуры](docs/architecture.md) | Разобраться в реализации и найти нужный модуль |
+| [Изменение общих правил](docs/quality-policy-changes.md) | Доработать проверки Quality Gate |
+| [Формат уроков](docs/lessons.md) | Записать дефект, который прошёл проверки, и подтвердить исправление правил |
+| [Процедура выпуска](docs/release.md) | Проверить и выпустить новый релиз Quality Gate |
+| [Интерфейс публикации](docs/publication.md) | Подключить общую публикацию или восстановить незавершённый выпуск |
