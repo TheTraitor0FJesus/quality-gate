@@ -6,10 +6,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+
 import quality_gate.distribution as distribution
 from quality_gate.distribution import DistributionError, verify_release
 from quality_gate.release_contract import (
+	UNIFIED_RELEASE,
 	UNIFIED_RELEASE_DEPENDENCIES,
+	UNIFIED_RELEASE_PACKAGE_VERSION,
 	UNIFIED_RELEASE_POLICY_FILES,
 	UNIFIED_RELEASE_TOOLS,
 	ReleaseInventoryError,
@@ -107,6 +110,17 @@ def test_previous_unified_release_inventory_remains_supported(platform: str) -> 
 		_tools(platform),
 		platform=platform,
 		actual_paths=_actual_paths(platform, "2.0.5"),
+	)
+
+
+@pytest.mark.parametrize("platform", ["linux", "windows"])
+def test_current_unified_release_inventory_is_exact_for_each_platform(platform: str) -> None:
+	validate_release_inventory(
+		UNIFIED_RELEASE,
+		_files(UNIFIED_RELEASE_PACKAGE_VERSION),
+		_tools(platform),
+		platform=platform,
+		actual_paths=_actual_paths(platform, UNIFIED_RELEASE_PACKAGE_VERSION),
 	)
 
 

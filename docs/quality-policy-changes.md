@@ -17,13 +17,20 @@ This repository is the source of truth for shared Python quality checks.
 - `quality-gate.toml` in each consumer repository is the schema 2 contract: repository obligations,
   component metadata, limits, defaults, policy release identity, and typed waivers.
 
-Workflow permission checks allow the `pull-requests: write` permission for the exact
-`.github/workflows/dependabot-review.yml` metadata-review template only. Changes to its trigger,
-bot guard, permissions, environment, command, or steps require a separately reviewed policy change.
-Publish the policy exception before enabling this workflow, including in the provider repository.
+Workflow permission checks allow `pull-requests: write` only for the exact approved
+`.github/workflows/dependabot-review.yml` owner-review template. Changes to its trigger, bot guard,
+permissions, environment, command, or steps require a separately reviewed policy change. Publish
+the permission exception before enabling a changed template, including in the provider repository.
 Then synchronize each repository to that published policy and its compatible full workflow SHA
-before staging the review workflow. Older policies reject its pull-request write permission;
-do not bypass that rejection with a waiver or mutate a cached release.
+before staging the review workflow. Older policies reject the pull-request write permission; do
+not bypass that rejection with a waiver or mutate a cached release.
+
+Release validation also accepts an absent `## Release` section as an implicit no-release decision
+only when the PR author is `dependabot[bot]` with type `Bot` and the complete, stable GitHub API file
+list contains only `.yml` or `.yaml` files directly under `.github/workflows/`. Both current and
+previous names are checked, and the API count must match the PR's changed-file count. This route
+uses read-only metadata access; non-bot PRs, mixed changes, renames from outside that directory,
+incomplete lists, and malformed explicit decisions still fail closed.
 
 The reusable workflow and local launcher must consume an immutable policy release. CI selects a
 platform-specific asset from that release so Windows and Linux receive compatible wheels and

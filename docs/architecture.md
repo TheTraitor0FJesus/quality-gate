@@ -20,6 +20,10 @@ Use this map before non-trivial codebase questions, design work, or code changes
   Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
   `pull-requests: write`, requests the repository owner's review, and skips duplicate requests
   when the owner is already requested or has reviewed. It checks out and executes no PR code.
+  The v2.5.0 rule in `quality_gate/publication_flow.py` interprets a missing `## Release` section as
+  `No release` only for Dependabot bot PRs whose complete, stable API file list contains workflow
+  YAML files directly under `.github/workflows/`; it checks old names on renames and skips mixed or
+  incomplete changes. This read-only path leaves the generated PR description untouched.
   `.github/dependabot.yml` assigns issues separately; provider calls here use same-repository
   references, so external-provider update grouping is unnecessary.
   [The v2.4.2 acceptance audit](audits/provider-v2.4.2-acceptance.md) records the immutable
