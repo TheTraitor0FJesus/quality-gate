@@ -14,6 +14,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+
 from quality_gate import runner
 from quality_gate.ci_parity import compare_results
 from quality_gate.distribution import DistributionError, PolicyCache
@@ -303,7 +304,7 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert 'QUALITY_GATE_WHEEL="$(python .quality-gate-ci/quality_gate/ci_release.py' in workflow
 	assert "manifest_python.outputs.versions" in workflow
 	assert 'default: "3.12"' not in workflow
-	assert manifest["quality"]["policy_release"] == "v2.4.2"
+	assert manifest["quality"]["policy_release"] == "v2.5.0"
 	version = tomllib.loads((REPOSITORY / ".release" / "version.toml").read_text(encoding="utf-8"))
 	assert template["quality"]["policy_release"] == f"v{version['version']}"
 	assert fixture["quality"]["policy_release"] == manifest["quality"]["policy_release"]
