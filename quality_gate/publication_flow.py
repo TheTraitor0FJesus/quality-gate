@@ -20,6 +20,9 @@ from .publication_evidence import digest, positive, record, records, verify_job,
 RECEIPT_MARKER = "\n<!-- shared-publisher-receipt-v1\n"
 PAGE_SIZE = 100
 MAX_NOTES_BYTES = 64 * 1024
+MAX_PULL_FILES = 3000
+DEPENDABOT_LOGIN = "dependabot[bot]"
+WORKFLOW_YAML_PATH = re.compile(r"\.github/workflows/[^/]+\.ya?ml")
 
 
 class GitHub(Protocol):
@@ -236,6 +239,71 @@ class Publisher:
 			raise PublicationError("publication requires an owner-merged PR")
 		return pull
 
+	def _dependabot_workflow_only(
+		self,
+		number: int,
+		event_pull: Mapping[str, object],
+		pull: Mapping[str, object],
+	) -> bool:
+		"""Recognize only a complete, stable Dependabot workflow-YAML-only file list."""
+		event_user = record(event_pull.get("user"), "original PR author")
+		current_user = record(pull.get("user"), "current PR author")
+		event_head = record(event_pull.get("head"), "original PR head")
+		current_head = record(pull.get("head"), "current PR head")
+		event_base = record(event_pull.get("base"), "original PR base")
+		current_base = record(pull.get("base"), "current PR base")
+		if (
+			event_user.get("login") != DEPENDABOT_LOGIN
+			or event_user.get("type") != "Bot"
+			or current_user.get("login") != DEPENDABOT_LOGIN
+			or current_user.get("type") != "Bot"
+			or event_head.get("sha") != current_head.get("sha")
+			or event_base.get("sha") != current_base.get("sha")
+			or event_base.get("ref") != current_base.get("ref")
+		):
+			return False
+
+		changed_file_count = pull.get("changed_files")
+		if (
+			type(changed_file_count) is not int
+			or changed_file_count <= 0
+			or changed_file_count > MAX_PULL_FILES
+		):
+			return False
+		page_count = (changed_file_count + PAGE_SIZE - 1) // PAGE_SIZE
+		found = 0
+		for page in range(1, page_count + 1):
+			files = records(
+				self.api.get(f"/pulls/{number}/files?per_page={PAGE_SIZE}&page={page}"),
+				"PR changed files",
+			)
+			if not files or len(files) > PAGE_SIZE:
+				return False
+			for changed_file in files:
+				filename = changed_file.get("filename")
+				previous_filename = changed_file.get("previous_filename")
+				if not isinstance(filename, str) or WORKFLOW_YAML_PATH.fullmatch(filename) is None:
+					return False
+				if previous_filename is not None and (
+					not isinstance(previous_filename, str)
+					or WORKFLOW_YAML_PATH.fullmatch(previous_filename) is None
+				):
+					return False
+			found += len(files)
+		if found != changed_file_count:
+			return False
+
+		latest = record(self.api.get(f"/pulls/{number}"), "current PR")
+		latest_head = record(latest.get("head"), "latest PR head")
+		latest_base = record(latest.get("base"), "latest PR base")
+		return (
+			latest_head.get("sha") == current_head.get("sha")
+			and latest_base.get("sha") == current_base.get("sha")
+			and latest_base.get("ref") == current_base.get("ref")
+			and latest.get("changed_files") == changed_file_count
+			and latest.get("body") == pull.get("body")
+		)
+
 	def _metadata(self, source: str) -> tuple[str, dict[str, object], list[str]]:
 		version = _authority(self.api.source(source, ".release/version.toml"))
 		config = _toml(self.api.source(source, ".release/publisher.toml"))
@@ -285,13 +353,33 @@ class Publisher:
 			return completed
 		if not validation_only and self._original_artifacts(number):
 			return self.recover(number)
-		result = prepare(
-			body=str(original.get("body") or ""),
-			version=version,
-			base_version=_authority(self.api.source(base, ".release/version.toml")),
-			baseline=self._baseline(),
-			projections=projections,
-		)
+		base_version = _authority(self.api.source(base, ".release/version.toml"))
+		baseline = self._baseline()
+		body = str(original.get("body") or "")
+		try:
+			result = prepare(
+				body=body,
+				version=version,
+				base_version=base_version,
+				baseline=baseline,
+				projections=projections,
+			)
+		except PublicationError as error:
+			if (
+				str(error) != "exactly one second-level Release section is required"
+				or not self._dependabot_workflow_only(number, original, pull)
+			):
+				raise
+			result = prepare(
+				body=(
+					"## Release\n\n"
+					"- No release: Dependabot updated GitHub Actions workflow YAML only."
+				),
+				version=version,
+				base_version=base_version,
+				baseline=baseline,
+				projections=projections,
+			)
 		if validation_only:
 			return result
 		if not result["release"]:
@@ -338,8 +426,15 @@ class Publisher:
 		config: Mapping[str, object],
 		projections: list[str],
 	) -> dict[str, object] | None:
-		# No-release decisions must not inspect an older publication's legacy receipt.
-		if "No release" in parse_decision(str(pull.get("body") or "")):
+		# An absent section must reach normal preparation; explicit no-release decisions
+		# must not inspect an older publication's legacy receipt.
+		try:
+			decision = parse_decision(str(pull.get("body") or ""))
+		except PublicationError as error:
+			if str(error) != "exactly one second-level Release section is required":
+				raise
+			return None
+		if "No release" in decision:
 			return None
 		release = self._existing(version)
 		if release is None or release.get("draft") is True:

@@ -20,6 +20,10 @@ For this repository, use the executable declaration format in the shared publish
 4. Prepare exactly one `## Release` section using the shared contract. For internal-only work, use
    only `- No release: <Russian reason>` and keep the version unchanged relative to the PR base.
    Existing notes remain valid historical content and cannot request a release by themselves.
+   The shared validator also recognizes an omitted section as no-release for a Dependabot bot PR
+   only when the complete, stable changed-file list consists of workflow YAML files directly under
+   `.github/workflows/`, including any previous paths for renames. Mixed or uncertain file lists
+   still require an explicit decision.
 5. Complete the current-source staged Quality Gate and required review. The read-only
    `.github/workflows/release-validation.yml` caller checks opened, synchronize, reopened, and edited
    PRs targeting `main`. Publication is authorized only by the owner's final default-branch merge.
