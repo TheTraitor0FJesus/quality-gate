@@ -12,6 +12,8 @@ import tomllib
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
+
 from quality_gate.contracts import (
 	MAX_SUPPLEMENTAL_TARGET_MATCHES,
 	MAX_SUPPLEMENTAL_TESTS,
@@ -695,7 +697,85 @@ value = "{secret}"
 	result = _run(tmp_path, "validate")
 
 	assert result.returncode == EXIT_UNCHECKED
+	assert "unknown field 'value'" in result.stdout
+	assert "waivers[0]" in result.stdout
 	assert secret not in result.stdout
+
+
+@pytest.mark.parametrize(
+	("field", "invalid_value", "error_path", "error_message"),
+	[
+		("target", "*.env", "waivers[0].target", "must identify one exact target"),
+		("approved_by", "dependabot", "waivers[0].approved_by", "must identify a human reviewer"),
+		(
+			"expires_on",
+			-1,
+			"waivers[0].expires_on",
+			"must be current and on or after review date",
+		),
+		(
+			"reviewed_on",
+			1,
+			"waivers[0].expires_on",
+			"must be current and on or after review date",
+		),
+		(
+			"fingerprint",
+			"not-a-sha256-fingerprint",
+			"waivers[0].fingerprint",
+			"secret waivers require a SHA-256 fingerprint",
+		),
+	],
+	ids=[
+		"wildcard-target",
+		"bot-approver",
+		"expired-waiver",
+		"future-review-date",
+		"malformed-fingerprint",
+	],
+)
+def test_invalid_secret_waiver_is_rejected_for_specific_rule(
+	tmp_path: Path,
+	field: str,
+	invalid_value: int | str,
+	error_path: str,
+	error_message: str,
+) -> None:
+	today = date.today()
+	values = {
+		"target": "fixtures/example.txt:1",
+		"approved_by": "Human Reviewer",
+		"reviewed_on": (today - timedelta(days=2)).isoformat(),
+		"expires_on": (today + timedelta(days=2)).isoformat(),
+		"fingerprint": fingerprint_secret("fixture-secret-value"),
+	}
+	values[field] = (
+		(today + timedelta(days=invalid_value)).isoformat()
+		if isinstance(invalid_value, int)
+		else invalid_value
+	)
+	target = values["target"]
+	approved_by = values["approved_by"]
+	reviewed_on = values["reviewed_on"]
+	expires_on = values["expires_on"]
+	fingerprint = values["fingerprint"]
+	waiver = f"""
+[[waivers]]
+kind = "secret"
+check_id = "secrets.candidate"
+target = "{target}"
+reason = "known fixture"
+approved_by = "{approved_by}"
+reviewed_on = "{reviewed_on}"
+expires_on = "{expires_on}"
+fingerprint = "{fingerprint}"
+"""
+	(tmp_path / "quality-gate.toml").write_text(_manifest(waiver=waiver), encoding="utf-8")
+	result = _run(tmp_path, "validate")
+
+	assert result.returncode == EXIT_UNCHECKED
+	assert error_message in result.stdout
+	assert error_path in result.stdout
 
 
 def test_exact_current_secret_waiver_is_accepted(tmp_path: Path) -> None:

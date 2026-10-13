@@ -73,10 +73,10 @@ test repair must not redefine the existing supported behavior.
 
 ### 01 — Exact secret waivers
 
-**Evidence:** `test_exact_fingerprint_waiver_applies_to_one_candidate_finding`
-(`tests/test_secrets.py:103`) supplies one exactly matching finding and checks only
-WAIVED. Returning true instead of comparing fingerprints in `Waiver.matches`
-(`quality_gate/contracts.py:184`) would still satisfy it. The composite negative
+**Evidence:** The original `test_exact_fingerprint_waiver_applies_to_one_candidate_finding`
+(`tests/test_secrets.py:103`) supplied one exactly matching finding and checked
+only WAIVED. Returning true instead of comparing fingerprints in `Waiver.matches`
+(`quality_gate/contracts.py:184`) would still satisfy that proof. The composite negative
 `test_invalid_typed_waiver_is_rejected_without_secret_value`
 (`tests/test_contracts_cli.py:681`) includes unknown `value`, wildcard target, bot
 approver and no fingerprint. `_parse_waiver` (`quality_gate/contracts.py:444`)
@@ -84,7 +84,8 @@ rejects the unknown field before the later guards; their removal is unobserved.
 `_apply_waivers` (`quality_gate/secrets.py:158`) consumes the actual matching result.
 Existing deptry waiver tests protect standard targets, not secret fingerprints.
 
-**Change:** Keep the unknown-field/redaction case. Derive isolated invalid rows
+**Change:** Keep the unknown-field/redaction case and add a one-finding positive
+control that reaches WAIVED. Derive isolated invalid rows
 from a valid waiver: wildcard target, bot approver, expired `expires_on`, future
 `reviewed_on`, and malformed fingerprint. Observe each specific admission reason.
 Use a controlled current date or dates relative to the test's current date. At the
@@ -96,7 +97,8 @@ boundary. Inspect surviving findings and redacted compact/verbose rendering.
 **Preserve:** Valid waiver acceptance, unknown-field rejection, raw-secret
 redaction, standard-waiver mixed-finding tests, and current date semantics.
 
-**Proof and completion:** Each isolated negative reaches its named guard. A
+**Proof and completion:** The one-finding positive control reaches WAIVED; each
+isolated negative reaches its named guard. A
 fingerprint-ignoring mutation and the individual parser-guard removals must make
 the corresponding new cases red. Restore each mutation exactly. Focused suites:
 `tests/test_secrets.py` and `tests/test_contracts_cli.py`, selecting waiver cases.

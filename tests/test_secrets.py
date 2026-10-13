@@ -103,6 +103,53 @@ def test_candidate_finding_exposes_only_location_and_fingerprint(
 def test_exact_fingerprint_waiver_applies_to_one_candidate_finding(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+	reviewed_secret = "fixture-secret-value"
+	unreviewed_secret = "different-fixture-secret"
+	report = [
+		{"File": "fixtures/example.txt", "StartLine": 1, "Secret": reviewed_secret},
+		{"File": "fixtures/example.txt", "StartLine": 1, "Secret": unreviewed_secret},
+	]
+	scanner = _scanner(tmp_path)
+	release = tmp_path / "release"
+	release.mkdir()
+	(release / scanner.name).write_bytes(scanner.read_bytes())
+	prepared = _prepared(tmp_path, scanner)
+	prepared.policy_root = release
+	waiver = f"""
+[[waivers]]
+kind = "secret"
+check_id = "secrets.candidate"
+target = "fixtures/example.txt:1"
+reason = "synthetic fixture"
+approved_by = "Human Reviewer"
+reviewed_on = "2026-08-01"
+expires_on = "2099-12-31"
+fingerprint = "{fingerprint_secret(reviewed_secret)}"
+"""
+
+	monkeypatch.setattr(
+		"quality_gate.secrets._run_scanner",
+		lambda *args, report_path, **kwargs: _run_fake_scanner(report_path, report),
+	)
+	result = secret_candidate_result(tmp_path, _manifest(tmp_path, waiver), prepared)
+
+	unreviewed_fingerprint = fingerprint_secret(unreviewed_secret)
+	reviewed_fingerprint = fingerprint_secret(reviewed_secret)
+	assert result.status is Status.FAILED
+	assert len(result.findings) == 1
+	assert result.findings[0].path == "fixtures/example.txt:1"
+	assert result.findings[0].message == f"secret detected (fingerprint: {unreviewed_fingerprint})"
+	for verbose in (False, True):
+		output = render(Verdict((result,)), verbose=verbose)
+		assert unreviewed_fingerprint in output
+		assert reviewed_fingerprint not in output
+		assert reviewed_secret not in output
+		assert unreviewed_secret not in output
+
+
+def test_exact_fingerprint_waiver_waives_matching_candidate(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
 	secret = "fixture-secret-value"
 	report = [{"File": "fixtures/example.txt", "StartLine": 1, "Secret": secret}]
 	scanner = _scanner(tmp_path)
@@ -129,8 +176,10 @@ fingerprint = "{fingerprint_secret(secret)}"
 	)
 	result = secret_candidate_result(tmp_path, _manifest(tmp_path, waiver), prepared)
 
-	assert result.status.value == "waived"
-	assert secret not in result.summary
+	assert result.status is Status.WAIVED
+	assert result.findings == ()
+	for verbose in (False, True):
+		assert secret not in render(Verdict((result,)), verbose=verbose)
 
 
 def test_missing_scanner_is_unchecked(tmp_path: Path) -> None:
