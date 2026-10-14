@@ -28,3 +28,11 @@ None — can start immediately.
 ## Implementation uncertainty
 
 Low — the producer, output format and actual-workflow-script test pattern exist.
+
+## Performance preservation
+
+The same module's installed-release fixture is already module-scoped; isolated
+baseline setup took 20.87–21.13 seconds. Preserve its real artifact, installation
+and parity proof while strengthening the workflow producer. The optimization
+investigation belongs to [ticket 12](12-cli-infrastructure.md); real nested Gate
+coverage is part of [ticket 13](13-complete-verification.md).

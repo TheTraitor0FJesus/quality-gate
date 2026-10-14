@@ -29,3 +29,10 @@ None — can start immediately.
 ## Implementation uncertainty
 
 Low — the classifier and controlled process-output test seam already exist.
+
+## Process-lifecycle boundary
+
+Keep controlled output doubles for this classifier proof. They do not establish
+that timed-out descendants release workspace locks. That confirmed product defect
+and its real-process regressions belong to [ticket 11](11-process-tree-cleanup.md),
+which can proceed independently without weakening the cases in this ticket.

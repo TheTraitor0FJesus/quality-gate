@@ -21,6 +21,18 @@ real workspace lifecycle and original source inputs. Authoritative requirements:
   unchanged; existing root-lock and workspace lifecycle protection remain.
 - Required pre-change focused timing, clean-tree comparisons, owned-artifact
   cleanup and applicable shared verification are recorded without a speed-up claim.
+- Disposable copies exclude generated `temp/` and bytecode. Real outer-workspace
+  locking and setup/call/teardown measurements remain observable; removing that
+  lifecycle or hiding its errors is not an optimization.
+
+## Performance handoff
+
+Two isolated complete runs again created the five source-fixture lock roots;
+see [performance evidence](../performance-evidence.md#isolated-baseline).
+This repair enables [ticket 13](13-complete-verification.md), but makes no
+speed-up promise. [Ticket 12](12-cli-infrastructure.md) separately investigates
+measured immutable-infrastructure reuse; retaining code is a valid outcome when
+no safe improvement is demonstrated.
 
 ## Blocked by
 
