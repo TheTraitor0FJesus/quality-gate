@@ -260,9 +260,11 @@ def test_release_controller_executes_the_verified_wheel(
 
 
 def test_release_controller_audits_with_candidate_policy_when_source_pin_is_previous(
-	tmp_path: Path,
+	tmp_path_factory: pytest.TempPathFactory,
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+	# Leave room for wheel names beneath the nested Windows Gate cache staging.
+	tmp_path = tmp_path_factory.mktemp("candidate")
 	_source(tmp_path, version="2.2.0", policy_release="v2.1.0")
 	marker = tmp_path / "release-probe.txt"
 	monkeypatch.setenv("QUALITY_GATE_RELEASE_PROBE", str(marker))
