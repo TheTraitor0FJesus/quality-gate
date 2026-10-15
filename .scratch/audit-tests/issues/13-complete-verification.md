@@ -42,3 +42,12 @@ can complete with an evidence-backed no-change outcome.
 
 Medium — full-suite timing is measured, but post-repair recovery, Gate environment
 coverage and canonical nested-path acceptance remain to be established.
+
+## Context from ticket 02
+
+[Ticket 02's execution record](02-ci-member-integrity.md#execution-record) records
+current reproductions of the historical Windows cache-staging failures at 262
+and 263 characters, and the short per-test directory names that repaired them.
+Its staged and current-source Gate checks passed from the canonical checkout.
+Retain those test directory names when combining tickets 09–12, then repeat the
+canonical-path, timing, resource and skip verification required above.

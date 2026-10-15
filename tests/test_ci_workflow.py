@@ -14,6 +14,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+
 from quality_gate import runner
 from quality_gate.ci_parity import compare_results
 from quality_gate.distribution import DistributionError, PolicyCache
@@ -532,10 +533,12 @@ def test_compare_results_rejects_equal_invalid_probe(
 
 
 def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(
-	tmp_path: Path, _release_gate: tuple[Path, Path]
+	tmp_path_factory: pytest.TempPathFactory, _release_gate: tuple[Path, Path]
 ) -> None:
 	"""Verify local and CI runs expose one release, tool, result, and redaction surface."""
 
+	# Leave room for cache staging beneath the nested Windows Gate workspace.
+	tmp_path = tmp_path_factory.mktemp("parity")
 	scanner = _installed_scanner()
 	assert scanner is not None, "the active policy release must provide Gitleaks"
 	gate, wheel = _release_gate
