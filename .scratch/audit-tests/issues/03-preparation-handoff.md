@@ -1,7 +1,7 @@
 ---
 id: "03"
 title: "Доказать передачу кандидата релиза через prepare CLI"
-state: todo
+state: done
 blocked_by: []
 ---
 
@@ -31,3 +31,22 @@ None — can start immediately.
 
 Low — producer/consumer contracts and the controlled Publisher service are known;
 test-host selection is a local implementation choice.
+
+## Execution record
+
+- Added five integration cases at the real `publication_cli._main` and
+  `_outputs` seam with a controlled Publisher. They cover initial and reused
+  preparation, recovery, validation-only and no-release outcomes, and assert the
+  canonical envelope, digest, identity/output forwarding and temporary-file
+  cleanup.
+- The focused `tests/test_publication_flow.py` run passed: 77 passed. Mutation
+  checks for all five handoff assertions produced the expected failures; the
+  implementation source was restored before review.
+- Independent Standards and Spec reviews found no actionable findings. No
+  production publisher change was needed.
+- PR 55 merged commit `546e2cb` with shorter per-test Windows temporary paths
+  for the parity and candidate-policy integration tests. This addressed the
+  unrelated staged-Gate path failures recorded in ticket 02.
+- Staged Quality Gate request `audit03-pr55-staged-20261015-01` on merged
+  candidate tree `e37e65f17e1239517912f8ec473a9ab973e95c5f` passed with exit 0
+  in 188 seconds.
