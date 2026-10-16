@@ -329,6 +329,68 @@ def _event(api: GitHub) -> dict[str, object]:
 	return {"action": "closed", "pull_request": copy.deepcopy(api.pull)}
 
 
+def _run_prepare_cli(
+	monkeypatch: pytest.MonkeyPatch,
+	publisher: Publisher,
+	tmp_path: Path,
+	*,
+	event: dict[str, object],
+	event_name: str = "pull_request",
+	validation_only: bool = False,
+) -> tuple[int, Path, Path]:
+	from quality_gate import publication_cli
+
+	event_path = tmp_path / "event.json"
+	output_path = tmp_path / "GITHUB_OUTPUT"
+	candidate_directory = tmp_path / "release-candidate"
+	event_path.write_text(json.dumps(event), encoding="utf-8")
+	monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
+	monkeypatch.setenv("GITHUB_EVENT_NAME", event_name)
+	monkeypatch.setenv("GITHUB_OUTPUT", str(output_path))
+	monkeypatch.setattr(publication_cli, "_publisher", lambda _root: publisher)
+	arguments = ["prepare", "--pr", "7", "--output", str(candidate_directory)]
+	if validation_only:
+		arguments.append("--validation-only")
+	return publication_cli._main(arguments), output_path, candidate_directory
+
+
+def _workflow_outputs(path: Path) -> dict[str, str]:
+	return dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines())
+
+
+def _expected_prepare_outputs(
+	*,
+	status: str,
+	version: str,
+	source_sha: str = "",
+	candidate_id: str = "",
+	candidate_run_id: str = "",
+	candidate_digest: str = "",
+	artifact_name: str = "",
+	save_required: str = "false",
+) -> dict[str, str]:
+	return {
+		"status": status,
+		"version": version,
+		"source-sha": source_sha,
+		"candidate-id": candidate_id,
+		"provider-sha": PROVIDER,
+		"provider-repository": "o/provider",
+		"save-required": save_required,
+		"candidate-run-id": candidate_run_id,
+		"candidate-digest": candidate_digest,
+		"artifact-name": artifact_name,
+	}
+
+
+def _persist_candidate(api: GitHub) -> int:
+	result = _publisher(api).prepare(7, event=_event(api))
+	assert result["status"] == "build-required"
+	candidate = result["candidate"]
+	assert isinstance(candidate, dict)
+	return api.persist(candidate)
+
+
 @pytest.fixture
 def projected_api(tmp_path: Path) -> GitHub:
 	api = GitHub()
@@ -446,6 +508,214 @@ def test_post_merge_preserves_original_candidate_before_product_work() -> None:
 	assert candidate["origin_run_id"] == ORIGINAL_RUN
 	assert candidate["provider_sha"] == PROVIDER
 	assert api.writes == []
+
+
+def test_prepare_cli_persists_canonical_envelope_and_upload_handoff(
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+	tmp_path: Path,
+) -> None:
+	api = GitHub()
+	exit_code, output_path, candidate_directory = _run_prepare_cli(
+		monkeypatch, _publisher(api), tmp_path, event=_event(api)
+	)
+
+	assert exit_code == 0
+	assert json.loads(capsys.readouterr().out) == {
+		"status": "build-required",
+		"version": "2.1.0",
+		"source_sha": SOURCE,
+	}
+	expected_candidate = (
+		'{"base_sha":"dddddddddddddddddddddddddddddddddddddddd",'
+		'"body":"## Release\\n- Version: 2.1.0\\n- Changes: Общая публикация.\\n'
+		'- Publication: owner merge authorizes publication after the merged commit '
+		'passes the required release checks.\\n",'
+		'"config":{"producers":[{"checks":["Verify package"],'
+		'"deliverables":["package-linux-{version}.zip"],"job":"Build linux",'
+		'"name":"linux"},{"checks":["Verify package"],'
+		'"deliverables":["package-windows-{version}.zip"],"job":"Build windows",'
+		'"name":"windows"}],"schema":1,"workflow":".github/workflows/release.yml"},'
+		'"merged_at":"2026-09-14T10:00:00Z",'
+		'"notes":"Общий механизм публикации. Существующие пакеты сохраняются.\\n",'
+		'"notes_sha256":"3fc008ab1716887e40a37fa9267a60926e15f52f70fd28e43ea6ef0e5cc4ca6f",'
+		'"origin_attempt":1,"origin_run_head_sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",'
+		'"origin_run_id":100,"pr":7,"provider_repository":"o/provider",'
+		'"provider_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",'
+		'"repository":"o/r","schema":1,"source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+		'"version":"2.1.0"}\n'
+	).encode()
+	expected_digest = "9241958f0e72d4c14f972bdad61fbf042a1871e21b36842ab39a5294ca9a2128"
+	assert hashlib.sha256(expected_candidate).hexdigest() == expected_digest
+	assert (candidate_directory / "candidate.json").read_bytes() == expected_candidate
+	assert [path.name for path in candidate_directory.iterdir()] == ["candidate.json"]
+	assert _workflow_outputs(output_path) == _expected_prepare_outputs(
+		status="build-required",
+		version="2.1.0",
+		source_sha=SOURCE,
+		candidate_run_id="100",
+		candidate_digest=expected_digest,
+		artifact_name="release-candidate-pr-7-100-1",
+		save_required="true",
+	)
+
+
+def test_prepare_cli_forwards_reused_candidate_without_saving_a_second_envelope(
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+	tmp_path: Path,
+) -> None:
+	api = GitHub()
+	artifact_id = _persist_candidate(api)
+	api.run_overrides["run_attempt"] = 2
+	before_artifacts = copy.deepcopy(api.artifacts)
+	exit_code, output_path, candidate_directory = _run_prepare_cli(
+		monkeypatch, _publisher(api, attempt=2), tmp_path, event=_event(api)
+	)
+
+	assert exit_code == 0
+	assert json.loads(capsys.readouterr().out) == {
+		"status": "build-required",
+		"version": "2.1.0",
+		"source_sha": SOURCE,
+		"candidate_artifact_id": artifact_id,
+	}
+	assert _workflow_outputs(output_path) == _expected_prepare_outputs(
+		status="build-required",
+		version="2.1.0",
+		source_sha=SOURCE,
+		candidate_id=str(artifact_id),
+		candidate_run_id="100",
+		candidate_digest="9241958f0e72d4c14f972bdad61fbf042a1871e21b36842ab39a5294ca9a2128",
+		artifact_name="release-candidate-pr-7-100-1",
+	)
+	assert api.artifacts == before_artifacts
+	assert not candidate_directory.exists()
+
+
+def test_recovery_cli_forwards_original_candidate_without_creating_an_envelope(
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+	tmp_path: Path,
+) -> None:
+	recovery_sha = "c" * 40
+
+	class RecoveryGitHub(GitHub):
+		def get(self, path: str) -> object:
+			if path == "/actions/runs/101":
+				run = super().get("/actions/runs/100")
+				assert isinstance(run, dict)
+				return {
+					**run,
+					"id": 101,
+					"head_sha": recovery_sha,
+					"event": "workflow_dispatch",
+					"head_branch": "main",
+				}
+			return super().get(path)
+
+	api = RecoveryGitHub()
+	artifact_id = _persist_candidate(api)
+	before_artifacts = copy.deepcopy(api.artifacts)
+	publisher = Publisher(
+		api,
+		Context(
+			repository="o/r",
+			provider_repository="o/provider",
+			provider_sha=PROVIDER,
+			helper_sha=PROVIDER,
+			run_id=101,
+			attempt=1,
+			run_source_sha=recovery_sha,
+			run_head_sha=recovery_sha,
+		),
+	)
+	exit_code, output_path, candidate_directory = _run_prepare_cli(
+		monkeypatch,
+		publisher,
+		tmp_path,
+		event_name="workflow_dispatch",
+		event={"inputs": {"pr-number": "7"}},
+	)
+
+	assert exit_code == 0
+	assert json.loads(capsys.readouterr().out) == {
+		"status": "build-required",
+		"version": "2.1.0",
+		"source_sha": SOURCE,
+		"candidate_artifact_id": artifact_id,
+	}
+	assert _workflow_outputs(output_path) == _expected_prepare_outputs(
+		status="build-required",
+		version="2.1.0",
+		source_sha=SOURCE,
+		candidate_id=str(artifact_id),
+		candidate_run_id="100",
+		candidate_digest="9241958f0e72d4c14f972bdad61fbf042a1871e21b36842ab39a5294ca9a2128",
+		artifact_name="release-candidate-pr-7-100-1",
+	)
+	assert api.artifacts == before_artifacts
+	assert not candidate_directory.exists()
+
+
+def test_validation_cli_does_not_create_a_candidate_envelope(
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+	tmp_path: Path,
+) -> None:
+	api = GitHub()
+	api.pull["merged"] = False
+	for (revision, path), content in list(api.files.items()):
+		if revision == SOURCE:
+			api.files[(PR_HEAD, path)] = content
+	before_artifacts = copy.deepcopy(api.artifacts)
+	event = {"action": "edited", "pull_request": copy.deepcopy(api.pull)}
+	exit_code, output_path, candidate_directory = _run_prepare_cli(
+		monkeypatch,
+		_publisher(api),
+		tmp_path,
+		event=event,
+		validation_only=True,
+	)
+
+	assert exit_code == 0
+	assert json.loads(capsys.readouterr().out) == {
+		"status": "validated",
+		"version": "2.1.0",
+		"release": True,
+	}
+	assert _workflow_outputs(output_path) == _expected_prepare_outputs(
+		status="validated", version="2.1.0"
+	)
+	assert api.artifacts == before_artifacts
+	assert not candidate_directory.exists()
+
+
+def test_no_release_cli_does_not_request_a_candidate_envelope(
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+	tmp_path: Path,
+) -> None:
+	api = GitHub()
+	api.pull["body"] = "## Release\n- No release: Только инструкции.\n"
+	api.files[(SOURCE, ".release/version.toml")] = 'version = "2.0.6"\n'
+	api.files[(SOURCE, ".release/notes.md")] = "Impact: PATCH\nVersion: 2.0.6\n"
+	before_artifacts = copy.deepcopy(api.artifacts)
+	exit_code, output_path, candidate_directory = _run_prepare_cli(
+		monkeypatch, _publisher(api), tmp_path, event=_event(api)
+	)
+
+	assert exit_code == 0
+	assert json.loads(capsys.readouterr().out) == {
+		"status": "no-release",
+		"version": "2.0.6",
+		"release": False,
+	}
+	assert _workflow_outputs(output_path) == _expected_prepare_outputs(
+		status="no-release", version="2.0.6"
+	)
+	assert api.artifacts == before_artifacts
+	assert not candidate_directory.exists()
 
 
 @pytest.mark.parametrize(
