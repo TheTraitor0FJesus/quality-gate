@@ -16,6 +16,17 @@ Use this map before non-trivial codebase questions, design work, or code changes
 
 ## Flows
 
+- **Working-tree edit checking** — the public `edit-check` command and `quality-gate-edit`
+  entry point use `edit_cli.py` and `edit_protocol.py` for bounded JSON and one caller deadline;
+  `edit_process.py` owns bounded streams and the supervised process tree; `edit_worker.py`
+  runs the source-free failure boundary. `edit_inputs.py` captures explicit files and
+  configuration freshness; `edit_policy.py` verifies exact compatible releases and explicitly
+  provisions native Ruff through `edit-setup`; `edit_check.py` selects only relevant prepared
+  runtimes, batches isolated safe fixes/format/final checks, then publishes current bytes.
+  This path uses schema validation through `contracts.parse_manifest` without expanding
+  supplemental test targets. It creates no Git-index candidate and runs no full checks or setup.
+  See [the public protocol and compatibility contract](edit-check.md).
+
 - **Dependabot owner review** — `.github/workflows/dependabot-review.yml` handles non-draft
   Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
   `pull-requests: write`, requests the repository owner's review, and skips duplicate requests

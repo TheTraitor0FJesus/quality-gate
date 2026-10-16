@@ -75,6 +75,12 @@ Projects may keep pytest markers, test discovery, package metadata, and dependen
 
 ## Ruff policy selection
 
+The additive working-tree [edit-check interface](edit-check.md) reuses the exact released Ruff
+policy and tool without changing ordinary Gate scope or rule selection. Its explicit automatic
+fix allowlist contains only safe `I001`; `F401` remains unfixable. The final full-file lint still
+checks every released enabled rule. Interface-engine updates do not activate new consumer policy
+pins, and unsupported pins fail closed rather than falling back to baseline.
+
 The shared policy uses the stable Ruff 0.16.4 surface. It enables all stable Bugbear rules (`B`),
 keeps `C901` at 10 and `PLR0915` at 50, and adds these calibrated rule sets:
 

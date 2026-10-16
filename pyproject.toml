@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quality-gate"
-version = "2.5.0"
+version = "2.6.0"
 description = "One quality contract for local Git hooks and GitHub CI."
 requires-python = ">=3.11"
 
@@ -22,6 +22,7 @@ optional_dependencies_dev_groups = ["test", "tools"]
 
 [project.scripts]
 quality-gate = "quality_gate.cli:main"
+quality-gate-edit = "quality_gate.edit_cli:main"
 
 [tool.setuptools]
 packages = ["quality_gate"]

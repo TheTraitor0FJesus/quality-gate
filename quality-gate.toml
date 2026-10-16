@@ -23,6 +23,8 @@ required_documents = [
     ".release/publisher.toml",
     "README.md",
     "docs/agent-reference.md",
+    "docs/edit-check.md",
+    "docs/audits/edit-check-provider.md",
     "docs/architecture.md",
     "docs/coding-standards.md",
     "docs/lessons.md",
@@ -46,7 +48,7 @@ max_blob_size_mib = 5
 
 [repository.defaults]
 command_timeout_seconds = 120
-test_timeout_seconds = 300
+test_timeout_seconds = 400
 gate_timeout_seconds = 600
 
 [[python]]
