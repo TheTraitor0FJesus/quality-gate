@@ -677,13 +677,20 @@ def _validate_supplemental_targets(root: Path, tests: tuple[SupplementalTest, ..
 				)
 
 
+def parse_manifest(content: str) -> Manifest:
+	"""Validate the schema without expanding repository-owned supplemental targets."""
+	try:
+		return _load_table(tomllib.loads(content))
+	except tomllib.TOMLDecodeError as exc:
+		raise ValidationError("manifest", "cannot read valid UTF-8 TOML") from exc
+
+
 def load_manifest(root: Path | str = ".", manifest_name: str = MANIFEST_NAME) -> Manifest:
 	path = Path(root).resolve() / manifest_name
 	try:
-		raw = tomllib.loads(path.read_text(encoding="utf-8"))
-	except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+		manifest = parse_manifest(path.read_text(encoding="utf-8"))
+	except (OSError, UnicodeError) as exc:
 		raise ValidationError("manifest", "cannot read valid UTF-8 TOML") from exc
-	manifest = _load_table(raw)
 	_validate_supplemental_targets(path.parent, manifest.supplemental_tests)
 	return manifest
 

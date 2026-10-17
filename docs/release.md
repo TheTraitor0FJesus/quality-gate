@@ -34,6 +34,12 @@ making the release candidate depend on its own unpublished wheel.
 
 ## Product verification
 
+The v2.6.0 candidate adds the public [working-tree Ruff interface](edit-check.md). Its interface
+engine can execute exact compatible older policies independently of the installed engine version.
+Keep source `quality.policy_release` on published v2.5.0 while preparing this candidate. Host
+installation/activation and the initial v2.4.2 consumer's `edit-setup` remain separate post-publication
+work; the provider acceptance record does not establish installed host-event acceptance.
+
 `.github/workflows/release.yml` connects shared preparation, the existing Windows/Linux package
 verification, and shared publication. Preparation resolves the final merged commit and retains its
 original candidate envelope before either platform starts. No-release and already-complete outcomes

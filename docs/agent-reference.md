@@ -27,7 +27,7 @@ directory when it exits. Read-only checkouts and candidate snapshots use a priva
 per repository under the user-local system temporary directory. Every consumer repository must ignore its root
 `temp/` directory in `.gitignore` (for example, with `/temp/`). Cache staging and atomic replacement
 files remain beside their persistent targets. `sync`, `setup`, rollback, confirmed prune, and
-`format` are the explicit mutation commands.
+`format`, `edit-setup`, and `edit-check` are the explicit mutation commands.
 
 1. Run `quality-gate validate` after editing `quality-gate.toml`.
 2. Run `quality-gate doctor` to inspect the selected release and component runtimes.
@@ -45,6 +45,15 @@ calls the release-backed gate without importing mutable repository source. The n
 wrapper blocks updates and deletion of the remote default branch when Git can prove its name.
 
 ## Manifest maintenance
+
+For synchronous post-edit Ruff checks, use the separate [working-tree interface](edit-check.md).
+It checks explicit complete working-tree files, including unmanaged and non-Git projects, with a
+versioned JSON result and a shared caller deadline. `edit-setup` explicitly provisions the selected
+release's native Ruff; `edit-check` performs no downloads, dependency installation or environment
+creation. Its supervisor removes its isolated same-volume workspace after completion or timeout.
+It is an explicit writer and does not replace staged/full Gate verification. Keep the interface
+engine identity separate from the consumer policy pin; consult its supported-release matrix before
+activation, including when the selected policy predates the command.
 
 Schema 2 accepts optional repository-owned supplemental tests in the canonical template:
 
