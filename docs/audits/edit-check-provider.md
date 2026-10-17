@@ -62,6 +62,11 @@ publication. `edit-check-boundaries-green-20261016-47` passed the complete CLI s
 The POSIX interpreter-symlink case is explicitly skipped on Windows; Linux verification
 remains part of the existing platform CI/release route.
 
+Linux CI also checks platform-specific typing. Its `ctypes` stubs omit `WinDLL`;
+the Windows-only job helper uses the same narrow attribute annotation as the existing
+publisher job helper. This annotation changes no runtime code; the installed-interface
+measurements below retain their recorded wheel identity.
+
 Configuration recapture preserves the first observed identity, including optional-file
 creation or deletion. Deterministic regressions first failed for all three mutations;
 the shared capture boundary now rejects them as stale input. The repository's full-test

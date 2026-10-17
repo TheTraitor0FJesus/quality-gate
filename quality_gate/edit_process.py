@@ -42,7 +42,7 @@ def _windows_job(process: subprocess.Popen[bytes]) -> tuple[Any, int]:
 			("peak_job", ctypes.c_size_t),
 		]
 
-	kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+	kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
 	kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
 	kernel.CreateJobObjectW.restype = wintypes.HANDLE
 	kernel.SetInformationJobObject.argtypes = [
