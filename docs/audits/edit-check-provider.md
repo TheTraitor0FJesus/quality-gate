@@ -169,9 +169,11 @@ and the [corrected invocation and compatibility contract](../edit-check.md).
 The public wheel regression first reproduced exit 2, `io`, and zero elapsed milliseconds
 as `wheel-cwd-red-20261017-03`. `wheel-cwd-green-20261017-04` then passed eight Windows
 cases: both public CLI modules with v2.4.2/v2.5.0/v2.6.0 and the v2.6.1 candidate pin.
-The same platform-independent cases run in Linux CI. The real wheel is built once in
-the base build environment using the existing release backend prerequisite, then passed
-directly on `PYTHONPATH`; it is neither installed nor extracted for execution. The test
+The same platform-independent cases run in Linux CI. The provider's CI prepares the
+base build environment from the existing hash-locked `.release/build-requirements.txt`;
+the backend is not assumed to be preinstalled, and this preparation applies only to
+the provider repository. The real wheel is built once, then passed directly on
+`PYTHONPATH`; it is neither installed nor extracted for execution. The test
 checks safe fixes, residual F401, final hashes and workspace cleanup. This correction
 does not certify actual host event delivery or replace the earlier measured wheel's
 identity. The unchanged 1,000/2,000 ms targets and full host timing acceptance remain open.

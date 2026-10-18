@@ -81,6 +81,10 @@ jobs:
         with:
           python-version: ${{ inputs['python-version'] || steps.manifest_python.outputs.versions || '3.12' }}
 
+      - name: Prepare the provider's wheel-test build backend
+        if: github.repository == 'TheTraitor0FJesus/quality-gate'
+        run: python -m pip install --require-hashes --only-binary=:all: -r .release/build-requirements.txt
+
       - name: Check out the verifier from the pinned reusable workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

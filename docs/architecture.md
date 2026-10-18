@@ -43,6 +43,8 @@ Use this map before non-trivial codebase questions, design work, or code changes
   provider handoff, activation reruns and remaining consumer/live-event acceptance.
 
 - **Local and CI checking** — `quality-gate check` → `quality_gate/temp_workspace.py` → `quality_gate/snapshot.py` → `quality_gate/runner.py` → validated manifest → structured verdict → Git hygiene, Gitleaks, workflow/documentation checks, staged web asset budgets, standalone Biome lint and formatting, Ruff, mypy, deptry dependency hygiene, pytest, and report-only coverage when pinned. `.github/workflows/quality.yml` verifies and installs the release wheel, syncs the manifest release, prepares declared Python versions, and passes pull-request base/head SHAs; `quality_gate/ci_parity.py` invokes that installed console entry point against one release-backed fixture and emits the comparison surface; `quality-gate audit` adds full reachable-history secret scanning and complete lessons.
+  Provider self-checks also prepare the hash-locked release build backend for real-wheel
+  test fixtures; consumer runs keep their own dependency preparation contract.
 - **Release and runtime preparation** — `quality-gate sync` → verified immutable release cache → `quality-gate setup` → repository-keyed runtime fingerprint → isolated Python environment; `quality-gate doctor` reports missing prerequisites as unchecked.
 - **Project bootstrap** — `$setup-repo` → `quality-gate.toml` and a CI caller → reusable `quality.yml`.
 - **Unified agent verification** — typed test-runner `scope: full` → repository-owned supplemental tests when declared → one staged Quality Gate; without a manifest, ordinary complete-suite discovery remains in use.
