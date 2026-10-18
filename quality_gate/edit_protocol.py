@@ -21,7 +21,7 @@ FIRST_PRINTABLE_CHARACTER = 32
 EXIT_UNCHECKED = 2
 MAX_DEADLINE_MS = 10_000
 DELIVERY_RESERVE_SECONDS = 0.05
-SUPPORTED_POLICIES = frozenset({"v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1"})
+SUPPORTED_POLICIES = frozenset({"v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2"})
 SAFE_FIXES = ("I001",)
 RECOVERY = {
 	"invalid_request": "Send a schema 1 request with explicit files and current SHA-256 values.",

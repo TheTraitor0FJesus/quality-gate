@@ -36,6 +36,9 @@ from quality_gate.runtime import RuntimeManager, runtime_identity
 REPOSITORY = Path(__file__).resolve().parents[1]
 EXIT_UNCHECKED = 2
 EXPECTED_SELECTIONS = 2
+FRESH_PROCESSES = 8
+REUSED_PROCESSES = 3
+REUSED_TWO_SELECTION_PROCESSES = 4
 STILL_ACTIVE = 259
 TIMEOUT_WITH_CLEANUP_SECONDS = 5
 
@@ -172,7 +175,7 @@ def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
 @pytest.fixture(scope="module")
 def wheel_cache(tmp_path_factory: pytest.TempPathFactory) -> Path:
 	cache = tmp_path_factory.mktemp("wheel-cache")
-	for version in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1"):
+	for version in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2"):
 		prepare_edit_cache(cache, version)
 	return cache
 
@@ -214,7 +217,7 @@ def engine_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
 	return next(root.glob("quality_gate-*.whl"))
 
 
-@pytest.mark.parametrize("policy", ["v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1"])
+@pytest.mark.parametrize("policy", ["v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2"])
 @pytest.mark.parametrize("module", ["quality_gate.cli", "quality_gate.edit_cli"])
 def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 	tmp_path: Path,
@@ -232,24 +235,40 @@ def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 	payload = request(project, wheel_cache, "example.py")
 	payload["baseline"]["policy_release"] = policy
 	wheel_hash = digest(engine_wheel.read_bytes())
-	completed = subprocess.run(
-		[sys.executable, "-B", "-m", module, *(["edit-check"] if module.endswith(".cli") else [])],
-		cwd=launcher,
-		env={**os.environ, "PYTHONPATH": str(engine_wheel)},
-		input=json.dumps(payload).encode(),
-		capture_output=True,
-		check=False,
-		timeout=15,
-	)
-	assert completed.stderr == b"", completed.stderr.decode(errors="replace")
-	result = json.loads(completed.stdout)
-	assert completed.returncode == 1, result
-	assert result["status"] == "failed"
-	assert result["engine_version"] == __version__
-	assert {finding["rule"] for finding in result["files"][0]["findings"]} == {"F401"}
-	assert result["files"][0]["sha256"] == digest(path.read_bytes())
-	assert result["files"][0]["format"] == "passed"
-	assert result["selections"][0]["policy_release"] == policy
+	for expected_processes in (FRESH_PROCESSES, REUSED_PROCESSES):
+		payload["files"][0]["sha256"] = digest(path.read_bytes())
+		payload["deadline_unix_ms"] = int(time.time() * 1000) + 10_000
+		completed = subprocess.run(
+			[
+				sys.executable,
+				"-B",
+				"-m",
+				module,
+				*(["edit-check"] if module.endswith(".cli") else []),
+			],
+			cwd=launcher,
+			env={
+				**os.environ,
+				"PYTHONPATH": str(engine_wheel),
+				"LOCALAPPDATA": str(tmp_path / "user-cache"),
+				"XDG_CACHE_HOME": str(tmp_path / "user-cache"),
+			},
+			input=json.dumps(payload).encode(),
+			capture_output=True,
+			check=False,
+			timeout=15,
+		)
+		assert completed.stderr == b"", completed.stderr.decode(errors="replace")
+		result = json.loads(completed.stdout)
+		assert completed.returncode == 1, result
+		assert result["status"] == "failed"
+		assert result["engine_version"] == __version__
+		assert {finding["rule"] for finding in result["files"][0]["findings"]} == {"F401"}
+		assert result["files"][0]["input_sha256"] == payload["files"][0]["sha256"]
+		assert result["files"][0]["sha256"] == digest(path.read_bytes())
+		assert result["files"][0]["format"] == "passed"
+		assert result["selections"][0]["policy_release"] == policy
+		assert result["process_count"] == expected_processes
 	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = 1\n"
 	assert {item.name for item in project.iterdir()} == {"example.py"}
 	assert list(launcher.iterdir()) == []
@@ -272,17 +291,182 @@ def request(root: Path, cache: Path, *paths: str) -> dict[str, Any]:
 
 
 def invoke(payload: object) -> tuple[int, dict[str, Any]]:
+	invocation_environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+	if isinstance(payload, dict) and isinstance(payload.get("root"), str):
+		project = Path(payload["root"])
+		# Keep mutable result reuse local to this test, independently of shared releases.
+		cache_home = str(project.parent / f"{project.name}-user-cache")
+		invocation_environment.update(LOCALAPPDATA=cache_home, XDG_CACHE_HOME=cache_home)
 	result = subprocess.run(
 		[sys.executable, "-B", "-m", "quality_gate.cli", "edit-check"],
 		input=payload if isinstance(payload, bytes) else json.dumps(payload).encode(),
 		cwd=REPOSITORY,
-		env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+		env=invocation_environment,
 		capture_output=True,
 		check=False,
 		timeout=15,
 	)
 	assert result.stderr == b"", result.stderr.decode(errors="replace")
 	return result.returncode, json.loads(result.stdout)
+
+
+@pytest.mark.parametrize(
+	("initial", "expected_exit", "expected_rules"),
+	[(b"value=  1\n", 0, set()), (b"import os\n\nvalue=  1\n", 1, {"F401"})],
+)
+def test_unchanged_final_result_reuses_verified_selection(
+	tmp_path: Path,
+	edit_cache: Path,
+	initial: bytes,
+	expected_exit: int,
+	expected_rules: set[str],
+) -> None:
+	path = tmp_path / "example.py"
+	path.write_bytes(initial)
+	first_exit, first = invoke(request(tmp_path, edit_cache, "example.py"))
+	assert first_exit == expected_exit, first
+	assert first["files"][0]["changed"] is True
+	final_bytes = path.read_bytes()
+	reused_exit, reused = invoke(request(tmp_path, edit_cache, "example.py"))
+	assert reused_exit == expected_exit, reused
+	assert reused["status"] == first["status"]
+	assert reused["files"][0]["findings"] == first["files"][0]["findings"]
+	assert {finding["rule"] for finding in reused["files"][0]["findings"]} == expected_rules
+	assert reused["files"][0]["sha256"] == digest(final_bytes)
+	assert reused["files"][0]["input_sha256"] == digest(final_bytes)
+	assert reused["files"][0]["changed"] is False
+	assert reused["selections"] == first["selections"]
+	assert reused["inputs"] == first["inputs"]
+	assert reused["writes_may_have_occurred"] is False
+	assert path.read_bytes() == final_bytes
+	assert first["process_count"] == FRESH_PROCESSES  # Entry, worker, probe and five Ruff starts.
+	assert (
+		reused["process_count"] == REUSED_PROCESSES
+	)  # Revalidation still probes the selected Python.
+
+
+@pytest.mark.parametrize("module_path", ["zebra.py", "zebra.pyi", "namespace/zebra.py"])
+def test_import_layout_change_invalidates_reuse(
+	tmp_path: Path, edit_cache: Path, module_path: str
+) -> None:
+	module_name = module_path.removesuffix(".pyi").removesuffix(".py").replace("/", ".")
+	path = tmp_path / "example.py"
+	path.write_bytes(f"import {module_name}\nimport alpha\n".encode())
+	first_exit, first = invoke(request(tmp_path, edit_cache, "example.py"))
+	assert first_exit == 1, first
+	warm_exit, warm = invoke(request(tmp_path, edit_cache, "example.py"))
+	assert warm_exit == 1 and warm["process_count"] == REUSED_PROCESSES, warm
+	module = tmp_path / module_path
+	module.parent.mkdir(parents=True, exist_ok=True)
+	module.write_bytes(b"# Local module appeared after the previous checks.\n")
+	changed_exit, changed = invoke(request(tmp_path, edit_cache, "example.py"))
+	assert changed_exit == 1, changed
+	assert changed["process_count"] == FRESH_PROCESSES
+	assert path.read_bytes() == f"import alpha\n\nimport {module_name}\n".encode()
+	assert changed["files"][0]["sha256"] == digest(path.read_bytes())
+	assert {finding["rule"] for finding in changed["files"][0]["findings"]} == {"F401"}
+	assert module.read_bytes() == b"# Local module appeared after the previous checks.\n"
+
+
+def test_policy_selection_change_requires_fresh_ruff(tmp_path: Path, wheel_cache: Path) -> None:
+	(tmp_path / "example.py").write_bytes(b"import os\n")
+	for policy in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2"):
+		for expected_processes in (FRESH_PROCESSES, REUSED_PROCESSES):
+			payload = request(tmp_path, wheel_cache, "example.py")
+			payload["baseline"]["policy_release"] = policy
+			exit_code, result = invoke(payload)
+			assert exit_code == 1, result
+			assert result["process_count"] == expected_processes
+			assert result["selections"][0]["policy_release"] == policy
+
+
+@pytest.mark.parametrize(
+	"content",
+	[
+		b"'unterminated\n",
+		b"".join(f"variable_{index} = {index}\n".encode() for index in range(260)),
+	],
+)
+def test_unbounded_or_unlexable_import_context_runs_ruff(
+	tmp_path: Path, edit_cache: Path, content: bytes
+) -> None:
+	(tmp_path / "example.py").write_bytes(content)
+	for _ in range(2):
+		exit_code, result = invoke(request(tmp_path, edit_cache, "example.py"))
+		assert exit_code in {0, 1}, result
+		assert result["process_count"] == FRESH_PROCESSES
+
+
+@pytest.mark.parametrize("change", ["file", "ruff.toml", "pyproject.toml", ".gitignore", "waiver"])
+def test_working_tree_changes_invalidate_reuse(
+	tmp_path: Path, edit_cache: Path, change: str
+) -> None:
+	path = tmp_path / "example.py"
+	path.write_bytes(b"import os\n\nvalue = 1\n")
+	manifest = tmp_path / "quality-gate.toml"
+	manifest.write_text(
+		'[quality]\nschema = 2\npolicy_release = "v2.4.2"\n'
+		'[repository]\nname = "reuse"\ndomains = ["repository"]\n'
+		'required_documents = ["quality-gate.toml"]\n',
+		encoding="utf-8",
+	)
+	exit_code, original = invoke(request(tmp_path, edit_cache, "example.py"))
+	assert exit_code == 1, original
+	if change == "file":
+		path.write_bytes(b"import os\n\nvalue=  2\n")
+	elif change == "waiver":
+		with manifest.open("a", encoding="utf-8") as stream:
+			stream.write(
+				'[[waivers]]\nkind = "standard"\ncheck_id = "repository.git.tracked_junk"\n'
+				'target = "other.py"\nreason = "Controlled reuse invalidation fixture."\n'
+				'approved_by = "fixture"\nreviewed_on = "2026-10-18"\nexpires_on = "2027-10-18"\n'
+			)
+	else:
+		(tmp_path / change).write_bytes(b"# Working-tree configuration changed.\n")
+	exit_code, changed = invoke(request(tmp_path, edit_cache, "example.py"))
+	assert exit_code == 1, changed
+	assert changed["process_count"] == FRESH_PROCESSES
+	assert {finding["rule"] for finding in changed["files"][0]["findings"]} == {"F401"}
+	assert changed["files"][0]["sha256"] == digest(path.read_bytes())
+	if change != "file":
+		assert changed["inputs"] != original["inputs"]
+
+
+@pytest.mark.parametrize(
+	"failure", ["record", "missing", "truncated", "oversized", "key", "no_key", "locked"]
+)
+def test_corrupt_reuse_cannot_supply_a_clean_verdict(
+	tmp_path: Path, edit_cache: Path, failure: str
+) -> None:
+	path = tmp_path / "example.py"
+	path.write_bytes(b"import os\n\nvalue = 1\n")
+	exit_code, first = invoke(request(tmp_path, edit_cache, "example.py"))
+	assert exit_code == 1, first
+	cache = tmp_path.parent / f"{tmp_path.name}-user-cache" / "quality-gate/edit-results-v1"
+	record = next(cache.glob("*.json"))
+	if failure == "record":
+		forged = json.loads(record.read_bytes())
+		forged["payload"]["result"]["status"] = "passed"
+		forged["payload"]["result"]["files"][0].update(status="passed", findings=[])
+		record.write_text(json.dumps(forged), encoding="utf-8")
+	elif failure == "missing":
+		record.unlink()
+	elif failure == "truncated":
+		record.write_bytes(b'{"payload":')
+	elif failure == "oversized":
+		record.write_bytes(b"x" * (300 * 1024))
+	elif failure == "key":
+		(cache / "key").write_bytes(b"changed key")
+	elif failure == "locked":
+		(cache / ".lock").write_bytes(b"held by another invocation\n")
+	else:
+		(cache / "key").unlink()
+	exit_code, checked = invoke(request(tmp_path, edit_cache, "example.py"))
+	assert exit_code == 1, checked
+	assert checked["process_count"] == FRESH_PROCESSES
+	assert {finding["rule"] for finding in checked["files"][0]["findings"]} == {"F401"}
+	assert checked["files"][0]["sha256"] == digest(path.read_bytes())
+	assert path.read_bytes() == b"import os\n\nvalue = 1\n"
 
 
 def test_invalid_request_is_unchecked_and_does_not_echo_input() -> None:
@@ -428,6 +612,21 @@ def test_managed_old_pin_and_outside_component_baseline_are_distinct(
 	assert len(result["selections"]) == EXPECTED_SELECTIONS
 	assert result["files"][0]["component"] == "app"
 	assert (tmp_path / "outside.py").read_bytes() == b"other = 2\n"
+	exit_code, reused = invoke(request(tmp_path, edit_cache, "src/example.py", "outside.py"))
+	assert exit_code == 0 and reused["process_count"] == REUSED_TWO_SELECTION_PROCESSES, reused
+	manifest = load_manifest(tmp_path)
+	manager = RuntimeManager(edit_cache)
+	metadata = (
+		manager.path_for(tmp_path, runtime_identity(tmp_path, manifest, manifest.python[0]))
+		/ "runtime.json"
+	)
+	original_metadata = metadata.read_bytes()
+	try:
+		metadata.write_bytes(b"{}")
+		exit_code, invalid = invoke(request(tmp_path, edit_cache, "src/example.py", "outside.py"))
+		assert (exit_code, invalid["reason"]) == (2, "runtime"), invalid
+	finally:
+		metadata.write_bytes(original_metadata)
 	(tmp_path / "requirements.txt").write_bytes(b"changed-dependency==1\n")
 	exit_code, result = invoke(request(tmp_path, edit_cache, "src/example.py"))
 	assert (exit_code, result["reason"]) == (2, "runtime")
@@ -634,14 +833,22 @@ def test_missing_and_corrupt_prerequisites_are_unchecked(
 	(tmp_path / "example.py").write_bytes(b"value=  1\n")
 	payload = request(tmp_path, edit_cache, "example.py")
 	expected = "runtime"
+	cache = tmp_path / "cache"
+	if failure in {"release", "tool"}:
+		shutil.copytree(edit_cache / "releases", cache / "releases")
+		shutil.copytree(edit_cache / "edit-tools", cache / "edit-tools")
+		payload["cache_dir"] = str(cache)
+	exit_code, fresh = invoke(payload)
+	assert exit_code == 0 and fresh["process_count"] == FRESH_PROCESSES, fresh
+	payload["files"][0]["sha256"] = digest((tmp_path / "example.py").read_bytes())
+	payload["deadline_unix_ms"] = int(time.time() * 1000) + 10_000
+	exit_code, reused = invoke(payload)
+	assert exit_code == 0 and reused["process_count"] == REUSED_PROCESSES, reused
+	payload["deadline_unix_ms"] = int(time.time() * 1000) + 10_000
 	if failure == "missing_release":
 		payload["cache_dir"] = str(tmp_path / "missing-cache")
 		expected = "release"
 	elif failure in {"release", "tool"}:
-		cache = tmp_path / "cache"
-		shutil.copytree(edit_cache / "releases", cache / "releases")
-		shutil.copytree(edit_cache / "edit-tools", cache / "edit-tools")
-		payload["cache_dir"] = str(cache)
 		if failure == "release":
 			(cache / "releases/v2.4.2/quality_gate/policy/ruff.toml").write_bytes(b"corrupt")
 		else:
@@ -661,8 +868,24 @@ def test_missing_and_corrupt_prerequisites_are_unchecked(
 		expected = "configuration"
 	exit_code, result = invoke(payload)
 	assert (exit_code, result["reason"]) == (2, expected), result
-	assert (tmp_path / "example.py").read_bytes() == b"value=  1\n"
+	assert (tmp_path / "example.py").read_bytes() == b"value = 1\n"
 	assert "synthetic-sensitive-value" not in json.dumps(result)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable permission bits")
+def test_nonexecutable_tool_invalidates_a_cached_verdict(tmp_path: Path, edit_cache: Path) -> None:
+	cache = tmp_path / "cache"
+	shutil.copytree(edit_cache / "releases", cache / "releases")
+	shutil.copytree(edit_cache / "edit-tools", cache / "edit-tools")
+	path = tmp_path / "example.py"
+	path.write_bytes(b"value = 1\n")
+	for expected_processes in (FRESH_PROCESSES, REUSED_PROCESSES):
+		exit_code, result = invoke(request(tmp_path, cache, "example.py"))
+		assert exit_code == 0 and result["process_count"] == expected_processes, result
+	next((cache / "edit-tools").glob("*/*")).chmod(0o600)
+	exit_code, result = invoke(request(tmp_path, cache, "example.py"))
+	assert (exit_code, result["reason"]) == (2, "tool"), result
+	assert path.read_bytes() == b"value = 1\n"
 
 
 def runtime_wrapper(root: Path, body: str) -> Path:

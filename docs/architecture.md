@@ -23,6 +23,8 @@ Use this map before non-trivial codebase questions, design work, or code changes
   configuration freshness; `edit_policy.py` verifies exact compatible releases and explicitly
   provisions native Ruff through `edit-setup`; `edit_check.py` selects only relevant prepared
   runtimes, batches isolated safe fixes/format/final checks, then publishes current bytes.
+  `edit_reuse.py` stores bounded authenticated complete results; fresh provider selection,
+  artifact/configuration checks and `edit_inputs.py` import-layout facts govern reuse.
   This path uses schema validation through `contracts.parse_manifest` without expanding
   supplemental test targets. It creates no Git-index candidate and runs no full checks or setup.
   The supervisor imports the explicit engine directory or wheel and starts the worker in
