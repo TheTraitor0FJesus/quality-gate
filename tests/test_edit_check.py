@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from quality_gate import __version__
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import default_cache_root
 from quality_gate.edit_inputs import Configuration
@@ -72,10 +73,15 @@ def edit_cache() -> Iterator[Path]:
 		yield prepare_edit_cache(Path(directory))
 
 
-def prepare_edit_cache(cache: Path) -> Path:
-	release = cache / "releases" / "v2.4.2"
+def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
+	release = cache / "releases" / version
 	release.mkdir(parents=True)
-	files = {f"quality_gate-{'2.4.2'}-py3-none-any.whl": ("artifact", b"policy wheel fixture")}
+	files = {
+		f"quality_gate-{version.removeprefix('v')}-py3-none-any.whl": (
+			"artifact",
+			b"policy wheel fixture",
+		)
+	}
 	files.update(
 		{
 			f"{name}-{version}-py3-none-any.whl": ("dependency", b"dependency fixture")
@@ -88,7 +94,7 @@ def prepare_edit_cache(cache: Path) -> Path:
 			for path in UNIFIED_RELEASE_POLICY_FILES
 		}
 	)
-	manifest = ["[release]", 'version = "v2.4.2"']
+	manifest = ["[release]", f'version = "{version}"']
 	for path, (kind, content) in files.items():
 		target = release / path
 		target.parent.mkdir(parents=True, exist_ok=True)
@@ -102,9 +108,9 @@ def prepare_edit_cache(cache: Path) -> Path:
 			]
 		)
 	platform = "windows" if os.name == "nt" else "linux"
-	for name, version in UNIFIED_RELEASE_TOOLS.items():
+	for name, tool_version in UNIFIED_RELEASE_TOOLS.items():
 		path = UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform].get(
-			name, f"{name}-{version}-py3-none-any.whl"
+			name, f"{name}-{tool_version}-py3-none-any.whl"
 		)
 		content = b"tool fixture"
 		if name == "ruff":
@@ -128,7 +134,7 @@ def prepare_edit_cache(cache: Path) -> Path:
 						.rstrip("=")
 					)
 					archive.writestr(
-						f"ruff-{version}.dist-info/RECORD",
+						f"ruff-{tool_version}.dist-info/RECORD",
 						f"ruff/{binary.name},sha256={encoded_digest},{len(binary_content)}\n",
 					)
 				content = (release / path).read_bytes()
@@ -137,7 +143,7 @@ def prepare_edit_cache(cache: Path) -> Path:
 			[
 				"[[release.tools]]",
 				f'name = "{name}"',
-				f'version = "{version}"',
+				f'version = "{tool_version}"',
 				f'path = "{path}"',
 				f'sha256 = "{digest(content)}"',
 			]
@@ -151,7 +157,7 @@ def prepare_edit_cache(cache: Path) -> Path:
 			"quality_gate.cli",
 			"edit-setup",
 			"--policy-release",
-			"v2.4.2",
+			version,
 			"--cache-dir",
 			str(cache),
 		],
@@ -161,6 +167,93 @@ def prepare_edit_cache(cache: Path) -> Path:
 	)
 	assert result.returncode == 0, result.stdout + result.stderr
 	return cache
+
+
+@pytest.fixture(scope="module")
+def wheel_cache(tmp_path_factory: pytest.TempPathFactory) -> Path:
+	cache = tmp_path_factory.mktemp("wheel-cache")
+	for version in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1"):
+		prepare_edit_cache(cache, version)
+	return cache
+
+
+@pytest.fixture(scope="module")
+def engine_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+	"""Build immutable packaging infrastructure once; never extract it for execution."""
+	root = tmp_path_factory.mktemp("engine-wheel")
+	source = root / "source"
+	source.mkdir()
+	shutil.copy2(REPOSITORY / "pyproject.toml", source)
+	shutil.copytree(
+		REPOSITORY / "quality_gate",
+		source / "quality_gate",
+		ignore=shutil.ignore_patterns("__pycache__"),
+	)
+	# The release build backend lives in the base build environment, not project runtimes.
+	build_python = Path(sys.base_prefix) / ("python.exe" if os.name == "nt" else "bin/python3")
+	result = subprocess.run(
+		[
+			str(build_python),
+			"-B",
+			"-m",
+			"pip",
+			"wheel",
+			"--no-deps",
+			"--no-build-isolation",
+			"--no-cache-dir",
+			"--wheel-dir",
+			str(root),
+			str(source),
+		],
+		cwd=root,
+		capture_output=True,
+		check=False,
+		timeout=60,
+	)
+	assert result.returncode == 0, result.stdout + result.stderr
+	return next(root.glob("quality_gate-*.whl"))
+
+
+@pytest.mark.parametrize("policy", ["v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1"])
+@pytest.mark.parametrize("module", ["quality_gate.cli", "quality_gate.edit_cli"])
+def test_wheel_on_pythonpath_checks_working_files_without_extraction(
+	tmp_path: Path,
+	wheel_cache: Path,
+	engine_wheel: Path,
+	policy: str,
+	module: str,
+) -> None:
+	project = tmp_path / "project with spaces"
+	project.mkdir()
+	path = project / "example.py"
+	path.write_bytes(b"import sys\nimport os\n\nvalue=  1\n")
+	launcher = tmp_path / "launcher"
+	launcher.mkdir()
+	payload = request(project, wheel_cache, "example.py")
+	payload["baseline"]["policy_release"] = policy
+	wheel_hash = digest(engine_wheel.read_bytes())
+	completed = subprocess.run(
+		[sys.executable, "-B", "-m", module, *(["edit-check"] if module.endswith(".cli") else [])],
+		cwd=launcher,
+		env={**os.environ, "PYTHONPATH": str(engine_wheel)},
+		input=json.dumps(payload).encode(),
+		capture_output=True,
+		check=False,
+		timeout=15,
+	)
+	assert completed.stderr == b"", completed.stderr.decode(errors="replace")
+	result = json.loads(completed.stdout)
+	assert completed.returncode == 1, result
+	assert result["status"] == "failed"
+	assert result["engine_version"] == __version__
+	assert {finding["rule"] for finding in result["files"][0]["findings"]} == {"F401"}
+	assert result["files"][0]["sha256"] == digest(path.read_bytes())
+	assert result["files"][0]["format"] == "passed"
+	assert result["selections"][0]["policy_release"] == policy
+	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = 1\n"
+	assert {item.name for item in project.iterdir()} == {"example.py"}
+	assert list(launcher.iterdir()) == []
+	assert digest(engine_wheel.read_bytes()) == wheel_hash
 
 
 def request(root: Path, cache: Path, *paths: str) -> dict[str, Any]:

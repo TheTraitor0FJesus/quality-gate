@@ -25,6 +25,8 @@ Use this map before non-trivial codebase questions, design work, or code changes
   runtimes, batches isolated safe fixes/format/final checks, then publishes current bytes.
   This path uses schema validation through `contracts.parse_manifest` without expanding
   supplemental test targets. It creates no Git-index candidate and runs no full checks or setup.
+  The supervisor imports the explicit engine directory or wheel and starts the worker in
+  its private same-volume workspace; an archive path is never used as a working directory.
   See [the public protocol and compatibility contract](edit-check.md).
 
 - **Dependabot owner review** — `.github/workflows/dependabot-review.yml` handles non-draft
