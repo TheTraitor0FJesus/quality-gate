@@ -8,13 +8,22 @@ An open provider PR does not install a hook or publish an immutable release.
 
 ## Invocation and request
 
-Install the interface engine from the published Quality Gate **v2.6.0** wheel. Invoke
+Install the interface engine from the corrected Quality Gate **v2.6.1** wheel after
+publication. Invoke
 `quality-gate edit-check` or `python -I -B -m quality_gate.cli edit-check` with one UTF-8
 JSON object on stdin and close stdin. The equivalent entry point is `quality-gate-edit`.
 The regular module route dispatches before loading full Gate orchestration and is the
 host integration route measured below. A completed transport emits one JSON object and
 no raw tool output. Do not import provider internals or its mutable checkout.
 The executable engine and the selected policy release are separate identities.
+
+The verified native release launcher may instead put the absolute engine wheel on
+`PYTHONPATH` and invoke `python -B -m quality_gate.cli edit-check` without extracting
+or installing it. Do not add `-I` to that outer invocation: it ignores `PYTHONPATH`.
+The supervised worker still uses `-I -S -B`, imports the explicit engine location,
+and starts in its private same-volume workspace. The v2.6.0 engine fails with
+`unchecked / io` in this archive-backed launch mode; upgrade the engine explicitly
+to v2.6.1 after publication while retaining the selected policy pin.
 
 ```json
 {
@@ -88,10 +97,11 @@ a fallback for an invalid manifest, incompatible managed pin, or missing managed
 
 | Selected policy | Interface engine | Coverage |
 | --- | --- | --- |
-| v2.4.2 | v2.6.0 | Supported exact old policy; initial skills consumer pin |
-| v2.5.0 | v2.6.0 | Supported exact old policy |
-| v2.6.0 | v2.6.0 | Supported candidate policy, usable only after publication |
-| Any other version | v2.6.0 | `unchecked / unsupported_policy`; explicit consumer upgrade required |
+| v2.4.2 | v2.6.1 | Supported exact old policy; initial skills consumer pin |
+| v2.5.0 | v2.6.1 | Supported exact old policy |
+| v2.6.0 | v2.6.1 | Supported exact published policy |
+| v2.6.1 | v2.6.1 | Supported candidate policy, usable only after publication |
+| Any other version | v2.6.1 | `unchecked / unsupported_policy`; explicit consumer upgrade required |
 
 The compatibility adapter uses schema 2 and the same component path membership and
 released Ruff configuration as these releases. Their Python manifest/runtime/Ruff

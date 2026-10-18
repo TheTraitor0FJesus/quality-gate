@@ -34,9 +34,10 @@ making the release candidate depend on its own unpublished wheel.
 
 ## Product verification
 
-The v2.6.0 candidate adds the public [working-tree Ruff interface](edit-check.md). Its interface
-engine can execute exact compatible older policies independently of the installed engine version.
-Keep source `quality.policy_release` on published v2.5.0 while preparing this candidate. Host
+The public [working-tree Ruff interface](edit-check.md) was introduced in v2.6.0. The v2.6.1
+candidate repairs direct wheel execution through the native release launcher. Its interface
+engine retains exact v2.4.2/v2.5.0/v2.6.0 policy compatibility independently of engine version.
+The source policy pin stays on its current published release; activation uses the separate route above. Host
 installation/activation and the initial v2.4.2 consumer's `edit-setup` remain separate post-publication
 work; the provider acceptance record does not establish installed host-event acceptance.
 

@@ -103,7 +103,7 @@ def main() -> int:
 			)
 			code, output, stderr = run_process(
 				[str(worker_python), "-I", "-S", "-B", "-c", entry],
-				root=package_root,
+				root=Path(directory).resolve(),
 				environment={
 					key: value
 					for key, value in os.environ.items()

@@ -154,6 +154,40 @@ Disposable fixtures, installed engine, measurement scripts and reports are task-
 verification resources outside the repository. They must be removed after final verification
 and review; immutable user releases and existing runtimes remain untouched.
 
+## Direct wheel correction (v2.6.1 candidate)
+
+The published v2.6.0 host smoke exposed an archive-backed launch defect after this
+record's extracted-install measurements. The confirmed Windows engine wheel SHA-256
+is `6f065d0ba5188bee51c6d1f47ec3cf1eb9aca01f7d72c4bd80da101d57673106`; its
+`release.toml` SHA-256 is `0f3257c2fdef15fd7db42100f44c85d593264e19e74c7f58184d194582c55a18`.
+The native launcher puts the verified wheel on `PYTHONPATH`. The v2.6.0 supervisor
+then used that archive file as cwd and returned `unchecked / io` before checking files.
+The v2.6.1 correction uses the existing private workspace as cwd while retaining the
+explicit engine import and isolated worker. See the [escaped-defect lesson](../../lessons/incident-2026-10-edit-wheel-cwd.md)
+and the [corrected invocation and compatibility contract](../edit-check.md).
+
+The public wheel regression first reproduced exit 2, `io`, and zero elapsed milliseconds
+as `wheel-cwd-red-20261017-03`. `wheel-cwd-green-20261017-04` then passed eight Windows
+cases: both public CLI modules with v2.4.2/v2.5.0/v2.6.0 and the v2.6.1 candidate pin.
+The same platform-independent cases run in Linux CI. The provider's CI prepares the
+base build environment from the existing hash-locked `.release/build-requirements.txt`;
+the backend is not assumed to be preinstalled, and this preparation applies only to
+the provider repository. The real wheel is built once, then passed directly on
+`PYTHONPATH`; it is neither installed nor extracted for execution. The test
+checks safe fixes, residual F401, final hashes and workspace cleanup. This correction
+does not certify actual host event delivery or replace the earlier measured wheel's
+identity. The unchanged 1,000/2,000 ms targets and full host timing acceptance remain open.
+
+`wheel-cwd-module-20261017-07` passed the complete edit-check module: 60 passed and
+one explicit POSIX-layout skip on Windows. The first wheel case, including shared
+immutable infrastructure, took 9.767 seconds; the wheel and prepared policy cache
+are module-scoped, while mutable projects remain isolated per case.
+`wheel-cwd-real-releases-20261017-06` passed six public CLI invocations against genuine
+cached v2.4.2/v2.5.0/v2.6.0 inventories: residual F401 after formatting and a clean
+follow-up for each pin, with unchanged release and wheel hashes. Its disposable
+engine wheel SHA-256 is `2c7674b09fc1a20f83f02518b1f70a490d9cc15c336bb2eb77c895d2c021f6ff`.
+These are functional checks, not replacements for the required 30-edit host profiles.
+
 ## Pending host activation
 
 After publication/readback, the host must install the exact engine wheel and record its
