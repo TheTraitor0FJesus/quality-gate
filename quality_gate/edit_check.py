@@ -14,7 +14,14 @@ from typing import Any
 from . import __version__
 from .contracts import Manifest, PythonComponent, ValidationError, parse_manifest
 from .distribution import PolicyCache
-from .edit_inputs import Configuration, SourceFile, read_bounded, regular_path, sources
+from .edit_inputs import (
+	Configuration,
+	ImportContext,
+	SourceFile,
+	read_bounded,
+	regular_path,
+	sources,
+)
 from .edit_policy import file_sha256, ruff_artifact, select_release, sha256, tool_path
 from .edit_process import run_process
 from .edit_protocol import (
@@ -25,6 +32,7 @@ from .edit_protocol import (
 	EditError,
 	encode,
 )
+from .edit_reuse import ResultReuse, identity_digest
 from .runtime import RuntimeManager, runtime_fingerprint, runtime_identity
 
 _PROBE = (
@@ -70,6 +78,7 @@ class Invocation:
 		self.process_count = 2  # Public entry process plus its supervised worker.
 		self.cache = PolicyCache(request.get("cache_dir"))
 		self.configuration = Configuration(self.root)
+		self.imports: ImportContext | None = None
 		self.releases: dict[str, tuple[Path, Path, dict[str, Any]]] = {}
 		self.selections: dict[tuple[str, str, str], Selection] = {}
 		self.artifacts: dict[Path, str] = {}
@@ -106,6 +115,7 @@ class Invocation:
 		tool = tool_path(self.cache, artifact.sha256)
 		if (
 			not tool.is_file()
+			or not os.access(tool, os.X_OK)
 			or tool.is_symlink()
 			or file_sha256(tool, 64 * 1024 * 1024) != artifact.sha256
 		):
@@ -195,6 +205,7 @@ class Invocation:
 		for python, target in self.interpreters.items():
 			if python.resolve(strict=True) != target:
 				raise EditError("stale_input")
+
 		for path, expected in self.artifacts.items():
 			if (
 				not path.is_file()
@@ -202,6 +213,11 @@ class Invocation:
 				or file_sha256(path, 64 * 1024 * 1024) != expected
 			):
 				raise EditError("stale_input")
+
+	def assert_configuration_current(self) -> None:
+		self.configuration.assert_current()
+		if self.imports is not None:
+			self.imports.assert_current()
 
 	def check_batch(
 		self, selection: Selection, files: list[SourceFile], workspace: Path
@@ -367,7 +383,7 @@ def _component(manifest: Manifest | None, path: str) -> PythonComponent | None:
 def _publish(
 	invocation: Invocation, files: list[SourceFile], workspace: Path, records: list[dict[str, Any]]
 ) -> None:
-	invocation.configuration.assert_current()
+	invocation.assert_configuration_current()
 	invocation.assert_artifacts_current()
 	for file in files:
 		if (
@@ -386,7 +402,7 @@ def _publish(
 		staged = workspace / file.path
 		staged.chmod(target.stat().st_mode)
 		os.replace(staged, target)
-	invocation.configuration.assert_current()
+	invocation.assert_configuration_current()
 	for record in records:
 		if (
 			sha256(read_bounded(regular_path(invocation.root, record["path"]), MAX_FILE_BYTES))
@@ -405,19 +421,69 @@ def execute(request: dict[str, Any], deadline: float, workspace: Path) -> dict[s
 		raise
 
 
-def _execute(invocation: Invocation, workspace: Path) -> dict[str, Any]:
-	request = invocation.request
-	files = sources(invocation.root, request["files"])
-	configuration = invocation.configuration
+def _reuse_identity(
+	invocation: Invocation, records: list[dict[str, Any]], selections: list[Selection]
+) -> str | None:
+	if invocation.imports is None or invocation.imports.identity is None or not selections:
+		return None
+	return identity_digest(
+		{
+			"engine": __version__,
+			"root": str(invocation.root),
+			"files": [
+				{
+					key: record[key]
+					for key in ("path", "sha256", "coverage", "component", "selection")
+				}
+				for record in records
+			],
+			"selections": [selection.identity for selection in selections],
+			"inputs": invocation.configuration.as_list(),
+			"imports": invocation.imports.identity if invocation.imports is not None else None,
+			"artifacts": sorted(
+				(str(path), digest) for path, digest in invocation.artifacts.items()
+			),
+		}
+	)
+
+
+def _reused_result(
+	invocation: Invocation,
+	files: list[SourceFile],
+	records: list[dict[str, Any]],
+	selections: list[Selection],
+	workspace: Path,
+) -> dict[str, Any] | None:
+	cached = ResultReuse(invocation.deadline).lookup(
+		_reuse_identity(invocation, records, selections)
+	)
+	if cached is None:
+		return None
+	for record in cached["files"]:
+		record.update(input_sha256=record["sha256"], changed=False)
+	cached.update(process_count=invocation.process_count, writes_may_have_occurred=False)
+	_publish(invocation, files, workspace, cached["files"])
+	return cached
+
+
+def _working_manifest(configuration: Configuration) -> Manifest | None:
 	manifest_content = configuration.capture("quality-gate.toml")
 	try:
-		manifest = (
+		return (
 			parse_manifest(manifest_content.decode("utf-8"))
 			if manifest_content is not None
 			else None
 		)
 	except (ValidationError, UnicodeError) as error:
 		raise EditError("manifest") from error
+
+
+def _execute(invocation: Invocation, workspace: Path) -> dict[str, Any]:
+	request = invocation.request
+	files = sources(invocation.root, request["files"])
+	invocation.imports = ImportContext(invocation.root, files)
+	configuration = invocation.configuration
+	manifest = _working_manifest(configuration)
 	configuration.for_sources(files)
 	batches: dict[int, list[SourceFile]] = {}
 	selections: list[Selection] = []
@@ -444,6 +510,9 @@ def _execute(invocation: Invocation, workspace: Path) -> dict[str, Any]:
 			record["selection"] = index
 			batches.setdefault(index, []).append(file)
 		records.append(record)
+	cached = _reused_result(invocation, files, records, selections, workspace)
+	if cached is not None:
+		return cached
 	for index, batch in batches.items():
 		results = invocation.check_batch(selections[index], batch, workspace)
 		for record in records:
@@ -474,4 +543,7 @@ def _execute(invocation: Invocation, workspace: Path) -> dict[str, Any]:
 	}
 	encode(result)
 	_publish(invocation, files, workspace, records)
+	ResultReuse(invocation.deadline).remember(
+		_reuse_identity(invocation, records, selections), result
+	)
 	return result

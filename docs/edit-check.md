@@ -8,7 +8,7 @@ An open provider PR does not install a hook or publish an immutable release.
 
 ## Invocation and request
 
-Install the interface engine from the corrected Quality Gate **v2.6.1** wheel after
+Install the interface engine from the Quality Gate **v2.6.2** wheel after
 publication. Invoke
 `quality-gate edit-check` or `python -I -B -m quality_gate.cli edit-check` with one UTF-8
 JSON object on stdin and close stdin. The equivalent entry point is `quality-gate-edit`.
@@ -97,11 +97,12 @@ a fallback for an invalid manifest, incompatible managed pin, or missing managed
 
 | Selected policy | Interface engine | Coverage |
 | --- | --- | --- |
-| v2.4.2 | v2.6.1 | Supported exact old policy; initial skills consumer pin |
-| v2.5.0 | v2.6.1 | Supported exact old policy |
-| v2.6.0 | v2.6.1 | Supported exact published policy |
-| v2.6.1 | v2.6.1 | Supported candidate policy, usable only after publication |
-| Any other version | v2.6.1 | `unchecked / unsupported_policy`; explicit consumer upgrade required |
+| v2.4.2 | v2.6.2 | Supported exact old policy; initial skills consumer pin |
+| v2.5.0 | v2.6.2 | Supported exact old policy |
+| v2.6.0 | v2.6.2 | Supported exact published policy |
+| v2.6.1 | v2.6.2 | Supported exact published policy |
+| v2.6.2 | v2.6.2 | Supported candidate policy, usable only after publication |
+| Any other version | v2.6.2 | `unchecked / unsupported_policy`; explicit consumer upgrade required |
 
 The compatibility adapter uses schema 2 and the same component path membership and
 released Ruff configuration as these releases. Their Python manifest/runtime/Ruff
@@ -187,7 +188,7 @@ fresh bytes and retry the entire batch. Results never claim checks for a stale v
 ```json
 {
   "schema": 1,
-  "engine_version": "2.6.0",
+  "engine_version": "2.6.2",
   "root": "/absolute/project",
   "status": "failed",
   "reason": null,
@@ -258,16 +259,57 @@ Bounds: 64 KiB request, 10 file entries before deduplication, 128 KiB per file, 
 256 KiB per configuration input and 1 MiB aggregate configuration; 512 KiB stdout and
 stderr per tool; 200 final findings; 256 KiB JSON result. Over-limit requests/results
 are unchecked with no silent truncation. The source, tool and result bounds are
-checked before publishing writes. The provider does not cache clean file verdicts:
-configuration, dependency, suppression and policy changes cannot reuse stale success.
+checked before publishing writes.
+
+## Unchanged-content reuse
+
+Starting with engine v2.6.2, send the same schema 1 request with freshly captured bytes
+and a fresh deadline after each edit. The provider alone decides reuse; host verdicts,
+tokens and private release/runtime selection rules are not part of this contract.
+Earlier schema 1 engines always run Ruff and expose no complete identity-only probe,
+so their response alone is insufficient for safe host-owned reuse.
+
+Every invocation freshly resolves the exact selected release and validates its full
+inventory, native Ruff bytes, interpreter bytes/version and prepared runtime metadata.
+The reuse identity binds engine version, canonical root, ordered complete file batch
+and final hashes, managed/baseline coverage, selection identities, configuration,
+waiver/dependency inputs and artifact paths/digests. It also observes filesystem facts
+under the explicit root and `src` for bounded source identifier/dotted-name candidates:
+adding/removing a local module can change Ruff's first-party import classification.
+Unreadable, unlexable or over-bound import context disables reuse and runs ordinary Ruff.
+No imported source contents or repository-wide discovery are needed.
+
+Only complete `passed` or `failed` batches are remembered after publication freshness
+checks. Incomplete worker results and wholly inapplicable batches are not saved.
+A hit retains residual findings, final coordinates/hashes, selections and inputs;
+`input_sha256` is the current request hash, `changed=false`, and
+`writes_may_have_occurred=false`. Process count and elapsed time describe the current
+invocation. Existing source/configuration/artifact freshness checks still run before
+returning. Failed delivery or an outer timeout remains unchecked at the caller even
+when the worker completed; receiving a complete current response remains mandatory.
+
+The optional private cache is `edit-results-v1` under the normal user-local Gate cache,
+independent of request `cache_dir`. It retains at most 16 direct-mapped JSON records of
+256 KiB plus a 512-byte envelope each, a random 32-byte HMAC key and a nonblocking lock.
+Records contain schema 1 diagnostics/identities, never source/configuration contents.
+The provider authenticates records with HMAC-SHA256; the key and records are written
+atomically with private permissions where supported. This detects corrupted/forged
+records without treating another process under the same OS account as a security boundary.
+Missing, corrupt, oversized, locked or unavailable storage runs ordinary Ruff. Slot
+collisions only lose reuse. An abandoned lock can disable reuse until this disposable
+directory is removed while checks are idle; required release/runtime caches remain separate.
+
+Host integration keeps its exact policy pin and normal result validation, including
+current `input_sha256`, actual final bytes, exact root/engine, and configuration identities.
+Session/event attribution and deduplicating delivered messages remain host responsibilities.
 
 ## Handoff and acceptance evidence
 
-The provider candidate targets a backward-compatible MINOR release from live v2.5.0
-to v2.6.0. The provider source manifest remains on published v2.5.0. Owner merge and
+The reuse candidate targets PATCH v2.6.2 from published v2.6.1. The provider source
+manifest remains on its current published v2.5.0 policy. Owner merge and
 the existing Windows/Linux release verification/publication must finish before host
 installation. Then the host must record the engine wheel/release identities, explicitly
-select its baseline, run `edit-setup` for both baseline and managed pins, validate its
+select its baseline, retain/provision `edit-setup` for baseline and managed pins, validate its
 result reader and complete real Codex-event and latency acceptance. No consumer pin
 migration is required for the initial v2.4.2 consumer. Other pins require the matrix
 check above; this PR does not activate host settings or change consumer pins.

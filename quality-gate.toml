@@ -1,3 +1,5 @@
+supplemental_tests = []
+
 [[waivers]]
 kind = "standard"
 check_id = "repository.workflow"

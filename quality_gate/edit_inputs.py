@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import io
+import json
 import re
 import stat
+import tokenize
 import tomllib
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +24,9 @@ from .edit_protocol import (
 	MAX_TOTAL_BYTES,
 	EditError,
 )
+
+_MAX_IMPORT_NAMES = 256
+_MAX_IMPORT_SEGMENTS = 32
 
 
 def regular_path(root: Path, relative: str, *, optional: bool = False) -> Path:
@@ -68,6 +75,64 @@ class SourceFile:
 	path: str
 	content: bytes
 	sha256: str
+
+
+def _module_names(files: list[SourceFile]) -> set[tuple[str, ...]] | None:
+	"""Overapproximate import candidates without depending on Python grammar versions."""
+	names: set[tuple[str, ...]] = set()
+	try:
+		for source in files:
+			chain: tuple[str, ...] = ()
+			dotted = False
+			for token in tokenize.tokenize(io.BytesIO(source.content).readline):
+				if token.type == tokenize.ERRORTOKEN:
+					return None
+				if token.type == tokenize.NAME:
+					name = unicodedata.normalize("NFKC", token.string)
+					chain = (*chain, name) if dotted else (name,)
+					names.add(chain)
+					dotted = False
+					if len(names) > _MAX_IMPORT_NAMES or len(chain) > _MAX_IMPORT_SEGMENTS:
+						return None
+				elif token.type == tokenize.OP and token.string == "." and chain:
+					dotted = True
+				elif token.type not in {tokenize.NL, tokenize.COMMENT, tokenize.ENCODING}:
+					chain, dotted = (), False
+	except (SyntaxError, UnicodeError, LookupError, tokenize.TokenError):
+		return None
+	return names
+
+
+class ImportContext:
+	"""Bounded source-root facts used by Ruff's first-party import classification."""
+
+	def __init__(self, root: Path, files: list[SourceFile]) -> None:
+		self.facts: dict[Path, tuple[bool, bool]] = {}
+		self.identity: str | None = None
+		names = _module_names(files)
+		if names is None:
+			return
+		try:
+			for base in (root, root / "src"):
+				for name in names:
+					module = base.joinpath(*name)
+					for candidate in (
+						module,
+						module.with_suffix(".py"),
+						module.with_suffix(".pyi"),
+					):
+						self.facts[candidate] = candidate.is_dir(), candidate.is_file()
+		except OSError:
+			return
+		self.identity = sha256(
+			json.dumps(sorted((str(path), state) for path, state in self.facts.items())).encode()
+		)
+
+	def assert_current(self) -> None:
+		if self.identity is not None and any(
+			(path.is_dir(), path.is_file()) != expected for path, expected in self.facts.items()
+		):
+			raise EditError("stale_input")
 
 
 def sources(root: Path, entries: list[Any]) -> list[SourceFile]:

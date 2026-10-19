@@ -6,7 +6,7 @@ Those parent inputs and the active Codex hook/settings/registration belong to th
 implementer. This PR does not change the parent ticket state or activate a host hook.
 The public handoff is [edit-check schema 1](../edit-check.md).
 
-## Candidate and release boundary
+## Original v2.6.0 candidate and release boundary
 
 - Integration base: `main`, starting at `f3220b4693d62c267649fae461b43d3c4b6e9168`.
 - Published baseline: [v2.5.0](https://github.com/TheTraitor0FJesus/quality-gate/releases/tag/v2.5.0),
@@ -196,3 +196,87 @@ the baseline; validate the schema 1 result reader and final-file identities; fin
 Codex registration/trust, event delivery, rollback and regressions; measure complete
 event-to-feedback p50/p95/max over its required 30-edit profiles. Provider timings alone
 cannot establish those host outcomes. Tickets 02–04 and consumer pin upgrades are excluded.
+
+## Unchanged-content reuse candidate v2.6.2
+
+The 2026-10-18 provider delegation starts from published v2.6.1, source
+`45b16c7f8dc8572cd9fe3f39f93f64415c40deea` (PR #58), and requests safe deduplication
+for host ticket 01. The originating host specification remains in the `skills`
+repository at `.scratch/python-quality-hooks/spec.md`; its `research.md` section
+"Pre-activation review and POSIX correction" owns the host investigation. The scoped
+requirements are: first prove an existing safe recipe or add minimal provider-owned
+reuse; freshly verify exact meaningful inputs; retain failed findings/final coordinates,
+offline operation, shared deadline and original pins; bound source-free state; verify
+real released Ruff and quantitative process/latency behavior; deliver a reviewed PR
+without changing host files, settings, registrations or ticket state.
+
+Published schema 1 has no complete identity-only probe: ordinary `edit-check` runs Ruff,
+while an empty batch is inapplicable and does not resolve full selection. Reimplementing
+private distribution/runtime rules on the host would create a second authority. The
+chosen boundary is transparent reuse inside the same public schema 1 request/response;
+[the protocol](../edit-check.md#unchanged-content-reuse) owns exact identities and recovery.
+This is PATCH v2.6.2 from published v2.6.1; source policy stays v2.5.0, and the initial
+consumer retains v2.4.2. Owner merge/publication/readback remain required.
+
+The regression first observed 8 processes instead of the required 3 on an unchanged
+batch. Adding a local module then exposed stale import classification (3 instead of
+8). Both went red before their fixes. The relevant Ruff classification implementation
+is [the pinned upstream source](https://github.com/astral-sh/ruff/blob/0.16.4/crates/ruff_linter/src/rules/isort/categorize.rs).
+`edit-reuse-module-20261018-09` passed source lint and the complete then-current module:
+79 passed, one explicit Windows skip for POSIX interpreter-symlink layout, 154.17 s.
+The final suite additionally covers the candidate policy pin, occupied optional cache,
+POSIX executable permissions, and temporary-file cleanup on permission failure.
+`edit-reuse-persistence-red-20261018-12` reproduced a Windows temporary-key leak when
+chmod failed before closing the stream; cleanup now runs after closing on both success
+and failure. Final rebuilt-wheel regression and full Gate evidence belong to the PR
+candidate, rather than the earlier development counts.
+
+Measured fixture costs above two seconds are explicit: module-scoped immutable
+release/native-tool and engine-wheel setup took 12.13 s once; the managed/mixed batch
+case took 11.03 s including mutable runtime setup, repeated checks and runtime corruption;
+the startup-hook and unrelated-component cases took 7.42/7.58 s. The policy-selection
+case took 6.94 s, and corrupt-tool/release cases 4.70/3.92 s. These are setup or behavior
+under test, not repeated immutable preparation; mutable result caches remain isolated
+per test outside project roots. The additional verification intentionally exercises
+cache hits before invalidation and does not relax the existing 400 s test budget.
+
+### Native-wheel comparison
+
+`edit-reuse-wheel-acceptance-20261018-11` passed one executable acceptance test, zero
+failures/skips, in 234.852 s (237.588 s including doctor). The test made 248 public CLI
+calls: four profiles, two engines, one separate first call and 30 warm calls each.
+It used Windows/CPython 3.12, genuine v2.4.2 inventory/native Ruff, prepared managed
+runtimes and real wheels on `PYTHONPATH`, with a separate launch cwd. Each call had a
+fresh 10 s deadline and current SHA. Baseline-1/managed-10 were clean; baseline-10 and
+managed-1 retained F401. Both wheel bytes and the entire policy inventory were unchanged.
+
+- Published v2.6.1 wheel SHA-256: `d0723921710f8c012e59a41367bb2198a845e24146113156550c1656f6d15c64`.
+- Timing candidate v2.6.2 wheel SHA-256: `60eb1a6335dde3d039e672fa0f4ac75f052aa367cf1ec07a1b73075d1b649c9e`.
+- Exact v2.4.2 `release.toml` SHA-256: `96e3d83d799df2d81eacafd6901fba2e9b3f6c44b7e1f2e9f71be85924320e69`.
+
+| Profile | v2.6.1 warm p50/p95/max ms | v2.6.2 warm p50/p95/max ms | Processes before/after |
+| --- | --- | --- | --- |
+| Baseline, 1 file | 933.12 / 1299.89 / 1371.87 | 817.86 / 968.60 / 983.70 | 8 / 3 |
+| Baseline, 10 files | 998.02 / 1098.46 / 1107.59 | 852.20 / 959.85 / 980.90 | 8 / 3 |
+| Managed, 1 file | 942.47 / 1114.16 / 1363.76 | 879.91 / 973.53 / 1011.08 | 8 / 3 |
+| Managed, 10 files | 1021.41 / 1162.21 / 1237.26 | 865.96 / 1105.16 / 1127.15 | 8 / 3 |
+
+External wall time uses `perf_counter`; p95 is the 29th of 30 sorted observations.
+All hits preserved current input/final SHA, findings, exact engine and v2.4.2 selection.
+The check also verified bounded record size/count and absence of a synthetic source
+marker from persistent records. Timing preceded the cold-write error-cleanup correction;
+its wheel identity is retained separately from the final rebuilt-wheel verification.
+These are provider timings, excluding native host bridge and event-to-feedback delivery.
+The parent host owns message compaction and reports its v2.6.1 activation separately;
+new installed-host acceptance still requires the published immutable v2.6.2 wheel.
+
+### Host handoff
+
+After owner merge and exact-source Windows/Linux release publication/readback, explicitly
+select the new engine while retaining exact policy v2.4.2. Continue ordinary schema 1
+requests and strict validation: current-request `input_sha256`, actual final bytes,
+exact root/engine/selection and freshly read configuration inputs. The unformatted-first
+then formatted-hit case is covered for both clean and F401 results, including rebasing
+`input_sha256` and `changed=false`. Host event/session/message deduplication remains on
+the host. Repeat installed event-to-feedback profiles there; provider CLI measurements
+do not establish actual registration, event delivery or UI acceptance.
