@@ -8,21 +8,25 @@ import zipfile
 from pathlib import Path
 
 from .distribution import DistributionError
-from .edit_check import execute
 from .edit_protocol import (
 	DELIVERY_RESERVE_SECONDS,
 	MAX_REQUEST_BYTES,
 	EditError,
 	decode_request,
 	encode,
-	unchecked,
 )
 from .runtime import RuntimeUnavailable
 
 
-def main(workspace: Path) -> None:
+def main(workspace: Path, *, secrets: bool = False) -> None:
+	if secrets:
+		from .edit_secrets import execute
+		from .edit_secrets import secret_unchecked as unchecked
+	else:
+		from .edit_check import execute
+		from .edit_protocol import unchecked
 	try:
-		request = decode_request(sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1))
+		request = decode_request(sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1), secrets=secrets)
 		deadline = (
 			time.monotonic()
 			+ request["deadline_unix_ms"] / 1000

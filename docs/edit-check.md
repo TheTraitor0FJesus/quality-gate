@@ -8,7 +8,7 @@ An open provider PR does not install a hook or publish an immutable release.
 
 ## Invocation and request
 
-Install the interface engine from the Quality Gate **v2.6.2** wheel after
+Install the interface engine from the Quality Gate **v3.0.0** wheel after
 publication. Invoke
 `quality-gate edit-check` or `python -I -B -m quality_gate.cli edit-check` with one UTF-8
 JSON object on stdin and close stdin. The equivalent entry point is `quality-gate-edit`.
@@ -97,12 +97,13 @@ a fallback for an invalid manifest, incompatible managed pin, or missing managed
 
 | Selected policy | Interface engine | Coverage |
 | --- | --- | --- |
-| v2.4.2 | v2.6.2 | Supported exact old policy; initial skills consumer pin |
-| v2.5.0 | v2.6.2 | Supported exact old policy |
-| v2.6.0 | v2.6.2 | Supported exact published policy |
-| v2.6.1 | v2.6.2 | Supported exact published policy |
-| v2.6.2 | v2.6.2 | Supported candidate policy, usable only after publication |
-| Any other version | v2.6.2 | `unchecked / unsupported_policy`; explicit consumer upgrade required |
+| v2.4.2 | v3.0.0 | Supported exact old policy; initial skills consumer pin |
+| v2.5.0 | v3.0.0 | Supported exact old policy |
+| v2.6.0 | v3.0.0 | Supported exact published policy |
+| v2.6.1 | v3.0.0 | Supported exact published policy |
+| v2.6.2 | v3.0.0 | Supported exact published policy |
+| v3.0.0 | v3.0.0 | Supported candidate policy, usable only after publication |
+| Any other version | v3.0.0 | `unchecked / unsupported_policy`; explicit consumer upgrade required |
 
 The compatibility adapter uses schema 2 and the same component path membership and
 released Ruff configuration as these releases. Their Python manifest/runtime/Ruff
@@ -188,7 +189,7 @@ fresh bytes and retry the entire batch. Results never claim checks for a stale v
 ```json
 {
   "schema": 1,
-  "engine_version": "2.6.2",
+  "engine_version": "3.0.0",
   "root": "/absolute/project",
   "status": "failed",
   "reason": null,
@@ -305,8 +306,10 @@ Session/event attribution and deduplicating delivered messages remain host respo
 
 ## Handoff and acceptance evidence
 
-The reuse candidate targets PATCH v2.6.2 from published v2.6.1. The provider source
-manifest remains on its current published v2.5.0 policy. Owner merge and
+The reuse feature shipped as PATCH v2.6.2. The current engine candidate targets
+v3.0.0 because the separate secret interface corrects persisted fingerprint
+semantics; Ruff's schema, policy and reuse contract are unchanged. The provider
+source manifest remains on its current published v2.5.0 policy. Owner merge and
 the existing Windows/Linux release verification/publication must finish before host
 installation. Then the host must record the engine wheel/release identities, explicitly
 select its baseline, retain/provision `edit-setup` for baseline and managed pins, validate its

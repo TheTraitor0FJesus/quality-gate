@@ -31,6 +31,7 @@ def parser() -> argparse.ArgumentParser:
 	)
 	format_parser.add_argument("paths", nargs="+", help="Repository-relative paths to format.")
 	subcommands.add_parser("edit-check", help="Check explicit working-tree Python files via JSON.")
+	subcommands.add_parser("edit-secrets", help="Scan explicit working-tree content via JSON.")
 	edit_setup = subcommands.add_parser(
 		"edit-setup", help="Provision exact released Ruff for offline edits."
 	)
@@ -168,10 +169,10 @@ def _dispatch(arguments: argparse.Namespace) -> int:
 
 def main() -> int:
 	arguments = parser().parse_args()
-	if arguments.command == "edit-check":
+	if arguments.command in {"edit-check", "edit-secrets"}:
 		from .edit_cli import main as edit_main
 
-		return edit_main()
+		return edit_main(secrets=arguments.command == "edit-secrets")
 	# The edit path shares the JSON-only entry's lean startup. Full Gate modules
 	# are loaded only for commands which need their repository orchestration.
 	from .contracts import ValidationError, Verdict

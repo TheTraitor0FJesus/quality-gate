@@ -175,7 +175,7 @@ def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
 @pytest.fixture(scope="module")
 def wheel_cache(tmp_path_factory: pytest.TempPathFactory) -> Path:
 	cache = tmp_path_factory.mktemp("wheel-cache")
-	for version in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2"):
+	for version in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0"):
 		prepare_edit_cache(cache, version)
 	return cache
 
@@ -217,7 +217,7 @@ def engine_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
 	return next(root.glob("quality_gate-*.whl"))
 
 
-@pytest.mark.parametrize("policy", ["v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2"])
+@pytest.mark.parametrize("policy", ["v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0"])
 @pytest.mark.parametrize("module", ["quality_gate.cli", "quality_gate.edit_cli"])
 def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 	tmp_path: Path,
@@ -370,7 +370,7 @@ def test_import_layout_change_invalidates_reuse(
 
 def test_policy_selection_change_requires_fresh_ruff(tmp_path: Path, wheel_cache: Path) -> None:
 	(tmp_path / "example.py").write_bytes(b"import os\n")
-	for policy in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2"):
+	for policy in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0"):
 		for expected_processes in (FRESH_PROCESSES, REUSED_PROCESSES):
 			payload = request(tmp_path, wheel_cache, "example.py")
 			payload["baseline"]["policy_release"] = policy

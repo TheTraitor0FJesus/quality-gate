@@ -36,9 +36,13 @@ making the release candidate depend on its own unpublished wheel.
 
 The public [working-tree Ruff interface](edit-check.md) was introduced in v2.6.0. The v2.6.1
 release repaired direct wheel execution through the native release launcher. The v2.6.2
-candidate adds transparent provider-owned reuse of complete unchanged-content results.
-Its interface engine retains exact v2.4.2/v2.5.0/v2.6.0/v2.6.1 policy compatibility
-independently of engine version, with unchanged schema 1 and mandatory fresh selection.
+release added transparent provider-owned reuse of complete unchanged-content results.
+The v3.0.0 candidate adds the read-only [secret interface](edit-secrets.md) and fixes
+actual-secret fingerprints in the shared scanner transport. Persisted waivers for
+the old redacted placeholder require explicit review and reissue, so this is MAJOR
+relative to v2.6.2. Interface schemas and detector rules remain unchanged. Both edit
+interfaces retain exact v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2 policy compatibility and
+support the candidate v3.0.0 policy only after publication.
 The source policy pin stays on its current published release; activation uses the separate route above. Host
 installation/activation and the initial v2.4.2 consumer's `edit-setup` remain separate post-publication
 work; the provider acceptance record does not establish installed host-event acceptance.
