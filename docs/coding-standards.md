@@ -3,6 +3,9 @@
 Apply these standards to code changes and reviews. Repository-specific rules override
 them where they conflict.
 
+For repositories using Quality Gate, its declared policy owns tool-enforced rules.
+Apply the rules below to contracts and decisions those checks do not establish.
+
 ## Decision procedure (Ponytail)
 
 Ponytail means efficiency after understanding the problem. Apply this procedure before
@@ -33,7 +36,7 @@ writing code; use the sections below as reference for every affected contract.
 
 ## Scope and design
 
-- Make the smallest end-to-end change that satisfies the stated requirement; add features, abstractions, and dependencies only when the requirement or an applicable project contract needs them.
+- Make the smallest end-to-end change that satisfies the stated requirement; add features, abstractions, and dependencies only when the requirement or an applicable project contract needs them. Keep each shared decision at one authoritative owner rather than repeating it across callers.
 - Report unrelated defects; do not repair them as part of the change.
 - Prefer a simpler solution when it removes a dependency, a complexity layer, or moving parts.
 - Build incrementally: preserve a working path while adding the next capability.
@@ -49,10 +52,12 @@ writing code; use the sections below as reference for every affected contract.
 - Give each function and module one focused responsibility.
 - Keep control flow shallow; use early returns instead of nesting three or more levels.
 - Prefer deep modules: keep the public interface small and place policy in the implementation. Retain abstractions only for the purposes defined in **Scope and design** and **Architecture and persistence**.
-- Follow the language and project naming conventions. Use precise names; avoid abbreviations and generic placeholders such as `data`, `temp`, `val`, `x`, and `y` when a domain name is available.
+- Reduce the layers a reader must trace and the mutable state they must track. Remove pass-through layers only when they hide no required policy or contract. Keep mutable state in the smallest scope that owns it; derive values from authoritative state instead of maintaining synchronized copies. Reviewers should be able to trace where a value comes from and what can change it.
+- Use precise names; avoid abbreviations and generic placeholders such as `data`, `temp`, `val`, `x`, and `y` when a domain name is available.
+- Use distinct domain types for values that share a primitive representation but whose interchange would violate the contract, where the language supports them. Handle each variant of a closed set explicitly. Derive types from an authoritative schema when one owns the shape instead of maintaining a handwritten parallel definition.
+- When stateful behavior introduces mutually exclusive states or repeated cross-file assumptions, encode the invariants and allowed transitions in a domain model instead of coordinated flags and scattered conditions. Choose data structures for real access patterns. Keep clear, local behavior simple; add structure only when it removes invalid states, duplicated rules, or lifecycle risk.
 - Document a public contract when its constraints, errors, side effects, or purpose are not clear from its signature. Use comments only for non-obvious context that code alone cannot communicate: a constraint, workaround, rationale, or decision.
 - Mark a deliberate simplification with a known operational ceiling using a `ponytail:` comment at the implementation. Name the ceiling and the upgrade path, for example: `ponytail: O(n^2) scan; use an indexed lookup if measured input sizes exceed the latency budget.` Apply this to real limitations such as global-lock serialization or naive heuristics; ordinary simple code needs no marker.
-- In typed languages, annotate parameters and return values according to the project's type system.
 - Store user-configurable values, secrets, environment-dependent URLs, and operational timeouts in the project's configuration mechanism. Keep stable protocol constants with the code that owns them. Keep local secret configuration ignored.
 - Resolve required configuration before expensive or irreversible work. Add every new environment key to the repository's example configuration in the same change.
 
@@ -61,21 +66,25 @@ writing code; use the sections below as reference for every affected contract.
 - Use the project's logger for runtime observability. Log an exception once at the boundary that owns its handling; otherwise translate it with its cause intact or let it propagate.
 - Use exceptions for contract violations and explicit absence/error results for expected outcomes; keep one error-handling style within a module.
 - Catch specific exception types. Do not silently suppress failures.
-- Let unexpected failures surface inside trusted code; handle them only for a current recovery, translation, cleanup, protocol, or supported compatibility contract. Require a concrete boundary or invariant for repeated validation. Replace incorrect behavior at its source. Treat missing and invalid required inputs as visible failures unless the contract explicitly permits recovery; accept absence only for inputs declared optional.
+- Let unexpected failures surface inside trusted code; handle them only for a current recovery, translation, cleanup, protocol, or supported compatibility contract. Replace incorrect behavior at its source. Treat missing and invalid required inputs as visible failures unless the contract explicitly permits recovery; accept absence only for inputs declared optional.
+- For a bug fix, establish the failure with a reproducer or direct evidence. Determine whether the triggering state is permitted by the contract: handle legitimate states where they fail; correct the producer of invalid states instead of hiding them with guards, retries, or suppression.
 - For a bug fix, search every caller of the function being changed and trace each affected path, including sibling paths absent from the report. Fix the root cause once at the narrowest shared authoritative seam when the callers share the faulty contract; retain distinct caller contracts. Continue when each affected caller is accounted for and the chosen seam explains both the reported symptom and sibling behavior.
-- Validate external input against its contract. Allowlist selectable identifiers and operations; parameterize query values, enforce path containment, and use structured logging with appropriate encoding.
+- Parse and validate external input against its contract at ingestion, then pass validated domain values inward. Repeat validation only at a new trust boundary or for a named invariant that may have changed. Allowlist selectable identifiers and operations; parameterize query values, enforce path containment, and use structured logging with appropriate encoding.
 - Bound external input at ingestion: ranges for numbers, lengths for strings, sizes for files and bodies, transfer deadlines for network calls, and page/item limits for pagination.
 - Give each batch an explicit failure contract: atomic, fail-fast, or independently isolated per item. Preserve that contract in error handling and tests.
 
 ## Architecture and persistence
 
 - Keep dependency direction inward: UI -> application -> domain. Lower layers do not import upper layers.
-- Reach across modules only through their public exports. Put filesystem, database, and HTTP policy behind stable boundaries; introduce an interface when it hides policy, permits a required implementation change, or provides a controlled test double.
+- Reach across modules only through their public exports. Put filesystem, database, and HTTP policy behind stable boundaries; introduce an interface when it hides policy, permits a required implementation change, or provides a controlled test double. Separate domain decisions from I/O and framework wiring so those decisions can be tested without those systems. Expose domain values rather than storage or transport representations unless the public contract explicitly owns that protocol.
 - When a domain field changes what an entity is, update every affected projection in the same change, including filters, counts, badges, serialization, and access rules.
 - For schema or identity changes, enumerate and update every public reader, including CLIs, converters, visualizers, and resume paths. Establish compatibility from an explicit contract rather than inferring it from an absent field or file.
+- When replacing an internal interface, inventory and migrate its affected callers, then remove the obsolete interface and its exclusive support in the same completed change once no supported consumer needs it. Preserve compatibility for external or independently deployed consumers until an explicit migration contract permits removal. Apply **Verification and maintenance** before deleting tests or behavior.
 - Build a path with the semantics of its destination environment. Normalize both operands before comparing paths from different sources.
 - Deliver streaming events as they arrive when timeouts, liveness, or process control depend on them.
+- Before adding concurrent writers, identify shared mutable objects and separate independent state when its contract permits separate ownership. When one shared object is required, protect the full read-modify-write operation with a single writer, transaction, lock, or compare-and-swap. Instructions to take turns and atomic file replacement alone do not prevent lost updates.
 - Write multi-step persistent files atomically: write a temporary file in the target directory, then replace the target.
+- For operations that may be retried or resumed, define the result of repeating the same logical operation and restarting after partial completion. Reconcile actual durable state with the intended state. Use a stable operation identity or an equivalent mechanism to prevent duplicate external effects. If an external effect has an unknown outcome, establish that outcome before retrying or report the blocker. Remove stale artifacts only after establishing that no live operation owns them.
 - Protect runtime credentials: use restrictive file permissions and exclude recoverable credentials from off-host backups. When a datastore contains recoverable credentials, document its backup exclusions.
 
 ## Security and delivery
@@ -83,14 +92,16 @@ writing code; use the sections below as reference for every affected contract.
 - Keep secrets and recoverable credentials out of logs and external responses.
 - For served HTML, apply a Content Security Policy that allows only the resource origins and capabilities required by the deployment. Pin external scripts with integrity metadata or self-host them.
 - Record any CSP exception in architecture documentation. Turn documented security invariants into a runtime check or test; add malformed-input negative tests for authentication guards.
-- Pin third-party CI actions to full commit SHAs, set least-privilege job permissions, and isolate secret-bearing or write-capable jobs from unpinned dependency installation.
-- Add concurrency control to workflows that can retrigger themselves. Use locked, bounded, hashed dependencies where the ecosystem supports them.
+- Grant CI jobs only the permissions required by their contract, and isolate secret-bearing or write-capable jobs from unpinned dependency installation.
+- Use locked, bounded, hashed dependencies where the ecosystem supports them.
 - For systemd services, apply `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, and an explicit `CapabilityBoundingSet=` where the service contract permits them; document required exceptions.
 - When a change requires a human action outside version control, report a concrete action list in the completion message.
 
 ## Test selection
 
 Cover new logic, fixed defects, and documented fragile invariants with behavioral tests. Prefer strengthening an existing test when it can distinguish the regression; add a test when an independently meaningful outcome would otherwise lack protection. Apply these rules before writing tests and during review.
+
+Judge each test against two changes: a violation of the behavior it claims to protect must make it fail; an internal refactor preserving that behavior must keep it passing. Include caller-visible errors, persisted state, and external effects in behavior. A check on an internal detail is justified only when an independent contract requires that detail. Diagnose a mismatch and apply the evidence rules in **Verification and maintenance** before rewriting or deleting a test.
 
 Do not write tests that:
 
@@ -109,6 +120,7 @@ Do not write tests that:
 - For checksums, receipts, manifests, and validators, identify the failure or trust boundary they detect. Shared implementation or inputs warrant investigation; preserve required integrity checks. When removal is justified, remove the obsolete mechanism and its exclusive tests and support together. Verify cleanup with existing checks; add a replacement test only for a real protection gap with an independent expected result.
 - When cleanup crosses layers, trace each current producer -> reader -> consumer path and retain a hermetic integration test for each distinct delivery path. Use repository-managed or test-created inputs and temporary outputs; skip for an optional dependency only where the test actually requires it. After test removal or consolidation, compare collection and run the surviving suite; resolve unexpected skips, deselections, or an empty collection. Compare worktree state before and after runs that may generate files.
 - For authorization, financial rules, state transitions, data integrity, and boundary-heavy branching, map each contract rule to an observable outcome. Use the smallest case set that distinguishes every rule and boundary; for a failure, assert both its result and the absence of its forbidden side effect.
+- For changes to retry, resume, or shared-state behavior, verify repetition of the same logical operation, restart after interruption at meaningful persistence or external-effect boundaries, and competing writers where applicable. Assert the intended durable result and the absence of duplicate effects or lost updates.
 - Parameterize tests only when they share one seam, setup, and assertion shape. Treat coverage as execution evidence, not proof of behavior. When mutation testing is configured, run the changed critical scope, strengthen observable assertions, and leave no actionable survivor.
 - Before changing fixture ownership in an integration test that creates an environment, installs a package, starts a service, or invokes an external tool, time the smallest affected scope and capture its slowest setup, call, and teardown operations. For every operation slower than two seconds, name its owner and report its time, classification, impact, and next action; classify it as mutable state, immutable infrastructure, or behavior under test.
 - Keep mutable test state function-scoped. Share immutable infrastructure only when tests cannot modify it and order, repetition, and parallel execution remain isolated. Require ticket justification when immutable preparation slower than two seconds still repeats per test. When initialization is behavior under test, preserve its real public path and optimize the authoritative production seam instead.
@@ -118,7 +130,7 @@ Do not write tests that:
 - Keep documentation current when behavior, interfaces, architecture, configuration, or feature specifications change.
 - When a shared contract changes, update the affected sibling-project documentation in the same change. If a required sibling repository is unreachable, report the blocker before proceeding.
 - When removing a feature, remove its orphaned dependencies, configuration, files, and selectors in the same change.
-- Finish only when every applicable rule above is satisfied, required checks have returned, and each claimed outcome has supporting evidence. Report a failed or unavailable check with its affected contract and next action; an unavailable check does not establish completion.
+- Finish only when every applicable rule above is satisfied, required checks have returned, and each claimed outcome has supporting evidence from the actual changed behavior or artifact. A successful build, modification time, cached result, or agent self-report establishes only what it directly checks. Use existing verification mechanisms where adequate; a separate script is not required for every task. Report a failed or unavailable check with its affected contract and next action; an unavailable check does not establish completion.
 
 ## Review heuristics
 
