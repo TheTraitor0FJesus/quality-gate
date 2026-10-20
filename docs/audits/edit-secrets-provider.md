@@ -1,5 +1,23 @@
 # Edit secret provider preparation
 
+## Post-merge release correction
+
+PR #61 merged as `5acc8064341c8bb197a613bfa0178ea8d41a8f96`. Its PR Quality Gate
+passed, but release run `39403272564` failed the installed artifact audit on both
+platforms. The public-wheel comparison selected sibling `v2.5.0` even when the
+fixture supplied `v3.0.0`; the private controller cache contained only the candidate.
+Docker reproduced `DistributionError` for the absent historical `release.toml`.
+
+The comparison now tests the supplied verified wheel against its own contract:
+historical v2 placeholder digest, corrected v3 actual-value digest, identical
+locations, and no synthetic-value output. It requires no extra baseline release
+in the candidate cache. The [incident lesson](../../lessons/incident-2026-10-secret-release-cache.md)
+records the missed boundary and qualification requirement.
+
+The original failed envelope and source are preserved. Version 3.0.0 remains
+unpublished; the correction PR carries the accumulated MAJOR decision relative
+to v2.6.2 and requires a new owner merge. Host activation remains pending.
+
 This local candidate implements the provider portion of the `skills` repository's
 `python-quality-hooks` ticket 02. Host entry points, settings, registrations,
 coordinator, backups and actual Codex events belong to the host implementer.
@@ -193,11 +211,11 @@ authority, declared projections and Russian notes are prepared for owner review;
 Windows/Linux product verification, owner merge and explicit host installation
 remain required. The provider source policy stays on published v2.5.0.
 
-The old-wheel regression explicitly selects the already prepared published
-v2.5.0 baseline, including when the platform release verifier supplies a v3.0.0
-candidate policy. This retains the historical discrepancy test without treating
-the corrected new wheel as a historical engine. Ruff's real wheel regression
-also exercises the new exact v3.0.0 policy alongside every retained old pin.
+The selected-wheel regression uses the supplied verified release. A published
+v2 fixture retains the historical placeholder digest; the platform verifier's
+v3.0.0 candidate fixture verifies the corrected actual-value digest. It requires
+no sibling historical release in the isolated candidate cache. Ruff's real wheel
+regression also exercises exact v3.0.0 policy alongside every retained old pin.
 
 `edit-secrets-50-release-focused` passed 80 cases in 71.39 seconds with the
 newly prepared Python 3.12 runtime and exact published v2.5.0 scanner policy.
