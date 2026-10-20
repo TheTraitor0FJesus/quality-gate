@@ -144,6 +144,28 @@ def _stop(process: subprocess.Popen[bytes], job: tuple[Any, int] | None, own_tre
 		raise EditError("deadline") from error
 
 
+def _resume_windows(process: subprocess.Popen[bytes]) -> None:
+	"""Resume a native child only after its complete tree belongs to our job."""
+	import ctypes
+	from ctypes import wintypes
+
+	kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+	kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+	kernel.OpenProcess.restype = wintypes.HANDLE
+	kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+	ntdll = ctypes.WinDLL("ntdll")  # type: ignore[attr-defined]
+	ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+	ntdll.NtResumeProcess.restype = wintypes.LONG
+	handle = kernel.OpenProcess(0x0800, False, process.pid)  # PROCESS_SUSPEND_RESUME
+	if not handle:
+		raise EditError("runtime")
+	try:
+		if ntdll.NtResumeProcess(handle) != 0:
+			raise EditError("runtime")
+	finally:
+		kernel.CloseHandle(handle)
+
+
 def run_process(
 	command: list[str],
 	*,
@@ -165,14 +187,15 @@ def run_process(
 		stdout=subprocess.PIPE,
 		stderr=subprocess.PIPE,
 		start_new_session=own_tree and os.name != "nt",
+		creationflags=0x00000004 if own_tree and os.name == "nt" else 0,
 	)
 	job = None
 	streams = _Streams(process, payload, limit)
 	try:
-		# The controlled worker blocks on stdin until job assignment succeeds. No
-		# consumer code or descendant can run before the supervisor owns its tree.
+		# Suspended creation also protects native scanners without a stdin handshake.
 		if own_tree and os.name == "nt":
 			job = _windows_job(process)
+			_resume_windows(process)
 		for reader in streams.readers:
 			reader.start()
 		try:

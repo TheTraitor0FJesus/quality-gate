@@ -2,7 +2,7 @@ waivers = []
 
 [quality]
 schema = 2
-policy_release = "v2.6.2"
+policy_release = "v3.0.0"
 
 [repository]
 name = "REVIEW_REQUIRED"

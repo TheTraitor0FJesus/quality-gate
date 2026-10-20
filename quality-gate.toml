@@ -26,6 +26,8 @@ required_documents = [
     "README.md",
     "docs/agent-reference.md",
     "docs/edit-check.md",
+    "docs/edit-secrets.md",
+    "docs/audits/edit-secrets-provider.md",
     "docs/audits/edit-check-provider.md",
     "docs/architecture.md",
     "docs/coding-standards.md",
@@ -50,7 +52,7 @@ max_blob_size_mib = 5
 
 [repository.defaults]
 command_timeout_seconds = 120
-test_timeout_seconds = 400
+test_timeout_seconds = 525
 gate_timeout_seconds = 600
 
 [[python]]

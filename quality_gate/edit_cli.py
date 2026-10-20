@@ -1,4 +1,4 @@
-"""Public JSON transport for the bounded edit-check command."""
+"""Public JSON transport for bounded working-tree edit commands."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from .edit_process import run_process
 from .edit_protocol import (
@@ -67,13 +68,43 @@ def _deliver(output: bytes, deadline: float) -> None:
 		os._exit(EXIT_UNCHECKED)
 
 
-def main() -> int:
+def _failure(reason: str, *, secrets: bool) -> dict[str, Any]:
+	if secrets:
+		from .edit_secrets import secret_unchecked
+
+		return secret_unchecked(reason)
+	return unchecked(reason)
+
+
+def _validate_result(output: bytes, stderr: bytes, code: int, *, secrets: bool) -> dict[str, Any]:
+	try:
+		result = json.loads(output)
+		statuses = {"passed": 0, "failed": 1, "not_applicable": 0, "unchecked": 2}
+		if secrets:
+			statuses["waived"] = 0
+		if not isinstance(result, dict):
+			raise EditError("tool_output")
+		status = result.get("status")
+		if (
+			stderr
+			or not isinstance(status, str)
+			or result.get("schema") != 1
+			or statuses.get(status) != code
+			or not isinstance(result.get("files"), list)
+		):
+			raise EditError("tool_output")
+		return result
+	except (ValueError, TypeError) as error:
+		raise EditError("tool_output") from error
+
+
+def main(*, secrets: bool = False) -> int:
 	"""Read one bounded request and emit exactly one source-free JSON result."""
 	started = time.monotonic()
 	delivery_deadline = started + MAX_DEADLINE_MS / 1000
 	try:
 		payload = _request()
-		request = decode_request(payload)
+		request = decode_request(payload, secrets=secrets)
 		delivery_deadline = time.monotonic() + request["deadline_unix_ms"] / 1000 - time.time()
 		deadline = (
 			time.monotonic()
@@ -99,7 +130,7 @@ def main() -> int:
 			entry = (
 				f"import sys; sys.path.insert(0, {str(package_root)!r}); "
 				"from pathlib import Path; from quality_gate.edit_worker import main; "
-				f"main(Path({str(Path(directory).resolve())!r}))"
+				f"main(Path({str(Path(directory).resolve())!r}), secrets={secrets!r})"
 			)
 			code, output, stderr = run_process(
 				[str(worker_python), "-I", "-S", "-B", "-c", entry],
@@ -125,34 +156,20 @@ def main() -> int:
 				limit=MAX_RESULT_BYTES,
 				own_tree=True,
 			)
-		try:
-			result = json.loads(output)
-			statuses = {"passed": 0, "failed": 1, "not_applicable": 0, "unchecked": 2}
-			if not isinstance(result, dict):
-				raise EditError("tool_output")
-			status = result.get("status")
-			if (
-				stderr
-				or not isinstance(status, str)
-				or result.get("schema") != 1
-				or statuses.get(status) != code
-				or not isinstance(result.get("files"), list)
-			):
-				raise EditError("tool_output")
-		except (ValueError, TypeError) as error:
-			raise EditError("tool_output") from error
+		result = _validate_result(output, stderr, code, secrets=secrets)
 		if time.monotonic() >= deadline:
 			raise EditError("deadline")
 	except EditError as error:
-		result = unchecked(error.reason)
+		result = _failure(error.reason, secrets=secrets)
 		result["stage"] = error.stage
 	except OSError:
-		result = unchecked("io")
+		result = _failure("io", secrets=secrets)
 	result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 	try:
 		output = encode(result)
 	except EditError:
-		result = unchecked("limits")
+		result = _failure("limits", secrets=secrets)
+		result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 		output = encode(result)
 	_deliver(output, delivery_deadline)
 	if result.get("stage") == "intake":

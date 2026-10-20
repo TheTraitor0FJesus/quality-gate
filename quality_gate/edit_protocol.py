@@ -1,4 +1,4 @@
-"""Version 1 bounded, source-free working-tree Ruff protocol."""
+"""Version 1 bounded, source-free working-tree edit protocols."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ FIRST_PRINTABLE_CHARACTER = 32
 EXIT_UNCHECKED = 2
 MAX_DEADLINE_MS = 10_000
 DELIVERY_RESERVE_SECONDS = 0.05
-SUPPORTED_POLICIES = frozenset({"v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2"})
+SUPPORTED_POLICIES = frozenset({"v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0"})
 SAFE_FIXES = ("I001",)
 RECOVERY = {
 	"invalid_request": "Send a schema 1 request with explicit files and current SHA-256 values.",
@@ -75,7 +75,7 @@ def encode(result: dict[str, Any]) -> bytes:
 	return encoded
 
 
-def decode_request(payload: bytes) -> dict[str, Any]:
+def decode_request(payload: bytes, *, secrets: bool = False) -> dict[str, Any]:
 	"""Validate the envelope before selecting files or prerequisites."""
 	try:
 		request = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
@@ -102,14 +102,15 @@ def decode_request(payload: bytes) -> dict[str, Any]:
 	):
 		raise EditError("invalid_request")
 	if "baseline" in request:
-		_validate_baseline(request["baseline"])
+		_validate_baseline(request["baseline"], secrets=secrets)
 	return request
 
 
-def _validate_baseline(baseline: object) -> None:
+def _validate_baseline(baseline: object, *, secrets: bool = False) -> None:
+	fields = {"policy_release"} if secrets else {"policy_release", "python", "python_version"}
 	if (
 		not isinstance(baseline, dict)
-		or set(baseline) != {"policy_release", "python", "python_version"}
+		or set(baseline) != fields
 		or not all(isinstance(value, str) and value for value in baseline.values())
 	):
 		raise EditError("invalid_request")

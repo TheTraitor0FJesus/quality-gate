@@ -55,6 +55,12 @@ It is an explicit writer and does not replace staged/full Gate verification. Kee
 engine identity separate from the consumer policy pin; consult its supported-release matrix before
 activation, including when the selected policy predates the command.
 
+For read-only touched-content secrets, use the separate
+[edit-secrets interface](edit-secrets.md). It selects repository-wide policy and
+exact waivers without a Python runtime, performs no setup/download/history scan,
+and requires current raw-byte identities. Its local development seam is distinct
+from installed immutable-release activation.
+
 Schema 2 accepts optional repository-owned supplemental tests in the canonical template:
 
 ```toml

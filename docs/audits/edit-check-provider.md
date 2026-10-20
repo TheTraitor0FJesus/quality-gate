@@ -69,8 +69,8 @@ measurements below retain their recorded wheel identity.
 
 Configuration recapture preserves the first observed identity, including optional-file
 creation or deletion. Deterministic regressions first failed for all three mutations;
-the shared capture boundary now rejects them as stale input. The repository's full-test
-timeout is 400 seconds, applying the owner's intended limit from `feat/audit-test`;
+the shared capture boundary now rejects them as stale input. At that candidate, the full-test
+timeout was set to 400 seconds, applying the owner's intended limit from `feat/audit-test`;
 the aggregate gate deadline and edit invocation deadline are unchanged.
 
 The Gate's nested Windows temporary workspace exposed ensurepip's path-length limit

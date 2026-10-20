@@ -31,6 +31,18 @@ Use this map before non-trivial codebase questions, design work, or code changes
   its private same-volume workspace; an archive path is never used as a working directory.
   See [the public protocol and compatibility contract](edit-check.md).
 
+- **Working-tree secret checking** — public `edit-secrets` shares `edit_cli.py`,
+  `edit_protocol.py`, `edit_worker.py` and `edit_process.py` transport/ownership
+  with Ruff, while retaining its distinct baseline schema and read-only failure
+  semantics. `edit_secrets.py` captures complete explicit bytes and root scanner
+  configuration, selects the repository-wide exact release without Python
+  runtimes, scans an isolated partial tree, resolves typed waivers and checks
+  freshness. `secrets.py` owns shared native command flags and bounded in-memory
+  report-to-fingerprint parsing for edit, candidate and history scans. Native
+  processes start suspended into a Windows Job before running; POSIX uses process
+  groups. See [the public secret protocol](edit-secrets.md) for coverage, policy
+  compatibility and the historical redacted-fingerprint correction.
+
 - **Dependabot owner review** — `.github/workflows/dependabot-review.yml` handles non-draft
   Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
   `pull-requests: write`, requests the repository owner's review, and skips duplicate requests

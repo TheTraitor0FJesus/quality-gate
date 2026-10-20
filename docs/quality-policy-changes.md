@@ -73,13 +73,24 @@ Each web component declares a repository-relative root plus JavaScript and CSS g
 
 Projects may keep pytest markers, test discovery, package metadata, and dependency configuration that describe their own code. They must not keep separate Ruff or mypy policies, or CI jobs that rerun the shared quality tools independently.
 
-## Ruff policy selection
+## Working-tree policy selection
+
+The additive [edit-secrets interface](edit-secrets.md) reuses the exact release's
+Gitleaks detector and working-tree root configuration on an explicit partial
+candidate. Its bounded coverage failures do not redefine full Gate scope. The
+shared scanner transport now hashes actual in-memory `Secret` bytes instead of
+the historical redacted placeholder and persists no raw report/log. Existing
+typed-waiver matching remains exact; placeholder-digest waivers require explicit
+review and reissue, without a compatibility alias. Publication/consumer rollout
+must carry that correction explicitly; immutable old releases remain unchanged.
 
 The additive working-tree [edit-check interface](edit-check.md) reuses the exact released Ruff
 policy and tool without changing ordinary Gate scope or rule selection. Its explicit automatic
 fix allowlist contains only safe `I001`; `F401` remains unfixable. The final full-file lint still
 checks every released enabled rule. Interface-engine updates do not activate new consumer policy
 pins, and unsupported pins fail closed rather than falling back to baseline.
+
+## Ruff policy selection
 
 The shared policy uses the stable Ruff 0.16.4 surface. It enables all stable Bugbear rules (`B`),
 keeps `C901` at 10 and `PLR0915` at 50, and adds these calibrated rule sets:
