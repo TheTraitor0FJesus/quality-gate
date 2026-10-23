@@ -61,6 +61,13 @@ exact waivers without a Python runtime, performs no setup/download/history scan,
 and requires current raw-byte identities. Its local development seam is distinct
 from installed immutable-release activation.
 
+For read-only touched-file conflict markers, use the separate
+[edit-integrity interface](edit-integrity.md). It shares the normal Gate's exact
+marker and standard-waiver semantics, checks only explicit complete files, and
+uses the selected immutable policy without a scanner or Python runtime. The host
+must preserve its common post-Ruff deadline and validate every returned identity;
+provider publication does not activate or enable the host hook.
+
 Schema 2 accepts optional repository-owned supplemental tests in the canonical template:
 
 ```toml
@@ -94,8 +101,9 @@ quality-gate doctor
 ```
 
 Use `quality-gate sync --prune` to preview cleanup and add `--confirm` only after reviewing the
-preview. A missing release, runtime, tool, Python version, unreadable tree, timeout, or shallow
-history is `unchecked`; it blocks completion and requires the recovery action in the report.
+preview. A missing release, runtime, tool, Python version, unreadable tree, exceeded scan limit,
+timeout, or shallow history is `unchecked`; it blocks completion and requires the recovery
+action in the report.
 Never treat an `unchecked` result as a pass.
 
 ## Consumer release update

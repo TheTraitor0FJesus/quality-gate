@@ -18,15 +18,24 @@ from .edit_protocol import (
 from .runtime import RuntimeUnavailable
 
 
-def main(workspace: Path, *, secrets: bool = False) -> None:
-	if secrets:
+def main(workspace: Path, *, secrets: bool = False, integrity: bool = False) -> None:
+	if secrets and integrity:
+		raise ValueError("Choose one edit reader")
+	if integrity:
+		from .edit_integrity import execute
+		from .edit_integrity import integrity_unchecked as unchecked
+	elif secrets:
 		from .edit_secrets import execute
 		from .edit_secrets import secret_unchecked as unchecked
 	else:
 		from .edit_check import execute
 		from .edit_protocol import unchecked
 	try:
-		request = decode_request(sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1), secrets=secrets)
+		request = decode_request(
+			sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1),
+			secrets=secrets,
+			integrity=integrity,
+		)
 		deadline = (
 			time.monotonic()
 			+ request["deadline_unix_ms"] / 1000

@@ -68,7 +68,11 @@ def _deliver(output: bytes, deadline: float) -> None:
 		os._exit(EXIT_UNCHECKED)
 
 
-def _failure(reason: str, *, secrets: bool) -> dict[str, Any]:
+def _failure(reason: str, *, secrets: bool, integrity: bool) -> dict[str, Any]:
+	if integrity:
+		from .edit_integrity import integrity_unchecked
+
+		return integrity_unchecked(reason)
 	if secrets:
 		from .edit_secrets import secret_unchecked
 
@@ -76,11 +80,13 @@ def _failure(reason: str, *, secrets: bool) -> dict[str, Any]:
 	return unchecked(reason)
 
 
-def _validate_result(output: bytes, stderr: bytes, code: int, *, secrets: bool) -> dict[str, Any]:
+def _validate_result(
+	output: bytes, stderr: bytes, code: int, *, secrets: bool, integrity: bool
+) -> dict[str, Any]:
 	try:
 		result = json.loads(output)
 		statuses = {"passed": 0, "failed": 1, "not_applicable": 0, "unchecked": 2}
-		if secrets:
+		if secrets or integrity:
 			statuses["waived"] = 0
 		if not isinstance(result, dict):
 			raise EditError("tool_output")
@@ -98,13 +104,13 @@ def _validate_result(output: bytes, stderr: bytes, code: int, *, secrets: bool) 
 		raise EditError("tool_output") from error
 
 
-def main(*, secrets: bool = False) -> int:
+def main(*, secrets: bool = False, integrity: bool = False) -> int:
 	"""Read one bounded request and emit exactly one source-free JSON result."""
 	started = time.monotonic()
 	delivery_deadline = started + MAX_DEADLINE_MS / 1000
 	try:
 		payload = _request()
-		request = decode_request(payload, secrets=secrets)
+		request = decode_request(payload, secrets=secrets, integrity=integrity)
 		delivery_deadline = time.monotonic() + request["deadline_unix_ms"] / 1000 - time.time()
 		deadline = (
 			time.monotonic()
@@ -122,7 +128,8 @@ def main(*, secrets: bool = False) -> int:
 		if (
 			not root.is_absolute()
 			or not root.is_dir()
-			or getattr(root.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+			or getattr(root.lstat(), "st_file_attributes", 0)
+			& getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 			or root.is_symlink()
 		):
 			raise EditError("unsafe_path")
@@ -130,7 +137,8 @@ def main(*, secrets: bool = False) -> int:
 			entry = (
 				f"import sys; sys.path.insert(0, {str(package_root)!r}); "
 				"from pathlib import Path; from quality_gate.edit_worker import main; "
-				f"main(Path({str(Path(directory).resolve())!r}), secrets={secrets!r})"
+				f"main(Path({str(Path(directory).resolve())!r}), "
+				f"secrets={secrets!r}, integrity={integrity!r})"
 			)
 			code, output, stderr = run_process(
 				[str(worker_python), "-I", "-S", "-B", "-c", entry],
@@ -156,19 +164,19 @@ def main(*, secrets: bool = False) -> int:
 				limit=MAX_RESULT_BYTES,
 				own_tree=True,
 			)
-		result = _validate_result(output, stderr, code, secrets=secrets)
+		result = _validate_result(output, stderr, code, secrets=secrets, integrity=integrity)
 		if time.monotonic() >= deadline:
 			raise EditError("deadline")
 	except EditError as error:
-		result = _failure(error.reason, secrets=secrets)
+		result = _failure(error.reason, secrets=secrets, integrity=integrity)
 		result["stage"] = error.stage
 	except OSError:
-		result = _failure("io", secrets=secrets)
+		result = _failure("io", secrets=secrets, integrity=integrity)
 	result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 	try:
 		output = encode(result)
 	except EditError:
-		result = _failure("limits", secrets=secrets)
+		result = _failure("limits", secrets=secrets, integrity=integrity)
 		result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 		output = encode(result)
 	_deliver(output, delivery_deadline)

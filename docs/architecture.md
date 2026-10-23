@@ -56,6 +56,19 @@ Use this map before non-trivial codebase questions, design work, or code changes
   [The v2.4.2 acceptance audit](audits/provider-v2.4.2-acceptance.md) records the immutable
   provider handoff, activation reruns and remaining consumer/live-event acceptance.
 
+- **Working-tree integrity checking** — public `edit-integrity` shares the bounded
+  `edit_cli.py`, `edit_protocol.py`, `edit_worker.py` and `edit_process.py` transport.
+  `edit_integrity.py` captures the manifest and explicit raw-byte inputs, selects
+  the exact immutable policy and calls `git_conflict_marker_results`, which shares
+  the full Gate's marker and waiver implementation and returns per-file status from
+  one scan. It runs no scanner, runtime, Git command, history scan or full-tree
+  enumeration. See [the public integrity protocol](edit-integrity.md) for marker,
+  non-text, waiver and host-acceptance boundaries.
+- **Gate conflict-marker scan** — the normal repository check reads one candidate file at a time.
+  It stops with `unchecked` and the affected path when a file exceeds 8 MiB, the candidate exceeds
+  256 MiB of candidate bytes, reading fails, or more than 4,096 markers are found. The public
+  `edit-integrity` command has its separate explicit-file limits in
+  [the integrity protocol](edit-integrity.md).
 - **Local and CI checking** — `quality-gate check` → `quality_gate/temp_workspace.py` → `quality_gate/snapshot.py` → `quality_gate/runner.py` → validated manifest → structured verdict → Git hygiene, Gitleaks, workflow/documentation checks, staged web asset budgets, standalone Biome lint and formatting, Ruff, mypy, deptry dependency hygiene, pytest, and report-only coverage when pinned. `.github/workflows/quality.yml` verifies and installs the release wheel, syncs the manifest release, prepares declared Python versions, and passes pull-request base/head SHAs; `quality_gate/ci_parity.py` invokes that installed console entry point against one release-backed fixture and emits the comparison surface; `quality-gate audit` adds full reachable-history secret scanning and complete lessons.
   Provider self-checks also prepare the hash-locked release build backend for real-wheel
   test fixtures; consumer runs keep their own dependency preparation contract.

@@ -4,9 +4,9 @@ Paths are relative to the Quality Gate repository root. This is the provider
 contract for `skills/.scratch/python-quality-hooks/issues/02-secret-hook.md`.
 The host owns attribution, Ruff-before-readers ordering, feedback and activation.
 The provider owns scanner selection, exact content verification and typed waivers.
-This candidate prepares the v3.0.0 provider release. Publication requires owner
-merge and exact-source platform verification; installed hook activation remains
-separate. The published v2.6.2 engine has no `edit-secrets`.
+The interface was introduced in published v3.0.0; the v3.2.0 candidate adds
+`edit-integrity` while retaining this command. Host activation remains a separate
+consumer step. The published v2.6.2 engine has no `edit-secrets`.
 
 ## Invocation
 
@@ -28,8 +28,8 @@ command = [
 This is a development-only seam. Bind its source hashes in test evidence. The
 native verified-wheel launcher continues to own actual release activation.
 Candidate source must never replace an immutable cached wheel or impersonate a
-published engine. The candidate engine version is `3.0.0`; source/commit hashes
-identify its exact contents until immutable publication completes.
+published engine. The v3.0.0 engine introduced this command; source/commit hashes
+identify the v3.2.0 candidate until its immutable publication completes.
 
 ```json
 {
@@ -161,8 +161,9 @@ starts in the entry function. The host measures outer launch-to-delivery time.
 
 ## Materialization and compatibility
 
-The supported exact pins are v2.4.2, v2.5.0, v2.6.0, v2.6.1, v2.6.2 and v3.0.0;
-the candidate pin is usable only after its immutable publication.
+The supported exact pins are v2.4.2, v2.5.0, v2.6.0, v2.6.1, v2.6.2 and v3.0.0.
+Published v3.1.0 is also supported. The v3.2.0 candidate adds its own pin,
+usable only after immutable publication.
 The complete immutable release inventory is verified offline without repairing
 or quarantining it. Its native Gitleaks 8.30.1 and embedded policy are selected;
 there is no dependency setup, download, Python runtime probe, history scan,

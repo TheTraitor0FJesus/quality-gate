@@ -8,8 +8,8 @@ An open provider PR does not install a hook or publish an immutable release.
 
 ## Invocation and request
 
-Install the interface engine from the Quality Gate **v3.0.0** wheel after
-publication. Invoke
+Install the interface engine from the published Quality Gate **v3.0.0** wheel or
+the compatible v3.2.0 candidate after publication. Invoke
 `quality-gate edit-check` or `python -I -B -m quality_gate.cli edit-check` with one UTF-8
 JSON object on stdin and close stdin. The equivalent entry point is `quality-gate-edit`.
 The regular module route dispatches before loading full Gate orchestration and is the
@@ -95,15 +95,17 @@ a fallback for an invalid manifest, incompatible managed pin, or missing managed
 
 ## Selection, preparation and compatibility
 
-| Selected policy | Interface engine | Coverage |
-| --- | --- | --- |
-| v2.4.2 | v3.0.0 | Supported exact old policy; initial skills consumer pin |
-| v2.5.0 | v3.0.0 | Supported exact old policy |
-| v2.6.0 | v3.0.0 | Supported exact published policy |
-| v2.6.1 | v3.0.0 | Supported exact published policy |
-| v2.6.2 | v3.0.0 | Supported exact published policy |
-| v3.0.0 | v3.0.0 | Supported candidate policy, usable only after publication |
-| Any other version | v3.0.0 | `unchecked / unsupported_policy`; explicit consumer upgrade required |
+| Selected policy | v3.0.0 engine | v3.2.0 engine | Coverage |
+| --- | --- | --- | --- |
+| v2.4.2 | Supported | Supported | Exact old policy; initial skills consumer pin |
+| v2.5.0 | Supported | Supported | Exact old policy |
+| v2.6.0 | Supported | Supported | Exact published policy |
+| v2.6.1 | Supported | Supported | Exact published policy |
+| v2.6.2 | Supported | Supported | Exact published policy |
+| v3.0.0 | Supported | Supported | Exact published policy |
+| v3.1.0 | — | Supported | Published policy |
+| v3.2.0 | — | Supported after publication | Candidate policy |
+| Any other version | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | Explicit consumer update required |
 
 The compatibility adapter uses schema 2 and the same component path membership and
 released Ruff configuration as these releases. Their Python manifest/runtime/Ruff
