@@ -15,7 +15,7 @@ from quality_gate.edit_process import run_process
 from quality_gate.edit_protocol import EditError
 
 
-@pytest.mark.parametrize("lifecycle", ["timeout", "orphan"])
+@pytest.mark.parametrize("lifecycle", ["timeout", "cancelled", "orphan"])
 def test_native_tree_is_owned_before_descendants_start(tmp_path: Path, lifecycle: str) -> None:
 	base_python = Path(sys.base_prefix) / "python.exe" if os.name == "nt" else Path(sys.executable)
 	marker = tmp_path / "child.pid"
@@ -24,18 +24,20 @@ def test_native_tree_is_owned_before_descendants_start(tmp_path: Path, lifecycle
 		"child=subprocess.Popen([sys.executable,'-I','-S','-B','-c',"
 		"'import time; time.sleep(30)'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
 		f"Path({str(marker)!r}).write_text(str(child.pid)); "
-		+ ("time.sleep(30)" if lifecycle == "timeout" else "print('complete')")
+		+ ("print('complete')" if lifecycle == "orphan" else "time.sleep(30)")
 	)
 	started = time.monotonic()
 	try:
-		if lifecycle == "timeout":
-			with pytest.raises(EditError, match=r"^deadline$"):
+		if lifecycle != "orphan":
+			reason = "deadline" if lifecycle == "timeout" else "cancelled"
+			with pytest.raises(EditError, match=f"^{reason}$"):
 				run_process(
 					[str(base_python), "-I", "-S", "-B", "-c", body],
 					root=tmp_path,
 					environment=dict(os.environ),
 					deadline=started + 2,
 					own_tree=True,
+					cancelled=marker.exists if lifecycle == "cancelled" else None,
 				)
 		else:
 			code, output, diagnostics = run_process(

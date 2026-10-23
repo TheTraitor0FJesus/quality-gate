@@ -307,12 +307,9 @@ def test_documented_isolated_development_command(tmp_path: Path, policy_root: Pa
 	assert json.loads(completed.stdout)["status"] == "passed"
 
 
-def test_published_normal_comparison_identifies_the_redaction_discrepancy(
+def test_selected_wheel_and_provider_preserve_their_fingerprint_contracts(
 	tmp_path: Path, policy_root: Path
 ) -> None:
-	# Release verification also supplies the published source-policy baseline.
-	# Keep this historical comparison on that old wheel when policy_root is v3.
-	policy_root = policy_root.parent / "v2.5.0"
 	(tmp_path / "file.py").write_text(f"token = '{SYNTHETIC}'\n", encoding="utf-8")
 	(tmp_path / "quality-gate.toml").write_text(manifest_text(policy_root.name), encoding="utf-8")
 	wheel = next(item for item in verify_release(policy_root).files if item.kind == "artifact")
@@ -347,12 +344,19 @@ def test_published_normal_comparison_identifies_the_redaction_discrepancy(
 	)
 	assert completed.returncode == 0
 	assert completed.stderr == b""
-	legacy = json.loads(completed.stdout)
+	assert SYNTHETIC.encode() not in completed.stdout
+	wheel_result = json.loads(completed.stdout)
 	code, current = invoke(payload(tmp_path, policy_root, "file.py"))
 	assert code == 1
-	assert legacy["status"] == "failed"
-	assert legacy["locations"] == [item["target"] for item in current["files"][0]["findings"]]
-	assert legacy["messages"] == [f"secret detected (fingerprint: {digest(b'REDACTED')})"]
+	assert wheel_result["status"] == "failed"
+	assert wheel_result["locations"] == [item["target"] for item in current["files"][0]["findings"]]
+	# Old immutable v2 wheels retain the redaction defect; v3 hashes the real value.
+	expected_wheel_fingerprint = (
+		digest(b"REDACTED") if policy_root.name.startswith("v2.") else digest(SYNTHETIC.encode())
+	)
+	assert wheel_result["messages"] == [
+		f"secret detected (fingerprint: {expected_wheel_fingerprint})"
+	]
 	assert current["files"][0]["findings"][0]["fingerprint"] == digest(SYNTHETIC.encode())
 
 

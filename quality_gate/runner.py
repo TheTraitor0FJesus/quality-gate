@@ -195,7 +195,7 @@ def load_components(root: Path) -> list[PythonComponent]:
 				path=path,
 				tests=test_paths[0] if test_paths else None,
 				requirements=None,
-				typecheck=True,
+				typecheck=item.typecheck,
 				dependency_inputs=tuple(
 					relative_path(
 						root,
@@ -1668,6 +1668,15 @@ def _run_python_checks(
 	results.extend(_command_results(executed, run_errors, run_outputs))
 	for component_index, component in enumerate(components, start=1):
 		tests_not_applicable = component.tests is None
+		if not component.typecheck:
+			results.append(
+				CheckResult(
+					check_id=f"python.component_{component_index}.mypy",
+					status=Status.NOT_APPLICABLE,
+					summary="typing is explicitly disabled by the component contract",
+					recovery_action="enable typecheck when component typing is required",
+				)
+			)
 		has_coverage = _has_pinned_coverage(prepared)
 		if tests_not_applicable:
 			results.append(
