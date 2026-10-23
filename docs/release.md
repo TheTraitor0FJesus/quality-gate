@@ -15,11 +15,14 @@ For this repository, use the executable declaration format in the shared publish
    `quality-gate.toml` on the latest published policy while preparing the candidate; the canonical
    template continues to project the target product release. The authority contains exactly one
    top-level version string.
-3. Write Russian user-visible changes and required adaptation in `.release/notes.md`. Plain prose is
-   sufficient; a repeated version, Impact field, and fixed compatibility headings are unnecessary.
+3. Replace `.release/notes.md` with Russian user-visible changes and required adaptation for the
+   candidate version only. Include accumulated unreleased changes selected for this candidate, but
+   never copy or summarize notes from already published releases. Their release pages remain the
+   history. Plain prose is sufficient; a repeated version, Impact field, and fixed compatibility
+   headings are unnecessary.
 4. Prepare exactly one `## Release` section using the shared contract. For internal-only work, use
    only `- No release: <Russian reason>` and keep the version unchanged relative to the PR base.
-   Existing notes remain valid historical content and cannot request a release by themselves.
+   Notes already present in the base do not request a release by themselves.
    The shared validator also recognizes an omitted section as no-release for a Dependabot bot PR
    only when the complete, stable changed-file list consists of workflow YAML files directly under
    `.github/workflows/`, including any previous paths for renames. Mixed or uncertain file lists
