@@ -148,4 +148,3 @@ Apply these as judgement calls, not hard violations. A documented repository rul
 - **Message Chains:** callers navigate deep object chains; expose an operation at the boundary.
 - **Middle Man:** an abstraction only delegates; remove it when it serves none of the purposes in **Scope and design** and **Architecture and persistence**.
 - **Refused Bequest:** inheritance is mostly ignored; prefer composition.
-
