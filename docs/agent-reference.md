@@ -61,6 +61,19 @@ exact waivers without a Python runtime, performs no setup/download/history scan,
 and requires current raw-byte identities. Its local development seam is distinct
 from installed immutable-release activation.
 
+For read-only whole-component typing, use [edit-types](edit-types.md). Schema 1
+uses the remaining common synchronous deadline. Schema 2 supports an explicitly
+owned background invocation with cancellation; the host still owns delivery and
+drain. Managed setup prepares the declared component runtime. Unmanaged projects
+explicitly prepare their own `.venv` with the exact released mypy and required
+dependencies/stubs. Editing performs no provisioning. See the
+[provider evidence and activation prerequisites](audits/edit-types-provider.md).
+
+Policy v3.1.0 adds optional `python[].typecheck` (boolean, default true). False
+produces an explicit mypy `not_applicable` result in full Gate and edit typing;
+it does not disable other component checks. Older selected policy releases reject
+this field, even when true. Omitted defaults retain existing runtime fingerprints.
+
 Schema 2 accepts optional repository-owned supplemental tests in the canonical template:
 
 ```toml
