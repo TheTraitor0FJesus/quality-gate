@@ -87,6 +87,8 @@ def runtime_identity(
 			"tests_applicable": component.tests_applicable,
 			"tests_reason": component.tests_reason,
 			"timeout_seconds": component.timeout_seconds,
+			# Preserve exact older runtime identities for the default true contract.
+			**({"typecheck": False} if not component.typecheck else {}),
 		},
 		dependency_inputs=tuple(
 			_file_identity(root, dependency) for dependency in component.dependency_inputs
