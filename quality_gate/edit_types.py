@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import ast
+import configparser
+import json
 import re
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -99,12 +102,51 @@ def execute(request: dict[str, Any], deadline: float, workspace: Path) -> dict[s
 	return _TypingInvocation(request, deadline, workspace).execute()
 
 
+class _TypingConfiguration(Configuration):
+	"""Validate captured settings as data without loading project plugins."""
+
+	def capture(self, relative: str, *, required: bool = False) -> bytes | None:
+		content = super().capture(relative, required=required)
+		if content is None:
+			return None
+		name = Path(relative).name
+		try:
+			if name in {"uv.lock", "poetry.lock", "Pipfile"} or (
+				name.endswith(".toml") and name != "quality-gate.toml"
+			):
+				tomllib.loads(content.decode("utf-8"))
+			elif name == "Pipfile.lock":
+				settings = json.loads(
+					content.decode("utf-8"),
+					object_pairs_hook=self._json_object,
+					parse_constant=self._invalid_json_constant,
+				)
+				if not isinstance(settings, dict):
+					raise EditError("configuration")
+			elif name in {"mypy.ini", ".mypy.ini", "setup.cfg"}:
+				configparser.RawConfigParser().read_string(content.decode("utf-8"))
+		except (ValueError, UnicodeError, configparser.Error) as error:
+			raise EditError("configuration") from error
+		return content
+
+	@staticmethod
+	def _json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+		settings = dict(pairs)
+		if len(settings) != len(pairs):
+			raise EditError("configuration")
+		return settings
+
+	@staticmethod
+	def _invalid_json_constant(_value: str) -> None:
+		raise EditError("configuration")
+
+
 class _TypingInvocation:
 	def __init__(self, request: dict[str, Any], deadline: float, workspace: Path) -> None:
 		self.request, self.deadline, self.workspace = request, deadline, workspace
 		self.root = Path(request["root"]).resolve(strict=True)
 		self.files = request_files(self.root, request["files"])
-		self.configuration = Configuration(self.root)
+		self.configuration = _TypingConfiguration(self.root)
 		for name in CONFIGURATION_NAMES:
 			self.configuration.capture(name)
 		for item in self.files:
@@ -231,8 +273,12 @@ class _TypingInvocation:
 			"source_count": len(sources),
 			"dependency_inputs": [
 				{"path": relative, "sha256": self.configuration.identities[relative]}
-				for relative in (
-					component.dependency_inputs if component is not None else CONFIGURATION_NAMES
+				for relative in sorted(
+					set(
+						component.dependency_inputs
+						if component is not None
+						else CONFIGURATION_NAMES
+					)
 				)
 				if self.configuration.identities.get(relative) is not None
 			],

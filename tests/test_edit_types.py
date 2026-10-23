@@ -373,6 +373,46 @@ def test_missing_environment_never_uses_global_python(tmp_path: Path, typing_pol
 	assert (code, result["status"], result["reason"]) == (2, "unchecked", "runtime"), result
 
 
+def test_unmanaged_dependency_evidence_is_path_ordered(
+	tmp_path: Path, typing_policy: Path, typing_environment: Path
+) -> None:
+	shutil.copytree(typing_environment, tmp_path / ".venv", symlinks=True)
+	(tmp_path / "source.py").write_bytes(b"value: int = 1\n")
+	(tmp_path / "pyproject.toml").write_bytes(b"[project]\nname = 'fixture'\n")
+	(tmp_path / ".mypy.ini").write_bytes(b"[mypy]\n")
+	code, result = invoke(request(tmp_path, typing_policy, "source.py", background=True))
+	assert (code, result["status"]) == (0, "passed"), result
+	assert result["components"][0]["dependency_inputs"] == [
+		{"path": ".mypy.ini", "sha256": digest(b"[mypy]\n")},
+		{"path": "pyproject.toml", "sha256": digest(b"[project]\nname = 'fixture'\n")},
+	]
+
+
+@pytest.mark.parametrize(
+	"name,content",
+	[
+		("uv.lock", b"[broken\n"),
+		("poetry.lock", b"[broken\n"),
+		("Pipfile", b"[broken\n"),
+		("Pipfile.lock", b'{"default": '),
+		pytest.param("Pipfile.lock", b'{"default": {}, "default": {}}', id="duplicate-json"),
+		pytest.param("Pipfile.lock", b'{"default": NaN}', id="non-json-constant"),
+		("mypy.ini", b"[broken\n"),
+		(".mypy.ini", b"[broken\n"),
+		("setup.cfg", b"[broken\n"),
+	],
+)
+def test_malformed_project_settings_are_unchecked(
+	tmp_path: Path, typing_policy: Path, typing_environment: Path, name: str, content: bytes
+) -> None:
+	shutil.copytree(typing_environment, tmp_path / ".venv", symlinks=True)
+	(tmp_path / "source.py").write_bytes(b"value: int = 1\n")
+	(tmp_path / name).write_bytes(content)
+	code, result = invoke(request(tmp_path, typing_policy, name, background=True))
+	assert (code, result["status"], result["reason"]) == (2, "unchecked", "configuration"), result
+	assert result["components"] == []
+
+
 @pytest.mark.parametrize(
 	"mutation,reason",
 	[
@@ -587,6 +627,7 @@ def test_real_managed_component_includes_visible_build_and_imported_types(
 		"from models import Value\nvalue: Value = 123\n", encoding="utf-8"
 	)
 	(tmp_path / "requirements.txt").write_bytes(b"")
+	(tmp_path / "requirements-dev.txt").write_bytes(b"# fixture dependencies\n")
 	(tmp_path / "quality-gate.toml").write_text(
 		f'''[quality]
 schema = 2
@@ -599,7 +640,7 @@ required_documents = ["quality-gate.toml"]
 name = "app"
 path = "app"
 python_version = "{sys.version_info.major}.{sys.version_info.minor}"
-dependency_inputs = ["requirements.txt"]
+dependency_inputs = ["requirements.txt", "requirements-dev.txt", "requirements.txt"]
 test_paths = []
 tests_applicable = false
 tests_reason = "Disposable typing integration."
@@ -619,6 +660,10 @@ tests_reason = "Disposable typing integration."
 		assert (code, result["status"]) == (1, "failed"), json.dumps(result)
 		component = result["components"][0]
 		assert component["coverage"] == "managed"
+		assert component["dependency_inputs"] == [
+			{"path": "requirements-dev.txt", "sha256": digest(b"# fixture dependencies\n")},
+			{"path": "requirements.txt", "sha256": digest(b"")},
+		]
 		assert {item["path"] for item in component["inventory"]} == {
 			"app/models.py",
 			"app/build/consumer.py",
