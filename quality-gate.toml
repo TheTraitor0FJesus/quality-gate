@@ -1,3 +1,5 @@
+supplemental_tests = []
+
 [[waivers]]
 kind = "standard"
 check_id = "repository.workflow"
@@ -9,7 +11,7 @@ expires_on = "2027-08-26"
 
 [quality]
 schema = 2
-policy_release = "v2.4.2"
+policy_release = "v3.1.0"
 
 [repository]
 name = "quality-gate"
@@ -23,6 +25,12 @@ required_documents = [
     ".release/publisher.toml",
     "README.md",
     "docs/agent-reference.md",
+    "docs/edit-check.md",
+    "docs/edit-secrets.md",
+    "docs/edit-types.md",
+    "docs/audits/edit-types-provider.md",
+    "docs/audits/edit-secrets-provider.md",
+    "docs/audits/edit-check-provider.md",
     "docs/architecture.md",
     "docs/coding-standards.md",
     "docs/lessons.md",
@@ -46,8 +54,8 @@ max_blob_size_mib = 5
 
 [repository.defaults]
 command_timeout_seconds = 120
-test_timeout_seconds = 300
-gate_timeout_seconds = 600
+test_timeout_seconds = 900
+gate_timeout_seconds = 1200
 
 [[python]]
 name = "quality-gate"

@@ -144,6 +144,7 @@ class PythonComponent:
 	tests_applicable: bool
 	tests_reason: str | None
 	timeout_seconds: int
+	typecheck: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +282,7 @@ def _parse_component(value: object, index: int) -> PythonComponent:
 			"tests_applicable",
 			"tests_reason",
 			"timeout_seconds",
+			"typecheck",
 		},
 		path,
 	)
@@ -321,6 +323,7 @@ def _parse_component(value: object, index: int) -> PythonComponent:
 		if tests_reason is not None
 		else None,
 		timeout_seconds=_positive_int(table.get("timeout_seconds", 300), f"{path}.timeout_seconds"),
+		typecheck=cast(bool, _type(table.get("typecheck", True), bool, f"{path}.typecheck")),
 	)
 
 
@@ -592,6 +595,7 @@ def _load_table(raw: Mapping[str, object]) -> Manifest:
 		_parse_component(value, index)
 		for index, value in enumerate(_list(root.get("python", []), "python"))
 	)
+	_validate_typing_policy(root, policy_release)
 	if ("python" in domains) != bool(components):
 		raise ValidationError("repository.domains", "python domain must match the component list")
 	web_components = tuple(
@@ -616,6 +620,13 @@ def _load_table(raw: Mapping[str, object]) -> Manifest:
 	return Manifest(
 		policy_release, contract, components, web_components, supplemental_tests, waivers
 	)
+
+
+def _validate_typing_policy(root: Mapping[str, object], policy_release: str) -> None:
+	version = tuple(int(part) for part in policy_release[1:].split("."))
+	for index, component in enumerate(_list(root.get("python", []), "python")):
+		if "typecheck" in _table(component, f"python[{index}]") and version < (3, 1, 0):
+			raise ValidationError(f"python[{index}].typecheck", "requires policy v3.1.0 or newer")
 
 
 def _validate_supplemental_match(match: Path, root: Path, path: str) -> int:
@@ -677,13 +688,20 @@ def _validate_supplemental_targets(root: Path, tests: tuple[SupplementalTest, ..
 				)
 
 
+def parse_manifest(content: str) -> Manifest:
+	"""Validate the schema without expanding repository-owned supplemental targets."""
+	try:
+		return _load_table(tomllib.loads(content))
+	except tomllib.TOMLDecodeError as exc:
+		raise ValidationError("manifest", "cannot read valid UTF-8 TOML") from exc
+
+
 def load_manifest(root: Path | str = ".", manifest_name: str = MANIFEST_NAME) -> Manifest:
 	path = Path(root).resolve() / manifest_name
 	try:
-		raw = tomllib.loads(path.read_text(encoding="utf-8"))
-	except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+		manifest = parse_manifest(path.read_text(encoding="utf-8"))
+	except (OSError, UnicodeError) as exc:
 		raise ValidationError("manifest", "cannot read valid UTF-8 TOML") from exc
-	manifest = _load_table(raw)
 	_validate_supplemental_targets(path.parent, manifest.supplemental_tests)
 	return manifest
 

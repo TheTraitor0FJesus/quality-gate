@@ -67,6 +67,12 @@ def _visible_lines(body: str) -> Iterator[str]:
 			yield line
 
 
+def _section_count_error(count: int) -> PublicationError:
+	if count == 0:
+		return PublicationError("exactly one second-level Release section is required")
+	return PublicationError("multiple second-level Release sections are not allowed")
+
+
 def _section(body: str) -> list[str]:
 	if len(body.encode("utf-8")) > MAX_BODY_BYTES:
 		raise PublicationError("PR body exceeds 64 KiB")
@@ -90,7 +96,7 @@ def _section(body: str) -> list[str]:
 		if active and line.strip():
 			lines.append(line)
 	if count != 1:
-		raise PublicationError("exactly one second-level Release section is required")
+		raise _section_count_error(count)
 	return lines
 
 

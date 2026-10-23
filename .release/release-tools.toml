@@ -6,7 +6,7 @@ github_api_seconds = 60
 # The image jobs remain limited to 30 minutes.
 image_writer_seconds = 1500
 external_download_seconds = 120
-subprocess_seconds = 900
+subprocess_seconds = 1320
 check_wait_seconds = 900
 check_poll_seconds = 10
 actions_evidence_wait_seconds = 30

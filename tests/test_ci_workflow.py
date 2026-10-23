@@ -304,7 +304,7 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert 'QUALITY_GATE_WHEEL="$(python .quality-gate-ci/quality_gate/ci_release.py' in workflow
 	assert "manifest_python.outputs.versions" in workflow
 	assert 'default: "3.12"' not in workflow
-	assert manifest["quality"]["policy_release"] == "v2.4.2"
+	assert manifest["quality"]["policy_release"] == "v3.1.0"
 	version = tomllib.loads((REPOSITORY / ".release" / "version.toml").read_text(encoding="utf-8"))
 	assert template["quality"]["policy_release"] == f"v{version['version']}"
 	assert fixture["quality"]["policy_release"] == manifest["quality"]["policy_release"]
@@ -359,7 +359,7 @@ def test_reusable_workflow_has_one_stable_job_and_detects_private_push_bypass() 
 	assert "- main" in workflow
 	assert "name: Quality Gate" in workflow
 	assert "github.event.repository.default_branch" in workflow
-	assert "timeout-minutes: 10" in workflow
+	assert "timeout-minutes: 25" in workflow
 	assert (
 		"group: quality-${{ github.workflow }}-${{ github.ref }}-"
 		"${{ inputs['runner-os'] || 'ubuntu-latest' }}" in workflow

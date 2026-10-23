@@ -120,13 +120,11 @@ def _controlled_exit_command(
 	original_spawn = publication_github._spawn_bounded_command
 	calls: list[list[str]] = []
 
-	def spawn(arguments: list[str], environment: dict[str, str]) -> publication_github._CommandSession:
+	def spawn(
+		arguments: list[str], environment: dict[str, str]
+	) -> publication_github._CommandSession:
 		calls.append(arguments)
-		program = (
-			"import sys; "
-			f"sys.stderr.buffer.write({detail!r}); "
-			f"sys.exit({exit_code})"
-		)
+		program = f"import sys; sys.stderr.buffer.write({detail!r}); sys.exit({exit_code})"
 		return original_spawn([sys.executable, "-B", "-c", program], environment)
 
 	monkeypatch.setattr(publication_github, "_spawn_bounded_command", spawn)
@@ -885,7 +883,7 @@ def test_workflow_entrypoint_rejects_wrong_or_floating_helper_before_github(
 			env=environment,
 			capture_output=True,
 			check=True,
-			timeout=10,
+			timeout=30,
 		)
 	environment.pop("GH_TOKEN", None)
 	environment.pop("GITHUB_TOKEN", None)

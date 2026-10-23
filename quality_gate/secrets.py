@@ -6,13 +6,15 @@ import json
 import os
 import re
 import subprocess
-import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from .contracts import CheckResult, Finding, Manifest, Status, fingerprint_secret
 from .distribution import ReleaseManifest
+from .edit_process import run_process
+from .edit_protocol import FIRST_PRINTABLE_CHARACTER, MAX_TOOL_BYTES, EditError
 
 _SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _GITLEAKS = "gitleaks"
@@ -60,26 +62,19 @@ def _scanner_path(prepared: PreparedScanner) -> Path | None:
 	return path if path.is_file() else None
 
 
-def _run_scanner(command: list[str], root: Path, *, report_path: Path, timeout: float) -> int:
-	"""Run Gitleaks without retaining its potentially sensitive console output."""
-	log_path = report_path.with_suffix(".log")
+def _run_scanner(command: list[str], root: Path, *, timeout: float) -> tuple[int, bytes]:
+	"""Keep the unredacted fingerprint source only in bounded process memory."""
 	try:
-		with log_path.open("wb") as log:
-			process = subprocess.Popen(
-				command,
-				cwd=root,
-				env=_scanner_environment(),
-				stdout=log,
-				stderr=subprocess.STDOUT,
-			)
-			try:
-				return process.wait(timeout=timeout)
-			except subprocess.TimeoutExpired:
-				process.kill()
-				process.wait(timeout=1)
-				raise
-	except (OSError, subprocess.TimeoutExpired):
-		return -1
+		code, report, diagnostics = run_process(
+			command,
+			root=root,
+			environment=_scanner_environment(),
+			deadline=time.monotonic() + timeout,
+			own_tree=True,
+		)
+		return (-1, b"") if diagnostics else (code, report)
+	except (OSError, EditError):
+		return -1, b""
 
 
 def _scanner_environment() -> dict[str, str]:
@@ -88,7 +83,11 @@ def _scanner_environment() -> dict[str, str]:
 
 
 def _safe_location(value: object, root: Path) -> str:
-	if not isinstance(value, str) or not value.strip():
+	if (
+		not isinstance(value, str)
+		or not value.strip()
+		or any(ord(char) < FIRST_PRINTABLE_CHARACTER for char in value)
+	):
 		raise ValueError("scanner finding has no file")
 	path = value.replace("\\", "/")
 	try:
@@ -117,21 +116,26 @@ def _commit(value: object) -> str:
 	return value.lower()
 
 
-def _parse_report(report_path: Path, root: Path, *, include_commit: bool) -> list[_SecretFinding]:
+def parse_secret_report(
+	report: bytes, root: Path, *, include_commit: bool = False
+) -> list[_SecretFinding]:
+	"""Translate a bounded scanner report to locations and actual secret digests only."""
+	if len(report) > MAX_TOOL_BYTES:
+		raise ValueError("scanner report exceeds its memory limit")
 	try:
-		data = json.loads(report_path.read_text(encoding="utf-8"))
-	except (OSError, UnicodeError, json.JSONDecodeError) as error:
+		report_entries = json.loads(report.decode("utf-8"), object_pairs_hook=_report_object)
+	except (UnicodeError, ValueError, RecursionError) as error:
 		raise ValueError("scanner report is unavailable or malformed") from error
-	if not isinstance(data, list):
+	if not isinstance(report_entries, list):
 		raise ValueError("scanner report is not a list")
 	findings: list[_SecretFinding] = []
-	for item in data:
+	for item in report_entries:
 		if not isinstance(item, dict):
 			raise ValueError("scanner report contains an invalid finding")
 		path = _safe_location(item.get("File", item.get("file")), root)
 		line = _line(item.get("StartLine", item.get("start_line", item.get("Line"))))
-		value = item.get("Secret", item.get("secret"))
-		if not isinstance(value, str) or not value:
+		secret_value = item.get("Secret", item.get("secret"))
+		if not isinstance(secret_value, str) or not secret_value:
 			raise ValueError("scanner report does not contain a secret fingerprint source")
 		commit = _commit(item.get("Commit", item.get("commit"))) if include_commit else ""
 		target = f"{path}:{line}"
@@ -139,7 +143,7 @@ def _parse_report(report_path: Path, root: Path, *, include_commit: bool) -> lis
 			if not commit:
 				raise ValueError("history finding has no commit")
 			target = f"{commit}:{target}"
-		fingerprint = fingerprint_secret(value)
+		fingerprint = fingerprint_secret(secret_value)
 		findings.append(
 			_SecretFinding(
 				Finding(
@@ -153,6 +157,15 @@ def _parse_report(report_path: Path, root: Path, *, include_commit: bool) -> lis
 			)
 		)
 	return findings
+
+
+def _report_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+	result: dict[str, object] = {}
+	for key, value in pairs:
+		if key in result:
+			raise ValueError("scanner report has duplicate object keys")
+		result[key] = value
+	return result
 
 
 def _apply_waivers(
@@ -200,38 +213,21 @@ def _scan(
 	scanner = _scanner_path(prepared)
 	if scanner is None:
 		return _unchecked(check_id, "pinned Gitleaks tool is unavailable")
-	with tempfile.TemporaryDirectory(prefix="quality-gate-gitleaks-") as temporary:
-		report_path = Path(temporary) / "report.json"
-		command = [
-			str(scanner),
-			mode,
-			"--no-banner",
-			"--redact=100",
-			"--report-format",
-			"json",
-			"--report-path",
-			str(report_path),
-			"--exit-code",
-			"1",
-		]
-		if log_opts is not None:
-			command.extend(["--log-opts", log_opts])
-		command.append(str(root))
-		returncode = _run_scanner(
-			command,
-			root,
-			report_path=report_path,
-			timeout=manifest.repository.command_timeout_seconds,
-		)
-		try:
-			findings = _parse_report(report_path, root, include_commit=include_commit)
-		except ValueError:
-			return _unchecked(check_id, "Gitleaks report is unavailable or malformed")
+	command = scanner_command(scanner, root, mode=mode)
+	if log_opts is not None:
+		command.extend(["--log-opts", log_opts])
+	returncode, report = _run_scanner(
+		command, root, timeout=manifest.repository.command_timeout_seconds
+	)
+	try:
+		findings = parse_secret_report(report, root, include_commit=include_commit)
+	except ValueError:
+		return _unchecked(check_id, "Gitleaks report is unavailable or malformed")
 	if returncode < 0:
 		return _unchecked(check_id, "Gitleaks could not complete within the time budget")
 	if returncode not in {0, 1}:
 		return _unchecked(check_id, "Gitleaks verification is unavailable")
-	if returncode == 1 and not findings:
+	if (returncode == 1) != bool(findings):
 		return _unchecked(check_id, "Gitleaks reported an unavailable or skipped target")
 	return _apply_waivers(
 		check_id,
@@ -239,6 +235,28 @@ def _scan(
 		findings,
 		manifest,
 	)
+
+
+def scanner_command(
+	scanner: Path, root: Path, *, mode: str = "dir", coverage: bool = False
+) -> list[str]:
+	"""Normal and edit candidates share the same scanner flags and report transport."""
+	return [
+		str(scanner),
+		mode,
+		"--no-banner",
+		"--redact=0",
+		"--log-level",
+		"trace" if coverage else "error",
+		"--no-color",
+		"--report-format",
+		"json",
+		"--report-path",
+		"-",
+		"--exit-code",
+		"1",
+		str(root),
+	]
 
 
 def secret_candidate_result(

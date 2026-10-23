@@ -59,19 +59,14 @@ def _scanner(tmp_path: Path) -> Path:
 	return scanner
 
 
-def _write_report(path: Path, report: list[dict[str, object]]) -> None:
-	path.write_text(json.dumps(report), encoding="utf-8")
-
-
-def _run_fake_scanner(report_path: Path, report: list[dict[str, object]]) -> int:
-	_write_report(report_path, report)
-	return 1
+def _run_fake_scanner(report: list[dict[str, object]]) -> tuple[int, bytes]:
+	return 1, json.dumps(report).encode()
 
 
 def test_candidate_finding_exposes_only_location_and_fingerprint(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-	secret = "ghp_ExampleSyntheticCredential_123456789"
+	secret = "synthetic-github-token-value"
 	report = [
 		{
 			"File": "config.env",
@@ -88,7 +83,7 @@ def test_candidate_finding_exposes_only_location_and_fingerprint(
 	prepared.policy_root = release
 	monkeypatch.setattr(
 		"quality_gate.secrets._run_scanner",
-		lambda *args, report_path, **kwargs: _run_fake_scanner(report_path, report),
+		lambda *args, **kwargs: _run_fake_scanner(report),
 	)
 	result = secret_candidate_result(tmp_path, _manifest(tmp_path), prepared)
 
@@ -129,7 +124,7 @@ fingerprint = "{fingerprint_secret(reviewed_secret)}"
 
 	monkeypatch.setattr(
 		"quality_gate.secrets._run_scanner",
-		lambda *args, report_path, **kwargs: _run_fake_scanner(report_path, report),
+		lambda *args, **kwargs: _run_fake_scanner(report),
 	)
 	result = secret_candidate_result(tmp_path, _manifest(tmp_path, waiver), prepared)
 
@@ -172,7 +167,7 @@ fingerprint = "{fingerprint_secret(secret)}"
 
 	monkeypatch.setattr(
 		"quality_gate.secrets._run_scanner",
-		lambda *args, report_path, **kwargs: _run_fake_scanner(report_path, report),
+		lambda *args, **kwargs: _run_fake_scanner(report),
 	)
 	result = secret_candidate_result(tmp_path, _manifest(tmp_path, waiver), prepared)
 
@@ -226,7 +221,7 @@ def test_history_finding_contains_commit_location_without_secret(
 	)
 	monkeypatch.setattr(
 		"quality_gate.secrets._run_scanner",
-		lambda *args, report_path, **kwargs: _run_fake_scanner(report_path, report),
+		lambda *args, **kwargs: _run_fake_scanner(report),
 	)
 
 	result = secret_history_result(
@@ -252,9 +247,8 @@ def test_malformed_scanner_report_is_unchecked(
 	prepared = _prepared(tmp_path, scanner)
 	prepared.policy_root = release
 
-	def write_invalid_report(*args: object, report_path: Path, **kwargs: object) -> int:
-		report_path.write_text("not json", encoding="utf-8")
-		return 1
+	def write_invalid_report(*args: object, **kwargs: object) -> tuple[int, bytes]:
+		return 1, b"not json"
 
 	monkeypatch.setattr("quality_gate.secrets._run_scanner", write_invalid_report)
 	result = secret_candidate_result(tmp_path, _manifest(tmp_path), prepared)
@@ -283,10 +277,10 @@ def test_audit_finding_uses_commit_location_and_hash(
 	prepared = _prepared(tmp_path, scanner)
 	monkeypatch.setattr("quality_gate.secrets._is_shallow", lambda *args: False)
 
-	def run_scanner(command: list[str], *args: object, report_path: Path, **kwargs: object) -> int:
+	def run_scanner(command: list[str], *args: object, **kwargs: object) -> tuple[int, bytes]:
 		assert command[1] == "git"
 		assert command[command.index("--log-opts") + 1] == "--all"
-		return _run_fake_scanner(report_path, report)
+		return _run_fake_scanner(report)
 
 	monkeypatch.setattr("quality_gate.secrets._run_scanner", run_scanner)
 	result = secret_audit_result(tmp_path, _manifest(tmp_path), prepared)

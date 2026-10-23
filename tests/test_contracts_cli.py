@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from quality_gate import __version__
 from quality_gate.contracts import (
 	MAX_SUPPLEMENTAL_TARGET_MATCHES,
 	MAX_SUPPLEMENTAL_TESTS,
@@ -249,7 +250,7 @@ def test_version_cli_reports_the_installed_quality_gate_version(tmp_path: Path) 
 	result = _run(tmp_path, "version")
 
 	assert result.returncode == 0
-	assert result.stdout.strip() == "quality-gate 2.4.2"
+	assert result.stdout.strip() == f"quality-gate {__version__}"
 
 
 def test_direct_cli_script_invocation_keeps_the_package_bootstrap(tmp_path: Path) -> None:
@@ -265,7 +266,7 @@ def test_direct_cli_script_invocation_keeps_the_package_bootstrap(tmp_path: Path
 	)
 
 	assert result.returncode == 0, result.stderr
-	assert result.stdout.strip() == "quality-gate 2.4.2"
+	assert result.stdout.strip() == f"quality-gate {__version__}"
 
 
 def test_validate_accepts_python_manifest(tmp_path: Path) -> None:

@@ -16,6 +16,8 @@ Before changing the runner, a shared tool policy, the manifest contract, or the 
 
 This repository's commit hook runs the pinned released Quality Gate. Source or policy changes also require a current-source `quality-gate check` before committing; see [verification details](docs/agent-reference.md#normal-operation).
 
+Before full-suite, audit or release verification, size test, Gate, runner, hook and CI timeout budgets for the operation, allowing outer budgets to cover inner work and cleanup; edit-hook deadlines retain their separate contract.
+
 ## When planning, publishing, or starting issue work
 
 Read [the local issue tracker procedure](docs/agents/issue-tracker.md) before this work.

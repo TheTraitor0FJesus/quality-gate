@@ -17,13 +17,20 @@ This repository is the source of truth for shared Python quality checks.
 - `quality-gate.toml` in each consumer repository is the schema 2 contract: repository obligations,
   component metadata, limits, defaults, policy release identity, and typed waivers.
 
-Workflow permission checks allow the `pull-requests: write` permission for the exact
-`.github/workflows/dependabot-review.yml` metadata-review template only. Changes to its trigger,
-bot guard, permissions, environment, command, or steps require a separately reviewed policy change.
-Publish the policy exception before enabling this workflow, including in the provider repository.
+Workflow permission checks allow `pull-requests: write` only for the exact approved
+`.github/workflows/dependabot-review.yml` owner-review template. Changes to its trigger, bot guard,
+permissions, environment, command, or steps require a separately reviewed policy change. Publish
+the permission exception before enabling a changed template, including in the provider repository.
 Then synchronize each repository to that published policy and its compatible full workflow SHA
-before staging the review workflow. Older policies reject its pull-request write permission;
-do not bypass that rejection with a waiver or mutate a cached release.
+before staging the review workflow. Older policies reject the pull-request write permission; do
+not bypass that rejection with a waiver or mutate a cached release.
+
+Release validation also accepts an absent `## Release` section as an implicit no-release decision
+only when the PR author is `dependabot[bot]` with type `Bot` and the complete, stable GitHub API file
+list contains only `.yml` or `.yaml` files directly under `.github/workflows/`. Both current and
+previous names are checked, and the API count must match the PR's changed-file count. This route
+uses read-only metadata access; non-bot PRs, mixed changes, renames from outside that directory,
+incomplete lists, and malformed explicit decisions still fail closed.
 
 The reusable workflow and local launcher must consume an immutable policy release. CI selects a
 platform-specific asset from that release so Windows and Linux receive compatible wheels and
@@ -65,6 +72,32 @@ Each Python component with dependency inputs receives one `python.component_N.de
 Each web component declares a repository-relative root plus JavaScript and CSS glob patterns relative to that root. Explicit exclusions are the only way to remove generated or vendor assets from the boundary. The runner measures regular staged files in bytes and emits `web.component_N.javascript_budget` and `web.component_N.css_budget`; default limits are 100/50 KiB per file and 250/100 KiB per component respectively. Missing roots, empty declared matches, unreadable assets, and symbolic-link assets are `unchecked`. The same component emits `web.component_N.biome_lint` and `web.component_N.biome_format` using the exact standalone binary and policy in `quality_gate/policy`; the commands are read-only and pass only JavaScript and CSS assets. Biome's stable recommended rules are enabled by the version-locked 2.2.6 policy, which explicitly enables CSS formatting and accepts files up to the repository's default 5 MiB blob limit; a larger custom web/blob limit produces `unchecked` before Biome invocation. The config has no nursery or experimental rule selection, and no project-wide file discovery, SCSS, or embedded-language inputs are passed. An absent, corrupt, or inventory-mismatched binary is `unchecked`.
 
 Projects may keep pytest markers, test discovery, package metadata, and dependency configuration that describe their own code. They must not keep separate Ruff or mypy policies, or CI jobs that rerun the shared quality tools independently.
+
+## Working-tree policy selection
+
+The additive [edit-types interface](edit-types.md) runs whole affected typed
+components against the exact released mypy policy. Its bounded source,
+configuration, dependency, runtime and tool evidence must remain fresh at
+completion and host delivery. The new policy's optional `typecheck` boolean
+defaults to true; false is an explicit mypy opt-out in full Gate and edit typing.
+Older selected policies reject the field, including true. No mypy manifest-waiver
+semantics are added. Schema 2 background ownership does not alter schema 1's
+deadline or authorize installing packages during editing.
+
+The additive [edit-secrets interface](edit-secrets.md) reuses the exact release's
+Gitleaks detector and working-tree root configuration on an explicit partial
+candidate. Its bounded coverage failures do not redefine full Gate scope. The
+shared scanner transport now hashes actual in-memory `Secret` bytes instead of
+the historical redacted placeholder and persists no raw report/log. Existing
+typed-waiver matching remains exact; placeholder-digest waivers require explicit
+review and reissue, without a compatibility alias. Publication/consumer rollout
+must carry that correction explicitly; immutable old releases remain unchanged.
+
+The additive working-tree [edit-check interface](edit-check.md) reuses the exact released Ruff
+policy and tool without changing ordinary Gate scope or rule selection. Its explicit automatic
+fix allowlist contains only safe `I001`; `F401` remains unfixable. The final full-file lint still
+checks every released enabled rule. Interface-engine updates do not activate new consumer policy
+pins, and unsupported pins fail closed rather than falling back to baseline.
 
 ## Ruff policy selection
 

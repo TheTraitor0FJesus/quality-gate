@@ -34,6 +34,17 @@ def test_no_release_keeps_previous_version_without_reading_old_notes() -> None:
 	) == {"status": "validated", "version": "2.0.6", "release": False}
 
 
+def test_duplicate_release_sections_are_rejected() -> None:
+	with pytest.raises(PublicationError, match="multiple second-level Release sections"):
+		prepare(
+			body=BODY + BODY,
+			version="2.1.0",
+			base_version="2.0.6",
+			baseline="2.0.6",
+			projections=[],
+		)
+
+
 @pytest.mark.parametrize(
 	"body",
 	[

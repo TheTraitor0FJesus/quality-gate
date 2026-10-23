@@ -16,16 +16,62 @@ Use this map before non-trivial codebase questions, design work, or code changes
 
 ## Flows
 
+- **Working-tree edit checking** — the public `edit-check` command and `quality-gate-edit`
+  entry point use `edit_cli.py` and `edit_protocol.py` for bounded JSON and one caller deadline;
+  `edit_process.py` owns bounded streams and the supervised process tree; `edit_worker.py`
+  runs the source-free failure boundary. `edit_inputs.py` captures explicit files and
+  configuration freshness; `edit_policy.py` verifies exact compatible releases and explicitly
+  provisions native Ruff through `edit-setup`; `edit_check.py` selects only relevant prepared
+  runtimes, batches isolated safe fixes/format/final checks, then publishes current bytes.
+  `edit_reuse.py` stores bounded authenticated complete results; fresh provider selection,
+  artifact/configuration checks and `edit_inputs.py` import-layout facts govern reuse.
+  This path uses schema validation through `contracts.parse_manifest` without expanding
+  supplemental test targets. It creates no Git-index candidate and runs no full checks or setup.
+  The supervisor imports the explicit engine directory or wheel and starts the worker in
+  its private same-volume workspace; an archive path is never used as a working directory.
+  See [the public protocol and compatibility contract](edit-check.md).
+
+- **Working-tree secret checking** — public `edit-secrets` shares `edit_cli.py`,
+  `edit_protocol.py`, `edit_worker.py` and `edit_process.py` transport/ownership
+  with Ruff, while retaining its distinct baseline schema and read-only failure
+  semantics. `edit_secrets.py` captures complete explicit bytes and root scanner
+  configuration, selects the repository-wide exact release without Python
+  runtimes, scans an isolated partial tree, resolves typed waivers and checks
+  freshness. `secrets.py` owns shared native command flags and bounded in-memory
+  report-to-fingerprint parsing for edit, candidate and history scans. Native
+  processes start suspended into a Windows Job before running; POSIX uses process
+  groups. See [the public secret protocol](edit-secrets.md) for coverage, policy
+  compatibility and the historical redacted-fingerprint correction.
+
+- **Working-tree typing** — `edit-types` shares the bounded CLI, protocol, worker
+  and process-tree supervisor. `edit_types.py` owns affected-component selection,
+  isolated whole-component analysis and source-free diagnostics;
+  `edit_type_environment.py` owns declared runtime selection and exact released
+  mypy/installed-tool verification; `edit_type_inputs.py` owns bounded source and
+  environment inventories and host-owned cancellation signals. Schema 1 consumes
+  the remaining synchronous deadline; schema 2 binds one supervised background
+  invocation to an event and cancellation path. The host owns scheduling,
+  replacement, active-turn delivery and Stop/drain. `contracts.py`, `runner.py`
+  and `runtime.py` share the new policy's optional `typecheck` opt-out while
+  retaining default-true older runtime identities. See the [wire contract](edit-types.md)
+  and [provider preparation evidence](audits/edit-types-provider.md).
+
 - **Dependabot owner review** — `.github/workflows/dependabot-review.yml` handles non-draft
   Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
   `pull-requests: write`, requests the repository owner's review, and skips duplicate requests
   when the owner is already requested or has reviewed. It checks out and executes no PR code.
+  The v2.5.0 rule in `quality_gate/publication_flow.py` interprets a missing `## Release` section as
+  `No release` only for Dependabot bot PRs whose complete, stable API file list contains workflow
+  YAML files directly under `.github/workflows/`; it checks old names on renames and skips mixed or
+  incomplete changes. This read-only path leaves the generated PR description untouched.
   `.github/dependabot.yml` assigns issues separately; provider calls here use same-repository
   references, so external-provider update grouping is unnecessary.
   [The v2.4.2 acceptance audit](audits/provider-v2.4.2-acceptance.md) records the immutable
   provider handoff, activation reruns and remaining consumer/live-event acceptance.
 
 - **Local and CI checking** — `quality-gate check` → `quality_gate/temp_workspace.py` → `quality_gate/snapshot.py` → `quality_gate/runner.py` → validated manifest → structured verdict → Git hygiene, Gitleaks, workflow/documentation checks, staged web asset budgets, standalone Biome lint and formatting, Ruff, mypy, deptry dependency hygiene, pytest, and report-only coverage when pinned. `.github/workflows/quality.yml` verifies and installs the release wheel, syncs the manifest release, prepares declared Python versions, and passes pull-request base/head SHAs; `quality_gate/ci_parity.py` invokes that installed console entry point against one release-backed fixture and emits the comparison surface; `quality-gate audit` adds full reachable-history secret scanning and complete lessons.
+  Provider self-checks also prepare the hash-locked release build backend for real-wheel
+  test fixtures; consumer runs keep their own dependency preparation contract.
 - **Release and runtime preparation** — `quality-gate sync` → verified immutable release cache → `quality-gate setup` → repository-keyed runtime fingerprint → isolated Python environment; `quality-gate doctor` reports missing prerequisites as unchecked.
 - **Project bootstrap** — `$setup-repo` → `quality-gate.toml` and a CI caller → reusable `quality.yml`.
 - **Unified agent verification** — typed test-runner `scope: full` → repository-owned supplemental tests when declared → one staged Quality Gate; without a manifest, ordinary complete-suite discovery remains in use.

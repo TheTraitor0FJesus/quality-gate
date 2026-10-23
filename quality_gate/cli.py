@@ -12,22 +12,6 @@ if __package__ in {None, ""}:
 	__package__ = "quality_gate"
 
 from . import __version__  # noqa: E402
-from .contracts import ValidationError, Verdict, load_manifest  # noqa: E402
-from .distribution import DistributionError, PolicyCache  # noqa: E402
-from .launcher import prepare  # noqa: E402
-from .migration import migration_proposal  # noqa: E402
-from .reporting import render  # noqa: E402
-from .runner import (  # noqa: E402
-	QualityGateError,
-	_error_result,
-	audit,
-	check,
-	format_paths,
-	repository_root,
-	validate,
-)
-from .runtime import RuntimeManager, RuntimeUnavailable, runtime_identity  # noqa: E402
-from .temp_workspace import TemporaryWorkspaceError, temporary_workspace  # noqa: E402
 
 
 def parser() -> argparse.ArgumentParser:
@@ -46,6 +30,14 @@ def parser() -> argparse.ArgumentParser:
 		"format", help="Format only explicit Python paths with the pinned Ruff release."
 	)
 	format_parser.add_argument("paths", nargs="+", help="Repository-relative paths to format.")
+	subcommands.add_parser("edit-check", help="Check explicit working-tree Python files via JSON.")
+	subcommands.add_parser("edit-secrets", help="Scan explicit working-tree content via JSON.")
+	subcommands.add_parser("edit-types", help="Check affected whole Python scopes via JSON.")
+	edit_setup = subcommands.add_parser(
+		"edit-setup", help="Provision exact released Ruff for offline edits."
+	)
+	edit_setup.add_argument("--policy-release", required=True)
+	edit_setup.add_argument("--cache-dir", type=Path)
 	subcommands.add_parser("validate", help="Validate the repository quality manifest.")
 	subcommands.add_parser("migrate", help="Print a read-only schema 1 migration proposal.")
 	sync_parser = subcommands.add_parser(
@@ -69,6 +61,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 def _sync(arguments: argparse.Namespace) -> None:
+	from .distribution import DistributionError, PolicyCache
+
 	cache = PolicyCache(arguments.cache_dir)
 	if arguments.prune:
 		if arguments.source or arguments.url or arguments.rollback is not None:
@@ -94,6 +88,10 @@ def _sync(arguments: argparse.Namespace) -> None:
 
 
 def _doctor(root: Path | None, cache_dir: Path | None) -> int:
+	from .contracts import ValidationError, load_manifest
+	from .distribution import DistributionError, PolicyCache
+	from .runtime import RuntimeManager, RuntimeUnavailable, runtime_identity
+
 	actual_root = root.resolve() if root is not None else None
 	try:
 		from .runner import repository_root
@@ -122,6 +120,8 @@ def _doctor(root: Path | None, cache_dir: Path | None) -> int:
 
 
 def _setup(root: Path | None, cache_dir: Path | None) -> None:
+	from .launcher import prepare
+	from .runner import repository_root
 
 	actual_root = repository_root(root)
 	environment = prepare(
@@ -133,6 +133,8 @@ def _setup(root: Path | None, cache_dir: Path | None) -> None:
 
 
 def _migrate(root: Path | None) -> None:
+	from .migration import migration_proposal
+
 	sys.stdout.write(migration_proposal(root or Path(".")))
 
 
@@ -141,6 +143,8 @@ def _version() -> None:
 
 
 def _dispatch(arguments: argparse.Namespace) -> int:
+	from .runner import audit, check, format_paths, validate
+
 	handlers = {
 		"validate": lambda: validate(arguments.root),
 		"migrate": lambda: _migrate(arguments.root),
@@ -166,6 +170,34 @@ def _dispatch(arguments: argparse.Namespace) -> int:
 
 def main() -> int:
 	arguments = parser().parse_args()
+	if arguments.command in {"edit-check", "edit-secrets", "edit-types"}:
+		from .edit_cli import main as edit_main
+
+		return edit_main(
+			secrets=arguments.command == "edit-secrets", types=arguments.command == "edit-types"
+		)
+	# The edit path shares the JSON-only entry's lean startup. Full Gate modules
+	# are loaded only for commands which need their repository orchestration.
+	from .contracts import ValidationError, Verdict
+	from .distribution import DistributionError, PolicyCache
+	from .reporting import render
+	from .runner import QualityGateError, _error_result, repository_root
+	from .runtime import RuntimeUnavailable
+	from .temp_workspace import TemporaryWorkspaceError, temporary_workspace
+
+	if arguments.command == "edit-setup":
+		from .edit_policy import setup_tool
+		from .edit_protocol import EditError
+
+		try:
+			tool = setup_tool(PolicyCache(arguments.cache_dir), arguments.policy_release)
+			sys.stdout.write(f"edit-setup: ready - {tool}\n")
+			return 0
+		except (EditError, DistributionError, OSError, ValueError):
+			sys.stdout.write(
+				"edit-setup: unchecked - restore the exact release using sync and retry\n"
+			)
+			return 2
 	try:
 		if arguments.command in {
 			"check",

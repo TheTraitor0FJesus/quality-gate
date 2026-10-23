@@ -27,7 +27,7 @@ from .lessons import (
 from .runtime import RuntimeInspection, RuntimeManager, RuntimeUnavailable, runtime_fingerprint
 from .secrets import secret_audit_result, secret_candidate_result, secret_history_result
 
-__version__ = "2.4.2"
+__version__ = "3.1.0"
 
 __all__ = [
 	"CheckResult",
