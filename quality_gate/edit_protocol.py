@@ -25,7 +25,7 @@ MAX_BACKGROUND_DEADLINE_MS = 30_000
 BACKGROUND_SCHEMA = 2
 DELIVERY_RESERVE_SECONDS = 0.05
 SUPPORTED_POLICIES = frozenset(
-	{"v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0", "v3.1.0"}
+	{"v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0", "v3.1.0", "v3.2.0"}
 )
 SAFE_FIXES = ("I001",)
 RECOVERY = {
@@ -84,8 +84,11 @@ def encode(result: dict[str, Any]) -> bytes:
 	return encoded
 
 
-def decode_request(payload: bytes, *, secrets: bool = False, types: bool = False) -> dict[str, Any]:
+def decode_request(
+	payload: bytes, *, secrets: bool = False, types: bool = False, integrity: bool = False
+) -> dict[str, Any]:
 	"""Validate the envelope before selecting files or prerequisites."""
+	read_only = _read_only_reader(secrets, integrity, types)
 	try:
 		request = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
 	except (UnicodeError, ValueError, RecursionError) as error:
@@ -104,7 +107,7 @@ def decode_request(payload: bytes, *, secrets: bool = False, types: bool = False
 	):
 		raise EditError("invalid_request")
 	if "baseline" in request:
-		_validate_baseline(request["baseline"], secrets=secrets or types)
+		_validate_baseline(request["baseline"], read_only=read_only)
 	remaining_ms = deadline - int(time.time() * 1000)
 	if remaining_ms <= DELIVERY_RESERVE_SECONDS * 1000:
 		deadline_error = EditError("deadline")
@@ -154,8 +157,14 @@ def background_identity(request: dict[str, Any] | None) -> dict[str, Any]:
 	return {}
 
 
-def _validate_baseline(baseline: object, *, secrets: bool = False) -> None:
-	fields = {"policy_release"} if secrets else {"policy_release", "python", "python_version"}
+def _read_only_reader(secrets: bool, integrity: bool, types: bool) -> bool:
+	if sum((secrets, integrity, types)) > 1:
+		raise EditError("invalid_request")
+	return secrets or integrity or types
+
+
+def _validate_baseline(baseline: object, *, read_only: bool = False) -> None:
+	fields = {"policy_release"} if read_only else {"policy_release", "python", "python_version"}
 	if (
 		not isinstance(baseline, dict)
 		or set(baseline) != fields

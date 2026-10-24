@@ -37,7 +37,14 @@ making the release candidate depend on its own unpublished wheel.
 
 ## Product verification
 
-The v3.1.0 candidate adds [whole-scope typing](edit-types.md), preserving schema 1
+The v3.2.0 candidate adds [read-only touched-file integrity](edit-integrity.md)
+and retains the published v3.1.0 typing interface, including its separately
+selected background schema. This is MINOR relative to published v3.1.0.
+The [integrity provider evidence](audits/edit-integrity-provider.md) separates
+source verification from publication and host activation. The provider source
+manifest stays on published v3.1.0 until the separate post-publication activation.
+
+The v3.1.0 release added [whole-scope typing](edit-types.md), preserving schema 1
 and adding the separately selected schema 2 background/cancellation envelope.
 It also adds the default-true manifest typing opt-out to the new policy. This is
 MINOR relative to published v3.0.0; older exact policy pins remain supported and

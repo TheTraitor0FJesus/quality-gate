@@ -68,7 +68,8 @@ class Invocation:
 			not root.is_absolute()
 			or root.is_symlink()
 			or not root.is_dir()
-			or getattr(root.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+			or getattr(root.lstat(), "st_file_attributes", 0)
+			& getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 		):
 			raise EditError("unsafe_path")
 		self.root = root.resolve(strict=True)

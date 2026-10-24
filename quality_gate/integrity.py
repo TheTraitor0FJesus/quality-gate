@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
@@ -16,6 +16,9 @@ from .contracts import CheckResult, Finding, Manifest, Status
 from .publication_config import validate_config
 
 _CONFLICT_MARKER = re.compile(r"^\s*(?:<{7}|={7}|>{7})(?:\s|$)")
+MAX_CONFLICT_FILE_BYTES = 8 * 1024 * 1024
+MAX_CONFLICT_SCAN_BYTES = 256 * 1024 * 1024
+MAX_CONFLICT_FINDINGS = 4096
 _EXTERNAL_LINK = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 _MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\n]+)\)")
 _WORKFLOW_REFERENCE = re.compile(r"^\s*(?:-\s*)?uses\s*:\s*([^\s#]+)", re.IGNORECASE)
@@ -64,6 +67,14 @@ class _TreeEntry:
 class _TreeScan:
 	entries: list[_TreeEntry] = field(default_factory=list)
 	unreadable: list[Finding] = field(default_factory=list)
+
+
+class _ConflictScanError(Exception):
+	"""A specific candidate file could not be completely scanned within limits."""
+
+	def __init__(self, finding: Finding) -> None:
+		super().__init__(finding.message)
+		self.finding = finding
 
 
 def _scan_tree(root: Path) -> _TreeScan:
@@ -130,6 +141,154 @@ def _failed_or_waived(
 	)
 
 
+def git_conflict_markers(
+	manifest: Manifest | None,
+	sources: Iterable[tuple[str, bytes]],
+	*,
+	max_findings: int | None = None,
+) -> CheckResult:
+	"""Apply the Gate's conflict-marker and exact-waiver semantics to explicit bytes."""
+	result, _file_results = _conflict_marker_results(
+		manifest, sources, max_findings=max_findings, include_file_results=False
+	)
+	return result
+
+
+def _conflict_marker_result(manifest: Manifest | None, findings: list[Finding]) -> CheckResult:
+	check_id = "repository.git.conflict_markers"
+	summary = "candidate text contains merge conflict markers"
+	if manifest is not None:
+		return _failed_or_waived(check_id, summary, findings, manifest)
+	if findings:
+		return CheckResult(
+			check_id,
+			Status.FAILED,
+			summary,
+			findings=tuple(findings),
+			recovery_action="fix the reported repository finding",
+		)
+	return CheckResult(check_id, Status.PASSED, "candidate text contains no merge conflict markers")
+
+
+def git_conflict_marker_results(
+	manifest: Manifest | None,
+	sources: Iterable[tuple[str, bytes]],
+	*,
+	max_findings: int | None = None,
+) -> tuple[CheckResult, tuple[CheckResult, ...]]:
+	"""Return aggregate and aligned per-file results from one marker scan."""
+	return _conflict_marker_results(
+		manifest, sources, max_findings=max_findings, include_file_results=True
+	)
+
+
+def _conflict_marker_file_findings(
+	path: str, data: bytes, finding_count: int, max_findings: int | None
+) -> list[Finding] | CheckResult:
+	if b"\x00" in data:
+		return []
+	try:
+		text = data.decode("utf-8")
+	except UnicodeError:
+		return []
+	findings: list[Finding] = []
+	for line_number, line in enumerate(text.splitlines(), start=1):
+		if not _CONFLICT_MARKER.match(line):
+			continue
+		if max_findings is not None and finding_count + len(findings) >= max_findings:
+			return _unchecked(
+				"repository.git.conflict_markers",
+				"conflict-marker findings exceed the scan limit",
+				(
+					Finding(
+						path,
+						line_number,
+						"conflict-marker finding limit was reached",
+						"reduce the unresolved markers and retry",
+					),
+				),
+			)
+		findings.append(
+			Finding(
+				path,
+				line_number,
+				"merge conflict marker is present",
+				"resolve the merge conflict",
+			)
+		)
+	return findings
+
+
+def _conflict_marker_results(
+	manifest: Manifest | None,
+	sources: Iterable[tuple[str, bytes]],
+	*,
+	max_findings: int | None,
+	include_file_results: bool,
+) -> tuple[CheckResult, tuple[CheckResult, ...]]:
+	findings: list[Finding] = []
+	file_findings: list[list[Finding]] | None = [] if include_file_results else None
+	for path, data in sources:
+		current = _conflict_marker_file_findings(path, data, len(findings), max_findings)
+		if isinstance(current, CheckResult):
+			return current, ()
+		findings.extend(current)
+		if file_findings is not None:
+			file_findings.append(current)
+
+	return (
+		_conflict_marker_result(manifest, findings),
+		tuple(_conflict_marker_result(manifest, current) for current in file_findings or ()),
+	)
+
+
+def _conflict_file_error(path: str, message: str, action: str) -> _ConflictScanError:
+	return _ConflictScanError(Finding(path, message=message, action=action))
+
+
+def _read_conflict_file(entry: _TreeEntry, remaining_bytes: int) -> bytes:
+	try:
+		if entry.abs_path.stat().st_size > MAX_CONFLICT_FILE_BYTES:
+			raise _conflict_file_error(
+				entry.path,
+				"file exceeds the conflict-marker scan size limit",
+				"reduce the file size and retry the quality gate",
+			)
+		with entry.abs_path.open("rb") as source:
+			content = source.read(MAX_CONFLICT_FILE_BYTES + 1)
+	except _ConflictScanError:
+		raise
+	except OSError as error:
+		raise _conflict_file_error(
+			entry.path,
+			"file content is unreadable",
+			"restore access and retry the quality gate",
+		) from error
+	if len(content) > MAX_CONFLICT_FILE_BYTES:
+		raise _conflict_file_error(
+			entry.path,
+			"file exceeds the conflict-marker scan size limit",
+			"reduce the file size and retry the quality gate",
+		)
+	if len(content) > remaining_bytes:
+		raise _conflict_file_error(
+			entry.path,
+			"repository exceeds the conflict-marker scan byte limit",
+			"reduce the candidate bytes and retry the quality gate",
+		)
+	return content
+
+
+def _conflict_sources(scan: _TreeScan) -> Iterator[tuple[str, bytes]]:
+	total_bytes = 0
+	for entry in scan.entries:
+		if entry.is_dir or entry.is_symlink:
+			continue
+		content = _read_conflict_file(entry, MAX_CONFLICT_SCAN_BYTES - total_bytes)
+		total_bytes += len(content)
+		yield entry.path, content
+
+
 def _git_conflict_result(manifest: Manifest, scan: _TreeScan) -> CheckResult:
 	if scan.unreadable:
 		return _unchecked(
@@ -137,34 +296,16 @@ def _git_conflict_result(manifest: Manifest, scan: _TreeScan) -> CheckResult:
 			"Git candidate cannot be read",
 			tuple(scan.unreadable),
 		)
-	findings: list[Finding] = []
-	for entry in scan.entries:
-		if entry.is_dir or entry.is_symlink:
-			continue
-		try:
-			data = entry.abs_path.read_bytes()
-			delimiter = b"\x00"
-			if delimiter in data:
-				continue
-			text = data.decode("utf-8")
-		except (OSError, UnicodeError):
-			continue
-		for line_number, line in enumerate(text.splitlines(), start=1):
-			if _CONFLICT_MARKER.match(line):
-				findings.append(
-					Finding(
-						entry.path,
-						line_number,
-						"merge conflict marker is present",
-						"resolve the merge conflict",
-					)
-				)
-	return _failed_or_waived(
-		"repository.git.conflict_markers",
-		"candidate text contains merge conflict markers",
-		findings,
-		manifest,
-	)
+	try:
+		return git_conflict_markers(
+			manifest, _conflict_sources(scan), max_findings=MAX_CONFLICT_FINDINGS
+		)
+	except _ConflictScanError as error:
+		return _unchecked(
+			"repository.git.conflict_markers",
+			"Git candidate cannot be completely scanned",
+			(error.finding,),
+		)
 
 
 def _is_junk(path: str) -> bool:

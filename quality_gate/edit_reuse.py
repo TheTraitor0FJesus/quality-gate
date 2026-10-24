@@ -35,7 +35,8 @@ def _read(path: Path, limit: int) -> bytes:
 	if (
 		not stat.S_ISREG(metadata.st_mode)
 		or metadata.st_nlink != 1
-		or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+		or getattr(metadata, "st_file_attributes", 0)
+		& getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 	):
 		raise ValueError("invalid cache file")
 	with path.open("rb") as stream:
@@ -68,9 +69,8 @@ class ResultReuse:
 	def _prepare(self) -> None:
 		self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
 		metadata = self.root.lstat()
-		if (
-			self.root.is_symlink()
-			or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+		if self.root.is_symlink() or getattr(metadata, "st_file_attributes", 0) & getattr(
+			stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
 		):
 			raise ValueError("invalid cache directory")
 

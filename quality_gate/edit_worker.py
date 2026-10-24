@@ -22,11 +22,16 @@ from .runtime import RuntimeUnavailable
 
 
 def _handlers(
-	*, secrets: bool, types: bool
+	*, secrets: bool, types: bool, integrity: bool = False
 ) -> tuple[
 	Callable[[dict[str, Any], float, Path], dict[str, Any]], Callable[[str], dict[str, Any]]
 ]:
-	if types:
+	if integrity and (secrets or types):
+		raise ValueError("Choose one edit reader")
+	if integrity:
+		from .edit_integrity import execute
+		from .edit_integrity import integrity_unchecked as unchecked
+	elif types:
 		from .edit_types import execute
 		from .edit_types import typing_unchecked as unchecked
 	elif secrets:
@@ -38,13 +43,18 @@ def _handlers(
 	return execute, unchecked
 
 
-def main(workspace: Path, *, secrets: bool = False, types: bool = False) -> None:
-	execute, unchecked = _handlers(secrets=secrets, types=types)
+def main(
+	workspace: Path, *, secrets: bool = False, types: bool = False, integrity: bool = False
+) -> None:
+	execute, unchecked = _handlers(secrets=secrets, types=types, integrity=integrity)
 	request = None
 	background: dict[str, Any] = {}
 	try:
 		request = decode_request(
-			sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1), secrets=secrets, types=types
+			sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1),
+			secrets=secrets,
+			types=types,
+			integrity=integrity,
 		)
 		deadline = (
 			time.monotonic()

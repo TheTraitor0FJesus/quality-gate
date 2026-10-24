@@ -75,6 +75,13 @@ Projects may keep pytest markers, test discovery, package metadata, and dependen
 
 ## Working-tree policy selection
 
+The additive [edit-integrity interface](edit-integrity.md) shares the normal
+Gate's conflict-marker and exact standard-waiver resolver on explicit complete
+bytes. NUL and invalid UTF-8 retain the Gate's non-text treatment. Its bounded
+touched-file coverage does not expand into a Git or history scan. The normal
+Gate marker scan also returns `unchecked` for unreadable or oversized input;
+its streaming limits are recorded in the [architecture map](architecture.md).
+
 The additive [edit-types interface](edit-types.md) runs whole affected typed
 components against the exact released mypy policy. Its bounded source,
 configuration, dependency, runtime and tool evidence must remain fresh at

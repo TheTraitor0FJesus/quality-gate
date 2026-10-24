@@ -217,8 +217,12 @@ def engine_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
 	return next(root.glob("quality_gate-*.whl"))
 
 
-def test_wheel_exposes_read_only_typing_without_extraction(
-	tmp_path: Path, engine_wheel: Path
+@pytest.mark.parametrize(
+	("command", "check_id"),
+	[("edit-types", "mypy"), ("edit-integrity", "repository.git.conflict_markers")],
+)
+def test_wheel_exposes_read_only_edits_without_extraction(
+	tmp_path: Path, engine_wheel: Path, command: str, check_id: str
 ) -> None:
 	project = tmp_path / "project"
 	project.mkdir()
@@ -226,7 +230,7 @@ def test_wheel_exposes_read_only_typing_without_extraction(
 	payload["baseline"] = {"policy_release": "v2.4.2"}
 	wheel_hash = digest(engine_wheel.read_bytes())
 	completed = subprocess.run(
-		[sys.executable, "-B", "-m", "quality_gate.cli", "edit-types"],
+		[sys.executable, "-B", "-m", "quality_gate.cli", command],
 		cwd=tmp_path,
 		env=os.environ | {"PYTHONPATH": str(engine_wheel)},
 		input=json.dumps(payload).encode(),
@@ -238,7 +242,7 @@ def test_wheel_exposes_read_only_typing_without_extraction(
 	assert completed.stderr == b""
 	assert (completed.returncode, result["check_id"], result["status"]) == (
 		0,
-		"mypy",
+		check_id,
 		"not_applicable",
 	), result
 	assert result["writes_may_have_occurred"] is False
