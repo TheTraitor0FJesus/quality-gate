@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from quality_gate import runner
+from quality_gate import ci_parity, runner
 from quality_gate.ci_parity import compare_results
 from quality_gate.distribution import DistributionError, PolicyCache
 
@@ -391,6 +391,52 @@ def test_ci_and_local_parity_uses_one_cli_verdict_contract() -> None:
 	assert '--base "$QUALITY_GATE_BASE" --head "$QUALITY_GATE_HEAD"' in workflow
 	assert 'quality-gate check --head "$GITHUB_SHA"' in workflow
 	assert "quality-gate check --verbose" not in workflow
+
+
+def test_parity_requests_verbose_status_lines_for_the_complete_check_map(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+	"""Verify parity requests the full status listing that its parser consumes."""
+
+	invocations: list[list[str]] = []
+
+	def locate_executable(_name: str, *, path: str | None) -> str:
+		assert path == "isolated-path"
+		return "quality-gate"
+
+	def run_gate(
+		command: list[str],
+		**_kwargs: object,
+	) -> subprocess.CompletedProcess[str]:
+		invocations.append(command)
+		return subprocess.CompletedProcess(
+			command,
+			0,
+			stdout=(
+				"first.check: passed - complete\n"
+				"second.check: unchecked - runtime unavailable\n"
+			),
+			stderr="",
+		)
+
+	monkeypatch.setattr(ci_parity.shutil, "which", locate_executable)
+	monkeypatch.setattr(ci_parity.subprocess, "run", run_gate)
+
+	result = ci_parity._gate(
+		{"PATH": "isolated-path"},
+		tmp_path,
+		"--base",
+		"BASE",
+		"--head",
+		"HEAD",
+	)
+
+	assert result.returncode == 0
+	assert invocations[0][3:5] == ["check", "--verbose"]
+	assert ci_parity._surface(result.stdout) == {
+		"first.check": "passed",
+		"second.check": "unchecked",
+	}
 
 
 def test_platform_parity_workflow_executes_the_gate_on_windows_and_linux() -> None:

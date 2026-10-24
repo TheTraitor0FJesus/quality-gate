@@ -34,7 +34,10 @@ files remain beside their persistent targets. `sync`, `setup`, rollback, confirm
 3. For changes to this repository's source or policy, run the current-source `quality-gate check`
    before committing. For a consumer implementation, complete staged verification through its
    active workflow; its commit-hook Quality Gate satisfies this step. For standalone verification,
-   run `quality-gate check` directly. Use `--verbose` only when the compact report is not sufficient.
+   run `quality-gate check` directly. The default report preserves every observed failed and
+   unchecked check status while bounding finding details. Known and unknown upstream omissions are
+   identified explicitly. Use `--verbose` for every status and all safely collected redacted
+   findings.
 4. Use `quality-gate format <explicit-path>...`, stage the result, and rerun the current-source
    `quality-gate check`
    for Quality Gate changes or return to the active workflow for consumer changes.
