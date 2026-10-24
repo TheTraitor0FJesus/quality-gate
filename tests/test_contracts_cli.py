@@ -677,6 +677,23 @@ def test_check_reports_unmerged_index_as_unchecked(tmp_path: Path) -> None:
 
 	assert result.returncode == EXIT_UNCHECKED
 	assert "candidate.snapshot: unchecked" in result.stdout
+	assert "manifest.documents:" not in result.stdout
+	assert "python.component_" not in result.stdout
+
+
+def test_check_reports_only_the_manifest_error_when_manifest_is_unavailable(
+	tmp_path: Path,
+) -> None:
+	(tmp_path / "quality-gate.toml").write_text("quality = [", encoding="utf-8")
+	_init_and_stage(tmp_path, "quality-gate.toml")
+
+	result = _run(tmp_path, "check")
+
+	assert result.returncode == EXIT_UNCHECKED
+	assert result.stdout.startswith("Quality Gate: 2\n")
+	assert "manifest.contract: unchecked" in result.stdout
+	assert "repository.git." not in result.stdout
+	assert "python.component_" not in result.stdout
 
 
 def test_invalid_typed_waiver_is_rejected_without_secret_value(tmp_path: Path) -> None:
