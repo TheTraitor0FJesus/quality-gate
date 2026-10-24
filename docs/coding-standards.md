@@ -8,17 +8,17 @@ Apply the rules below to contracts and decisions those checks do not establish.
 
 ## Decision procedure (Ponytail)
 
-Ponytail means efficiency after understanding the problem. Apply this procedure before
-writing code; use the sections below as reference for every affected contract.
+Ponytail means efficiency after understanding the problem. For reviews, apply this
+procedure to the proposed change; use the sections below as reference for each affected
+contract.
 
 1. Read the complete task and the affected code. Trace the real producer -> caller ->
    implementation -> consumer flow, including error paths. Continue when the required
    outcome, affected contracts, and authoritative change location are identified.
 2. Climb the ladder below in order. Stop at the first rung that fully meets those contracts;
    identify the existing mechanism or the concrete gap before proceeding to a lower rung.
-3. Implement the selected solution under the reference rules, then complete the applicable
-   checks in **Verification and maintenance**. For reviews, apply the same ladder to the
-   proposed change and assess each applicable rule; distinguish verified outcomes from gaps.
+3. Assess each applicable rule against the proposed change. Distinguish outcomes supported
+   by the diff or inspected artifacts from gaps.
 
 ### Reuse ladder
 
@@ -41,7 +41,6 @@ writing code; use the sections below as reference for every affected contract.
 - Prefer a simpler solution when it removes a dependency, a complexity layer, or moving parts.
 - Build incrementally: preserve a working path while adding the next capability.
 - Before adding code or a dependency, check existing project facilities and current project dependencies, including their documentation and types.
-- Resolve implementation details autonomously within the assigned scope. Escalate ambiguous goals and public interface, data schema, module boundary, or cross-module contract changes outside that scope to the parent agent before dependent work.
 - Give an optional parameter one safe, unambiguous meaning when omitted. Require an explicit choice when omission can change correctness.
 - Apply the evidence requirements in **Verification and maintenance** before removing behavior.
 - Keep abstractions within explicitly requested work or the concrete policy, implementation-change, and test-boundary purposes in **Architecture and persistence**. Apply **Review heuristics** to the affected design; they do not authorize unrelated abstraction work.
@@ -95,7 +94,6 @@ writing code; use the sections below as reference for every affected contract.
 - Grant CI jobs only the permissions required by their contract, and isolate secret-bearing or write-capable jobs from unpinned dependency installation.
 - Use locked, bounded, hashed dependencies where the ecosystem supports them.
 - For systemd services, apply `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, and an explicit `CapabilityBoundingSet=` where the service contract permits them; document required exceptions.
-- When a change requires a human action outside version control, report a concrete action list in the completion message.
 
 ## Test selection
 
@@ -120,17 +118,13 @@ Do not write tests that:
 - For checksums, receipts, manifests, and validators, identify the failure or trust boundary they detect. Shared implementation or inputs warrant investigation; preserve required integrity checks. When removal is justified, remove the obsolete mechanism and its exclusive tests and support together. Verify cleanup with existing checks; add a replacement test only for a real protection gap with an independent expected result.
 - When cleanup crosses layers, trace each current producer -> reader -> consumer path and retain a hermetic integration test for each distinct delivery path. Use repository-managed or test-created inputs and temporary outputs; skip for an optional dependency only where the test actually requires it. After test removal or consolidation, compare collection and run the surviving suite; resolve unexpected skips, deselections, or an empty collection. Compare worktree state before and after runs that may generate files.
 - For authorization, financial rules, state transitions, data integrity, and boundary-heavy branching, map each contract rule to an observable outcome. Use the smallest case set that distinguishes every rule and boundary; for a failure, assert both its result and the absence of its forbidden side effect.
-- For changes to retry, resume, or shared-state behavior, verify repetition of the same logical operation, restart after interruption at meaningful persistence or external-effect boundaries, and competing writers where applicable. Assert the intended durable result and the absence of duplicate effects or lost updates.
-- Parameterize tests only when they share one seam, setup, and assertion shape. Treat coverage as execution evidence, not proof of behavior. When mutation testing is configured, run the changed critical scope, strengthen observable assertions, and leave no actionable survivor.
-- Before changing fixture ownership in an integration test that creates an environment, installs a package, starts a service, or invokes an external tool, time the smallest affected scope and capture its slowest setup, call, and teardown operations. For every operation slower than two seconds, name its owner and report its time, classification, impact, and next action; classify it as mutable state, immutable infrastructure, or behavior under test.
+- Parameterize tests only when they share one seam, setup, and assertion shape. Treat coverage as execution evidence, not proof of behavior.
 - Keep mutable test state function-scoped. Share immutable infrastructure only when tests cannot modify it and order, repetition, and parallel execution remain isolated. Require ticket justification when immutable preparation slower than two seconds still repeats per test. When initialization is behavior under test, preserve its real public path and optimize the authoritative production seam instead.
 - Preserve the real artifact, integrity checks, installation path, commands, assertions, and failure injection required by the contract. An optimization is valid only when the original failure still makes the test fail and subprocess, timeout, integrity, and stage failures remain fail-closed.
-- Measure the focused scope and full suite in the same environment before and after a test optimization. Record wall time, slowest operations, and percentage change; require explicit ticket justification for a full-suite regression over 10% or 10 seconds.
-- Run the complete project verification suite before committing. Every skipped or expected-failure test states its reason.
 - Keep documentation current when behavior, interfaces, architecture, configuration, or feature specifications change.
 - When a shared contract changes, update the affected sibling-project documentation in the same change. If a required sibling repository is unreachable, report the blocker before proceeding.
 - When removing a feature, remove its orphaned dependencies, configuration, files, and selectors in the same change.
-- Finish only when every applicable rule above is satisfied, required checks have returned, and each claimed outcome has supporting evidence from the actual changed behavior or artifact. A successful build, modification time, cached result, or agent self-report establishes only what it directly checks. Use existing verification mechanisms where adequate; a separate script is not required for every task. Report a failed or unavailable check with its affected contract and next action; an unavailable check does not establish completion.
+- Finish only when every applicable rule above is satisfied and each claimed outcome has supporting evidence from the actual changed behavior or artifact. A successful build, modification time, cached result, or agent self-report establishes only what it directly checks. Use existing verification mechanisms where adequate; a separate script is not required for every task.
 
 ## Review heuristics
 
