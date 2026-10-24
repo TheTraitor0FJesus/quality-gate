@@ -21,6 +21,7 @@ from quality_gate.launcher import PreparedEnvironment
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXPECTED_TIMEOUT_WAIT_CALLS = 2
+EXPECTED_BIOME_INVOCATIONS = 2
 
 
 def _fake_candidate_snapshot(root: Path) -> AbstractContextManager[SimpleNamespace]:
@@ -652,7 +653,7 @@ for path in asset_paths:
 
 def _assert_biome_invocations(log_path: Path, expected_assets: set[str]) -> None:
 	invocations = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
-	assert len(invocations) == 2
+	assert len(invocations) == EXPECTED_BIOME_INVOCATIONS
 	for args in invocations:
 		assert "--write" not in args
 		assert "--fix" not in args
