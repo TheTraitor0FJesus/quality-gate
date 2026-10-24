@@ -29,6 +29,10 @@ from quality_gate.distribution import PolicyCache
 REPOSITORY = Path(__file__).resolve().parents[1]
 EXIT_QUALITY_FAILURE = 1
 EXIT_UNCHECKED = 2
+EXPECTED_JAVASCRIPT_FILE_KIB = 100
+EXPECTED_CSS_FILE_KIB = 50
+EXPECTED_JAVASCRIPT_TOTAL_KIB = 250
+EXPECTED_CSS_TOTAL_KIB = 100
 VALID_WORKFLOW = """name: Quality gate
 on:
   pull_request:
@@ -281,10 +285,10 @@ def test_validate_accepts_web_manifest_with_default_asset_budgets(tmp_path: Path
 	component = load_manifest(tmp_path).web[0]
 
 	assert result.returncode == 0
-	assert component.javascript_file_kib == 100
-	assert component.css_file_kib == 50
-	assert component.javascript_total_kib == 250
-	assert component.css_total_kib == 100
+	assert component.javascript_file_kib == EXPECTED_JAVASCRIPT_FILE_KIB
+	assert component.css_file_kib == EXPECTED_CSS_FILE_KIB
+	assert component.javascript_total_kib == EXPECTED_JAVASCRIPT_TOTAL_KIB
+	assert component.css_total_kib == EXPECTED_CSS_TOTAL_KIB
 
 
 def test_validate_accepts_supplemental_node_tests(tmp_path: Path) -> None:
@@ -362,7 +366,8 @@ def test_check_validates_but_does_not_execute_supplemental_tests(tmp_path: Path)
 	target = tmp_path / "tests" / "node" / "supplemental.test.js"
 	target.parent.mkdir(parents=True)
 	target.write_text(
-		"test('supplemental tests stay outside Quality Gate', () => { throw new Error('must not run'); });\n",
+		"test('supplemental tests stay outside Quality Gate', "
+		"() => { throw new Error('must not run'); });\n",
 		encoding="utf-8",
 	)
 	_init_and_stage(tmp_path, "quality-gate.toml", "AGENTS.md", "tests/node/supplemental.test.js")
@@ -677,6 +682,23 @@ def test_check_reports_unmerged_index_as_unchecked(tmp_path: Path) -> None:
 
 	assert result.returncode == EXIT_UNCHECKED
 	assert "candidate.snapshot: unchecked" in result.stdout
+	assert "manifest.documents:" not in result.stdout
+	assert "python.component_" not in result.stdout
+
+
+def test_check_reports_only_the_manifest_error_when_manifest_is_unavailable(
+	tmp_path: Path,
+) -> None:
+	(tmp_path / "quality-gate.toml").write_text("quality = [", encoding="utf-8")
+	_init_and_stage(tmp_path, "quality-gate.toml")
+
+	result = _run(tmp_path, "check")
+
+	assert result.returncode == EXIT_UNCHECKED
+	assert result.stdout.startswith("Quality Gate: 2\n")
+	assert "manifest.contract: unchecked" in result.stdout
+	assert "repository.git." not in result.stdout
+	assert "python.component_" not in result.stdout
 
 
 def test_invalid_typed_waiver_is_rejected_without_secret_value(tmp_path: Path) -> None:

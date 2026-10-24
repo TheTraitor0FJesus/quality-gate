@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from quality_gate import runner
 from quality_gate.cli import main
 from quality_gate.contracts import load_manifest
@@ -794,6 +795,17 @@ def test_cli_reports_timeout_as_unchecked_without_a_failed_verdict(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
 	root = _disposable_repository(tmp_path, "python-tests")
+	manifest = root / "quality-gate.toml"
+	manifest_text = manifest.read_text(encoding="utf-8")
+	assert 'required_documents = ["quality-gate.toml"]' in manifest_text
+	manifest.write_text(
+		manifest_text.replace(
+			'required_documents = ["quality-gate.toml"]',
+			'required_documents = ["quality-gate.toml", "docs/missing.md"]',
+		),
+		encoding="utf-8",
+	)
+	assert _git(root, "add", "quality-gate.toml").returncode == 0
 
 	def time_out(
 		command: list[str],
@@ -814,6 +826,8 @@ def test_cli_reports_timeout_as_unchecked_without_a_failed_verdict(
 	result, output = _invoke(root, monkeypatch, capsys)
 
 	assert result == EXIT_UNCHECKED
+	assert "manifest.documents: failed" in output
+	assert "docs/missing.md" in output
 	assert "python.component_1.pytest: unchecked" in output
 	assert "python.component_1.pytest: failed" not in output
 

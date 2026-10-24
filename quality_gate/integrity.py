@@ -107,13 +107,20 @@ def _scan_tree(root: Path) -> _TreeScan:
 	return scan
 
 
-def _unchecked(check_id: str, summary: str, findings: tuple[Finding, ...]) -> CheckResult:
+def _unchecked(
+	check_id: str,
+	summary: str,
+	findings: tuple[Finding, ...],
+	*,
+	omitted_findings: int | None = 0,
+) -> CheckResult:
 	return CheckResult(
 		check_id=check_id,
 		status=Status.UNCHECKED,
 		summary=summary,
 		findings=findings,
 		recovery_action="restore a readable, supported candidate and retry the quality gate",
+		omitted_findings=omitted_findings,
 	)
 
 
@@ -207,6 +214,7 @@ def _conflict_marker_file_findings(
 						"reduce the unresolved markers and retry",
 					),
 				),
+				omitted_findings=None,
 			)
 		findings.append(
 			Finding(

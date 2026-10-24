@@ -21,6 +21,7 @@ from quality_gate.launcher import PreparedEnvironment
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXPECTED_TIMEOUT_WAIT_CALLS = 2
+EXPECTED_BIOME_INVOCATIONS = 2
 
 
 def _fake_candidate_snapshot(root: Path) -> AbstractContextManager[SimpleNamespace]:
@@ -395,7 +396,29 @@ def test_policy_access_error_is_unchecked(monkeypatch: pytest.MonkeyPatch) -> No
 
 	policy = next(result for result in verdict.results if result.check_id == "runtime.policy")
 	assert policy.status is runner.Status.UNCHECKED
+	documents = next(
+		result for result in verdict.results if result.check_id == "manifest.documents"
+	)
+	assert documents.status is runner.Status.PASSED
+	assert not any(result.check_id.startswith("python.component_") for result in verdict.results)
 	assert verdict.exit_code == runner.EXIT_UNCHECKED
+
+
+def test_workspace_failure_reports_only_the_unavailable_workspace(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	root = FIXTURES / "valid"
+
+	def fail_workspace(_root: Path) -> object:
+		raise runner.TemporaryWorkspaceError("repository temp directory is unavailable")
+
+	monkeypatch.setattr(runner, "temporary_workspace", fail_workspace)
+
+	verdict = runner._run_snapshot(root)
+
+	assert verdict.exit_code == runner.EXIT_UNCHECKED
+	assert [result.check_id for result in verdict.results] == ["temporary.workspace"]
+	assert verdict.results[0].status is runner.Status.UNCHECKED
 
 
 def test_not_applicable_component_tests_are_reported(
@@ -630,7 +653,7 @@ for path in asset_paths:
 
 def _assert_biome_invocations(log_path: Path, expected_assets: set[str]) -> None:
 	invocations = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
-	assert len(invocations) == 2
+	assert len(invocations) == EXPECTED_BIOME_INVOCATIONS
 	for args in invocations:
 		assert "--write" not in args
 		assert "--fix" not in args
