@@ -72,7 +72,7 @@ def _gate(
 	if executable is None:
 		raise RuntimeError("the installed quality-gate executable is unavailable")
 	return subprocess.run(
-		[executable, "--root", str(root), "check", *arguments],
+		[executable, "--root", str(root), "check", "--verbose", *arguments],
 		cwd=root,
 		env=environment,
 		capture_output=True,

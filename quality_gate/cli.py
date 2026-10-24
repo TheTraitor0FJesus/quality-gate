@@ -19,13 +19,17 @@ def parser() -> argparse.ArgumentParser:
 	result.add_argument("--root", type=Path, help="Repository root. Defaults to the Git root.")
 	subcommands = result.add_subparsers(dest="command", required=True)
 	check_parser = subcommands.add_parser("check", help="Run quality checks.")
-	check_parser.add_argument("--verbose", action="store_true", help="Show all redacted findings.")
+	check_parser.add_argument(
+		"--verbose", action="store_true", help="Show all check statuses and redacted findings."
+	)
 	check_parser.add_argument("--base", help="Verified base Git reference for CI range scanning.")
 	check_parser.add_argument(
 		"--head", help="Verified head Git reference for CI range scanning. Defaults to HEAD."
 	)
 	audit_parser = subcommands.add_parser("audit", help="Run a complete onboarding audit.")
-	audit_parser.add_argument("--verbose", action="store_true", help="Show all redacted findings.")
+	audit_parser.add_argument(
+		"--verbose", action="store_true", help="Show all check statuses and redacted findings."
+	)
 	format_parser = subcommands.add_parser(
 		"format", help="Format only explicit Python paths with the pinned Ruff release."
 	)
@@ -186,7 +190,7 @@ def main() -> int:
 	from .contracts import ValidationError, Verdict
 	from .distribution import DistributionError, PolicyCache
 	from .reporting import render
-	from .runner import QualityGateError, _error_result, repository_root
+	from .runner import EXIT_UNCHECKED, QualityGateError, _error_result, repository_root
 	from .runtime import RuntimeUnavailable
 	from .temp_workspace import TemporaryWorkspaceError, temporary_workspace
 
@@ -217,11 +221,28 @@ def main() -> int:
 				return _dispatch(arguments)
 		return _dispatch(arguments)
 	except TemporaryWorkspaceError as error:
-		sys.stdout.write(
-			f"temporary workspace: unchecked - {error}; "
-			"action: restore a writable repository temp directory and retry the quality gate\n"
-		)
-		return 2
+		if arguments.command in {"check", "audit"}:
+			quality_error = QualityGateError(
+				str(error),
+				check_id="temporary.workspace",
+				exit_code=EXIT_UNCHECKED,
+				recovery_action=(
+					"restore a writable repository temp directory and retry the quality gate"
+				),
+			)
+			sys.stdout.write(
+				render(
+					Verdict((_error_result(quality_error),)),
+					verbose=getattr(arguments, "verbose", False),
+				)
+			)
+			sys.stdout.write("\n")
+		else:
+			sys.stdout.write(
+				f"temporary workspace: unchecked - {error}; "
+				"action: restore a writable repository temp directory and retry the quality gate\n"
+			)
+		return EXIT_UNCHECKED
 	except ValidationError as error:
 		action = (
 			"review the schema 1 manifest and run migrate"
