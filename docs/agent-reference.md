@@ -35,9 +35,9 @@ files remain beside their persistent targets. `sync`, `setup`, rollback, confirm
    before committing. For a consumer implementation, complete staged verification through its
    active workflow; its commit-hook Quality Gate satisfies this step. For standalone verification,
    run `quality-gate check` directly. The default report preserves every observed failed and
-   unchecked check status while bounding finding details. Use `--verbose` for every status and all
-   safely collected redacted findings. When a check stops collecting findings before the report, its
-   unknown omission count is identified explicitly.
+   unchecked check status while bounding finding details. Known and unknown upstream omissions are
+   identified explicitly. Use `--verbose` for every status and all safely collected redacted
+   findings.
 4. Use `quality-gate format <explicit-path>...`, stage the result, and rerun the current-source
    `quality-gate check`
    for Quality Gate changes or return to the active workflow for consumer changes.

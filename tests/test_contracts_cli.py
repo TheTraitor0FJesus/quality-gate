@@ -434,7 +434,7 @@ def test_check_enforces_default_web_file_and_total_boundaries(tmp_path: Path) ->
 		path.write_bytes(b"x" * size)
 	_init_and_stage(tmp_path, "quality-gate.toml", "AGENTS.md", *assets)
 
-	boundary = _run(tmp_path, "check")
+	boundary = _run(tmp_path, "check", "--verbose")
 	assert boundary.returncode == EXIT_UNCHECKED
 	assert "web.component_1.javascript_budget: passed" in boundary.stdout
 	assert "web.component_1.css_budget: passed" in boundary.stdout
@@ -569,7 +569,7 @@ def test_check_verifies_the_staged_candidate_instead_of_the_worktree(tmp_path: P
 	_init_and_stage(tmp_path, "quality-gate.toml", "AGENTS.md", "candidate.md")
 	(tmp_path / "candidate.md").write_text("", encoding="utf-8")
 
-	result = _run(tmp_path, "check")
+	result = _run(tmp_path, "check", "--verbose")
 
 	assert result.returncode == 0
 	assert "manifest.documents: passed" in result.stdout
@@ -603,7 +603,7 @@ def test_check_uses_a_staged_rename_at_the_cli_boundary(tmp_path: Path) -> None:
 	_init_and_stage(tmp_path, "quality-gate.toml", "AGENTS.md", "renamed.md")
 	assert _git(tmp_path, "mv", "renamed.md", "moved.md").returncode == 0
 
-	result = _run(tmp_path, "check")
+	result = _run(tmp_path, "check", "--verbose")
 
 	assert result.returncode == 0
 	assert "manifest.documents: passed" in result.stdout
@@ -768,8 +768,10 @@ def test_audit_aggregates_full_history_and_learning_state(tmp_path: Path) -> Non
 	result = _run(tmp_path, "audit")
 
 	assert result.returncode == 0
-	assert "lessons.learning: passed" in result.stdout
-	assert "secrets.audit: passed" in result.stdout
+	assert result.stdout.splitlines()[0] == "Quality Gate: 0"
+	assert "Observed results:" in result.stdout
+	assert "lessons.learning: passed" not in result.stdout
+	assert "secrets.audit: passed" not in result.stdout
 
 
 def test_open_lesson_does_not_block_ordinary_check(tmp_path: Path) -> None:
@@ -778,7 +780,9 @@ def test_open_lesson_does_not_block_ordinary_check(tmp_path: Path) -> None:
 	result = _run(tmp_path, "check")
 
 	assert result.returncode == 0
-	assert "lessons.learning: passed" in result.stdout
+	assert result.stdout.splitlines()[0] == "Quality Gate: 0"
+	assert "Observed results:" in result.stdout
+	assert "lessons.learning: passed" not in result.stdout
 
 
 def test_unlearned_lesson_blocks_audit(tmp_path: Path) -> None:
