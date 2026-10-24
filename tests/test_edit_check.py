@@ -217,6 +217,39 @@ def engine_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
 	return next(root.glob("quality_gate-*.whl"))
 
 
+@pytest.mark.parametrize(
+	("command", "check_id"),
+	[("edit-types", "mypy"), ("edit-integrity", "repository.git.conflict_markers")],
+)
+def test_wheel_exposes_read_only_edits_without_extraction(
+	tmp_path: Path, engine_wheel: Path, command: str, check_id: str
+) -> None:
+	project = tmp_path / "project"
+	project.mkdir()
+	payload = request(project, tmp_path / "cache")
+	payload["baseline"] = {"policy_release": "v2.4.2"}
+	wheel_hash = digest(engine_wheel.read_bytes())
+	completed = subprocess.run(
+		[sys.executable, "-B", "-m", "quality_gate.cli", command],
+		cwd=tmp_path,
+		env=os.environ | {"PYTHONPATH": str(engine_wheel)},
+		input=json.dumps(payload).encode(),
+		capture_output=True,
+		check=False,
+		timeout=13,
+	)
+	result = json.loads(completed.stdout)
+	assert completed.stderr == b""
+	assert (completed.returncode, result["check_id"], result["status"]) == (
+		0,
+		check_id,
+		"not_applicable",
+	), result
+	assert result["writes_may_have_occurred"] is False
+	assert not list(project.iterdir())
+	assert digest(engine_wheel.read_bytes()) == wheel_hash
+
+
 @pytest.mark.parametrize("policy", ["v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0"])
 @pytest.mark.parametrize("module", ["quality_gate.cli", "quality_gate.edit_cli"])
 def test_wheel_on_pythonpath_checks_working_files_without_extraction(

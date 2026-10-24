@@ -276,6 +276,25 @@ def test_stale_batch_discards_all_partial_coverage(tmp_path: Path, policy_cache:
 	assert result["files"] == []
 
 
+def test_integrity_rejects_typing_background_schema(tmp_path: Path, policy_cache: Path) -> None:
+	(root := tmp_path / "project").mkdir()
+	(root / "clean.py").write_bytes(b"clean\n")
+	payload = request(root, policy_cache, "clean.py")
+	payload.update(
+		schema=2,
+		mode="background",
+		event_id="00000000-0000-4000-8000-000000000001",
+		cancel_path=str(root / "unowned.cancel"),
+	)
+
+	code, result = invoke(payload)
+
+	assert (code, result["status"], result["reason"]) == (2, "unchecked", "invalid_request")
+	assert result["schema"] == 1
+	assert result["files"] == []
+	assert result["writes_may_have_occurred"] is False
+
+
 def test_unsupported_baseline_and_expired_deadline_are_unchecked(
 	tmp_path: Path, policy_cache: Path
 ) -> None:

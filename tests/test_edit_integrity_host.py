@@ -246,7 +246,12 @@ def test_host_json_boundary_rejects_malformed_request_without_provider_call(
 	host = CandidateHost(tmp_path, monkeypatch)
 	code, result = host.invoke_host(b"{malformed")
 	assert code == UNCHECKED_EXIT_CODE
-	assert result == {"check": "integrity", "status": "unchecked", "reason": "invalid_request"}
+	assert result == {
+		"check": "integrity",
+		"status": "unchecked",
+		"reason": "invalid_request",
+		"findings": [],
+	}
 	assert host.cli_calls == 0
 
 

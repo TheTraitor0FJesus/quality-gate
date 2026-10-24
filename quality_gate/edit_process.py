@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -175,10 +176,13 @@ def run_process(
 	payload: bytes | None = None,
 	limit: int = MAX_TOOL_BYTES,
 	own_tree: bool = False,
+	cancelled: Callable[[], bool] | None = None,
 ) -> tuple[int, bytes, bytes]:
 	"""Drain bounded streams; the supervisor owns and reaps its whole child tree."""
 	if time.monotonic() >= deadline:
 		raise EditError("deadline")
+	if cancelled is not None and cancelled():
+		raise EditError("cancelled")
 	process = subprocess.Popen(
 		command,
 		cwd=root,
@@ -198,11 +202,25 @@ def run_process(
 			_resume_windows(process)
 		for reader in streams.readers:
 			reader.start()
-		try:
-			process.wait(timeout=max(0, deadline - time.monotonic()))
-		except subprocess.TimeoutExpired as error:
-			raise EditError("deadline") from error
+		_wait_process(process, deadline, cancelled)
 		return streams.result(deadline)
 	finally:
 		_stop(process, job, own_tree)
 		streams.join(time.monotonic() + 1)
+
+
+def _wait_process(
+	process: subprocess.Popen[bytes], deadline: float, cancelled: Callable[[], bool] | None
+) -> None:
+	while True:
+		if cancelled is not None and cancelled():
+			raise EditError("cancelled")
+		remaining = deadline - time.monotonic()
+		if remaining <= 0:
+			raise EditError("deadline")
+		try:
+			process.wait(timeout=min(0.05, remaining) if cancelled is not None else remaining)
+			return
+		except subprocess.TimeoutExpired as error:
+			if time.monotonic() >= deadline:
+				raise EditError("deadline") from error

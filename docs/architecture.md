@@ -43,6 +43,19 @@ Use this map before non-trivial codebase questions, design work, or code changes
   groups. See [the public secret protocol](edit-secrets.md) for coverage, policy
   compatibility and the historical redacted-fingerprint correction.
 
+- **Working-tree typing** — `edit-types` shares the bounded CLI, protocol, worker
+  and process-tree supervisor. `edit_types.py` owns affected-component selection,
+  isolated whole-component analysis and source-free diagnostics;
+  `edit_type_environment.py` owns declared runtime selection and exact released
+  mypy/installed-tool verification; `edit_type_inputs.py` owns bounded source and
+  environment inventories and host-owned cancellation signals. Schema 1 consumes
+  the remaining synchronous deadline; schema 2 binds one supervised background
+  invocation to an event and cancellation path. The host owns scheduling,
+  replacement, active-turn delivery and Stop/drain. `contracts.py`, `runner.py`
+  and `runtime.py` share the new policy's optional `typecheck` opt-out while
+  retaining default-true older runtime identities. See the [wire contract](edit-types.md)
+  and [provider preparation evidence](audits/edit-types-provider.md).
+
 - **Dependabot owner review** — `.github/workflows/dependabot-review.yml` handles non-draft
   Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
   `pull-requests: write`, requests the repository owner's review, and skips duplicate requests

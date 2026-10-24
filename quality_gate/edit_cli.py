@@ -15,12 +15,14 @@ from typing import Any
 
 from .edit_process import run_process
 from .edit_protocol import (
+	BACKGROUND_SCHEMA,
 	DELIVERY_RESERVE_SECONDS,
 	EXIT_UNCHECKED,
 	MAX_DEADLINE_MS,
 	MAX_REQUEST_BYTES,
 	MAX_RESULT_BYTES,
 	EditError,
+	background_identity,
 	decode_request,
 	encode,
 	unchecked,
@@ -68,11 +70,17 @@ def _deliver(output: bytes, deadline: float) -> None:
 		os._exit(EXIT_UNCHECKED)
 
 
-def _failure(reason: str, *, secrets: bool, integrity: bool) -> dict[str, Any]:
+def _failure(
+	reason: str, *, secrets: bool, types: bool = False, integrity: bool = False
+) -> dict[str, Any]:
 	if integrity:
 		from .edit_integrity import integrity_unchecked
 
 		return integrity_unchecked(reason)
+	if types:
+		from .edit_types import typing_unchecked
+
+		return typing_unchecked(reason)
 	if secrets:
 		from .edit_secrets import secret_unchecked
 
@@ -81,7 +89,13 @@ def _failure(reason: str, *, secrets: bool, integrity: bool) -> dict[str, Any]:
 
 
 def _validate_result(
-	output: bytes, stderr: bytes, code: int, *, secrets: bool, integrity: bool
+	output: bytes,
+	stderr: bytes,
+	code: int,
+	*,
+	secrets: bool,
+	schema: int = 1,
+	integrity: bool = False,
 ) -> dict[str, Any]:
 	try:
 		result = json.loads(output)
@@ -94,7 +108,7 @@ def _validate_result(
 		if (
 			stderr
 			or not isinstance(status, str)
-			or result.get("schema") != 1
+			or result.get("schema") != schema
 			or statuses.get(status) != code
 			or not isinstance(result.get("files"), list)
 		):
@@ -104,13 +118,15 @@ def _validate_result(
 		raise EditError("tool_output") from error
 
 
-def main(*, secrets: bool = False, integrity: bool = False) -> int:
+def main(*, secrets: bool = False, types: bool = False, integrity: bool = False) -> int:
 	"""Read one bounded request and emit exactly one source-free JSON result."""
 	started = time.monotonic()
 	delivery_deadline = started + MAX_DEADLINE_MS / 1000
+	request = None
+	background: dict[str, Any] = {}
 	try:
 		payload = _request()
-		request = decode_request(payload, secrets=secrets, integrity=integrity)
+		request = decode_request(payload, secrets=secrets, types=types, integrity=integrity)
 		delivery_deadline = time.monotonic() + request["deadline_unix_ms"] / 1000 - time.time()
 		deadline = (
 			time.monotonic()
@@ -118,71 +134,102 @@ def main(*, secrets: bool = False, integrity: bool = False) -> int:
 			- time.time()
 			- DELIVERY_RESERVE_SECONDS
 		)
-		package_root = Path(__file__).resolve().parent.parent
-		# CPython's Windows venv redirector can spawn before job assignment. Launch
-		# the base interpreter directly; the exact engine package root stays explicit.
-		worker_python = (
-			Path(sys.base_prefix) / "python.exe" if os.name == "nt" else Path(sys.executable)
+		result = _run_worker(
+			request, payload, deadline, secrets=secrets, types=types, integrity=integrity
 		)
-		root = Path(request["root"])
-		if (
-			not root.is_absolute()
-			or not root.is_dir()
-			or getattr(root.lstat(), "st_file_attributes", 0)
-			& getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-			or root.is_symlink()
-		):
-			raise EditError("unsafe_path")
-		with tempfile.TemporaryDirectory(prefix=".quality-gate-edit-", dir=root) as directory:
-			entry = (
-				f"import sys; sys.path.insert(0, {str(package_root)!r}); "
-				"from pathlib import Path; from quality_gate.edit_worker import main; "
-				f"main(Path({str(Path(directory).resolve())!r}), "
-				f"secrets={secrets!r}, integrity={integrity!r})"
-			)
-			code, output, stderr = run_process(
-				[str(worker_python), "-I", "-S", "-B", "-c", entry],
-				root=Path(directory).resolve(),
-				environment={
-					key: value
-					for key, value in os.environ.items()
-					if key.upper()
-					in {
-						"PATH",
-						"SYSTEMROOT",
-						"WINDIR",
-						"TEMP",
-						"TMP",
-						"LOCALAPPDATA",
-						"XDG_CACHE_HOME",
-						"HOME",
-						"USERPROFILE",
-					}
-				},
-				deadline=deadline,
-				payload=payload,
-				limit=MAX_RESULT_BYTES,
-				own_tree=True,
-			)
-		result = _validate_result(output, stderr, code, secrets=secrets, integrity=integrity)
-		if time.monotonic() >= deadline:
-			raise EditError("deadline")
 	except EditError as error:
-		result = _failure(error.reason, secrets=secrets, integrity=integrity)
-		result["stage"] = error.stage
+		result = _failure(error.reason, secrets=secrets, types=types, integrity=integrity)
+		background = error.background
+		if not types:
+			result["stage"] = error.stage
 	except OSError:
-		result = _failure("io", secrets=secrets, integrity=integrity)
+		result = _failure("io", secrets=secrets, types=types, integrity=integrity)
+	if types:
+		result.update(background_identity(request) | background)
 	result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 	try:
 		output = encode(result)
 	except EditError:
-		result = _failure("limits", secrets=secrets, integrity=integrity)
+		result = _failure("limits", secrets=secrets, types=types, integrity=integrity)
+		if types:
+			result.update(background_identity(request) | background)
 		result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 		output = encode(result)
 	_deliver(output, delivery_deadline)
 	if result.get("stage") == "intake":
 		os._exit(EXIT_UNCHECKED)
 	return {"unchecked": 2, "failed": 1}.get(result["status"], 0)
+
+
+def _run_worker(
+	request: dict[str, Any],
+	payload: bytes,
+	deadline: float,
+	*,
+	secrets: bool,
+	types: bool,
+	integrity: bool = False,
+) -> dict[str, Any]:
+	package_root = Path(__file__).resolve().parent.parent
+	# CPython's Windows venv redirector can spawn before job assignment. Launch
+	# the base interpreter directly; the exact engine package root stays explicit.
+	worker_python = (
+		Path(sys.base_prefix) / "python.exe" if os.name == "nt" else Path(sys.executable)
+	)
+	root = Path(request["root"])
+	if (
+		not root.is_absolute()
+		or not root.is_dir()
+		or getattr(root.lstat(), "st_file_attributes", 0)
+		& getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+		or root.is_symlink()
+	):
+		raise EditError("unsafe_path")
+	cancellation = None
+	if types and request["schema"] == BACKGROUND_SCHEMA:
+		from .edit_type_inputs import CancellationSignal
+
+		cancellation = CancellationSignal(request)
+	with tempfile.TemporaryDirectory(prefix=".quality-gate-edit-", dir=root) as directory:
+		entry = (
+			f"import sys; sys.path.insert(0, {str(package_root)!r}); "
+			"from pathlib import Path; from quality_gate.edit_worker import main; "
+			f"main(Path({str(Path(directory).resolve())!r}), "
+			f"secrets={secrets!r}, types={types!r}, integrity={integrity!r})"
+		)
+		code, output, stderr = run_process(
+			[str(worker_python), "-I", "-S", "-B", "-c", entry],
+			root=Path(directory).resolve(),
+			environment={
+				key: value
+				for key, value in os.environ.items()
+				if key.upper()
+				in {
+					"PATH",
+					"SYSTEMROOT",
+					"WINDIR",
+					"TEMP",
+					"TMP",
+					"LOCALAPPDATA",
+					"XDG_CACHE_HOME",
+					"HOME",
+					"USERPROFILE",
+				}
+			},
+			deadline=deadline,
+			payload=payload,
+			limit=MAX_RESULT_BYTES,
+			own_tree=True,
+			cancelled=cancellation,
+		)
+	result = _validate_result(
+		output, stderr, code, secrets=secrets, schema=request["schema"], integrity=integrity
+	)
+	if cancellation is not None and cancellation():
+		raise EditError("cancelled")
+	if time.monotonic() >= deadline:
+		raise EditError("deadline")
+	return result
 
 
 if __name__ == "__main__":

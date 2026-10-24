@@ -15,11 +15,14 @@ For this repository, use the executable declaration format in the shared publish
    `quality-gate.toml` on the latest published policy while preparing the candidate; the canonical
    template continues to project the target product release. The authority contains exactly one
    top-level version string.
-3. Write Russian user-visible changes and required adaptation in `.release/notes.md`. Plain prose is
-   sufficient; a repeated version, Impact field, and fixed compatibility headings are unnecessary.
+3. Replace `.release/notes.md` with Russian user-visible changes and required adaptation for the
+   candidate version only. Include accumulated unreleased changes selected for this candidate, but
+   never copy or summarize notes from already published releases. Their release pages remain the
+   history. Plain prose is sufficient; a repeated version, Impact field, and fixed compatibility
+   headings are unnecessary.
 4. Prepare exactly one `## Release` section using the shared contract. For internal-only work, use
    only `- No release: <Russian reason>` and keep the version unchanged relative to the PR base.
-   Existing notes remain valid historical content and cannot request a release by themselves.
+   Notes already present in the base do not request a release by themselves.
    The shared validator also recognizes an omitted section as no-release for a Dependabot bot PR
    only when the complete, stable changed-file list consists of workflow YAML files directly under
    `.github/workflows/`, including any previous paths for renames. Mixed or uncertain file lists
@@ -34,15 +37,32 @@ making the release candidate depend on its own unpublished wheel.
 
 ## Product verification
 
+The v3.2.0 candidate adds [read-only touched-file integrity](edit-integrity.md)
+and retains the published v3.1.0 typing interface, including its separately
+selected background schema. This is MINOR relative to published v3.1.0.
+The [integrity provider evidence](audits/edit-integrity-provider.md) separates
+source verification from publication and host activation. The provider source
+manifest stays on published v3.1.0 until the separate post-publication activation.
+
+The v3.1.0 release added [whole-scope typing](edit-types.md), preserving schema 1
+and adding the separately selected schema 2 background/cancellation envelope.
+It also adds the default-true manifest typing opt-out to the new policy. This is
+MINOR relative to published v3.0.0; older exact policy pins remain supported and
+are not changed automatically. The [typing provider evidence](audits/edit-types-provider.md)
+distinguishes source/parity preparation from immutable publication and host
+acceptance. The normal Windows/Linux exact-source release builds remain required.
+Installed active-turn delivery, Stop/drain and aggregate event profiles require
+the published compatible engine and separate host activation.
+
 The public [working-tree Ruff interface](edit-check.md) was introduced in v2.6.0. The v2.6.1
 release repaired direct wheel execution through the native release launcher. The v2.6.2
 release added transparent provider-owned reuse of complete unchanged-content results.
-The v3.0.0 candidate adds the read-only [secret interface](edit-secrets.md) and fixes
+The v3.0.0 release added the read-only [secret interface](edit-secrets.md) and fixed
 actual-secret fingerprints in the shared scanner transport. Persisted waivers for
 the old redacted placeholder require explicit review and reissue, so this is MAJOR
 relative to v2.6.2. Interface schemas and detector rules remain unchanged. Both edit
 interfaces retain exact v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2 policy compatibility and
-support the candidate v3.0.0 policy only after publication.
+support the published v3.0.0 policy.
 The source policy pin stays on its current published release; activation uses the separate route above. Host
 installation/activation and the initial v2.4.2 consumer's `edit-setup` remain separate post-publication
 work; the provider acceptance record does not establish installed host-event acceptance.

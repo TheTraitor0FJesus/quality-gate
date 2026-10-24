@@ -32,6 +32,7 @@ def parser() -> argparse.ArgumentParser:
 	format_parser.add_argument("paths", nargs="+", help="Repository-relative paths to format.")
 	subcommands.add_parser("edit-check", help="Check explicit working-tree Python files via JSON.")
 	subcommands.add_parser("edit-secrets", help="Scan explicit working-tree content via JSON.")
+	subcommands.add_parser("edit-types", help="Check affected whole Python scopes via JSON.")
 	subcommands.add_parser(
 		"edit-integrity", help="Check explicit working-tree integrity content via JSON."
 	)
@@ -172,11 +173,12 @@ def _dispatch(arguments: argparse.Namespace) -> int:
 
 def main() -> int:
 	arguments = parser().parse_args()
-	if arguments.command in {"edit-check", "edit-secrets", "edit-integrity"}:
+	if arguments.command in {"edit-check", "edit-secrets", "edit-types", "edit-integrity"}:
 		from .edit_cli import main as edit_main
 
 		return edit_main(
 			secrets=arguments.command == "edit-secrets",
+			types=arguments.command == "edit-types",
 			integrity=arguments.command == "edit-integrity",
 		)
 	# The edit path shares the JSON-only entry's lean startup. Full Gate modules

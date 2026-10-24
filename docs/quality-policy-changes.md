@@ -75,6 +75,22 @@ Projects may keep pytest markers, test discovery, package metadata, and dependen
 
 ## Working-tree policy selection
 
+The additive [edit-integrity interface](edit-integrity.md) shares the normal
+Gate's conflict-marker and exact standard-waiver resolver on explicit complete
+bytes. NUL and invalid UTF-8 retain the Gate's non-text treatment. Its bounded
+touched-file coverage does not expand into a Git or history scan. The normal
+Gate marker scan also returns `unchecked` for unreadable or oversized input;
+its streaming limits are recorded in the [architecture map](architecture.md).
+
+The additive [edit-types interface](edit-types.md) runs whole affected typed
+components against the exact released mypy policy. Its bounded source,
+configuration, dependency, runtime and tool evidence must remain fresh at
+completion and host delivery. The new policy's optional `typecheck` boolean
+defaults to true; false is an explicit mypy opt-out in full Gate and edit typing.
+Older selected policies reject the field, including true. No mypy manifest-waiver
+semantics are added. Schema 2 background ownership does not alter schema 1's
+deadline or authorize installing packages during editing.
+
 The additive [edit-secrets interface](edit-secrets.md) reuses the exact release's
 Gitleaks detector and working-tree root configuration on an explicit partial
 candidate. Its bounded coverage failures do not redefine full Gate scope. The

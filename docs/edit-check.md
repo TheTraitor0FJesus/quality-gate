@@ -8,8 +8,8 @@ An open provider PR does not install a hook or publish an immutable release.
 
 ## Invocation and request
 
-Install the interface engine from the published Quality Gate **v3.0.0** wheel or
-the compatible v3.2.0 candidate after publication. Invoke
+Install the interface engine from the published Quality Gate **v3.1.0** wheel.
+The compatible v3.2.0 candidate becomes installable after publication. Invoke
 `quality-gate edit-check` or `python -I -B -m quality_gate.cli edit-check` with one UTF-8
 JSON object on stdin and close stdin. The equivalent entry point is `quality-gate-edit`.
 The regular module route dispatches before loading full Gate orchestration and is the
@@ -95,17 +95,17 @@ a fallback for an invalid manifest, incompatible managed pin, or missing managed
 
 ## Selection, preparation and compatibility
 
-| Selected policy | v3.0.0 engine | v3.2.0 engine | Coverage |
-| --- | --- | --- | --- |
-| v2.4.2 | Supported | Supported | Exact old policy; initial skills consumer pin |
-| v2.5.0 | Supported | Supported | Exact old policy |
-| v2.6.0 | Supported | Supported | Exact published policy |
-| v2.6.1 | Supported | Supported | Exact published policy |
-| v2.6.2 | Supported | Supported | Exact published policy |
-| v3.0.0 | Supported | Supported | Exact published policy |
-| v3.1.0 | — | Supported | Published policy |
-| v3.2.0 | — | Supported after publication | Candidate policy |
-| Any other version | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | Explicit consumer update required |
+| Selected policy | v3.0.0 engine | v3.1.0 engine | v3.2.0 engine | Coverage |
+| --- | --- | --- | --- | --- |
+| v2.4.2 | Supported | Supported | Supported | Exact old policy; initial skills consumer pin |
+| v2.5.0 | Supported | Supported | Supported | Exact old policy |
+| v2.6.0 | Supported | Supported | Supported | Exact published policy |
+| v2.6.1 | Supported | Supported | Supported | Exact published policy |
+| v2.6.2 | Supported | Supported | Supported | Exact published policy |
+| v3.0.0 | Supported | Supported | Supported | Exact published policy |
+| v3.1.0 | — | Supported | Supported | Published policy |
+| v3.2.0 | — | — | Supported after publication | Candidate policy |
+| Any other version | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | Explicit consumer update required |
 
 The compatibility adapter uses schema 2 and the same component path membership and
 released Ruff configuration as these releases. Their Python manifest/runtime/Ruff

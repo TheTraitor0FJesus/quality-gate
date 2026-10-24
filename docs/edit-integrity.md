@@ -36,6 +36,7 @@ absent. A valid manifest selects its exact `quality.policy_release` and waivers;
 invalid manifests and pins never fall back to baseline. No Python runtime or
 scanner is selected for integrity checking. Unknown keys, duplicate keys and
 unsupported schemas are unchecked.
+The typing command's background schema 2 is not accepted by `edit-integrity`.
 
 Paths identify complete regular files explicitly supplied by the host. They
 are not globs or tree queries. Raw-byte hashes include BOM and line endings.
@@ -103,8 +104,8 @@ the manifest, selected immutable release and all raw file bytes before
 publishing.
 
 The v3.2.0 engine retains previously supported policy pins, including published
-v3.1.0, and adds its own v3.2.0 release after publication. This capability does not change the selected
-policy contents or Ruff/secret/security checks. It does not install Codex
+v3.1.0, and adds its own v3.2.0 release after publication. This capability does
+not change the selected policy contents or Ruff/secret/security checks. It does not install Codex
 hooks, enable a host setting, replace baseline policy or update consumers.
 Actual event delivery, rollback and aggregate latency remain host acceptance
 work after owner merge and immutable release publication.
