@@ -162,8 +162,8 @@ starts in the entry function. The host measures outer launch-to-delivery time.
 ## Materialization and compatibility
 
 The supported exact pins are v2.4.2, v2.5.0, v2.6.0, v2.6.1, v2.6.2 and v3.0.0.
-Published v3.1.0 is also supported. The v3.2.0 candidate adds its own pin,
-usable only after immutable publication.
+Published v3.1.0 and v3.2.0 are also supported. The v4.0.0 candidate adds its own
+pin, usable only after immutable publication.
 The complete immutable release inventory is verified offline without repairing
 or quarantining it. Its native Gitleaks 8.30.1 and embedded policy are selected;
 there is no dependency setup, download, Python runtime probe, history scan,

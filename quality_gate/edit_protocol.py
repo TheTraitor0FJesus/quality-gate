@@ -25,7 +25,7 @@ MAX_BACKGROUND_DEADLINE_MS = 30_000
 BACKGROUND_SCHEMA = 2
 DELIVERY_RESERVE_SECONDS = 0.05
 SUPPORTED_POLICIES = frozenset(
-	{"v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0", "v3.1.0", "v3.2.0"}
+	{"v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0", "v3.1.0", "v3.2.0", "v4.0.0"}
 )
 SAFE_FIXES = ("I001",)
 RECOVERY = {

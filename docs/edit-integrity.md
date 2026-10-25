@@ -103,8 +103,8 @@ probe, full-tree scan, history scan or source-file write. The worker rechecks
 the manifest, selected immutable release and all raw file bytes before
 publishing.
 
-The v3.2.0 engine retains previously supported policy pins, including published
-v3.1.0, and adds its own v3.2.0 release after publication. This capability does
+The v4.0.0 engine retains previously supported policy pins, including published
+v3.1.0 and v3.2.0, and adds its own v4.0.0 release after publication. This capability does
 not change the selected policy contents or Ruff/secret/security checks. It does not install Codex
 hooks, enable a host setting, replace baseline policy or update consumers.
 Actual event delivery, rollback and aggregate latency remain host acceptance

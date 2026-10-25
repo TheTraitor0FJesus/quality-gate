@@ -89,6 +89,9 @@ defaults to this run workspace; the explicit `--workspace-parent` option remains
 operator needs a shorter path.
 
 The `Verify package` step and artifact upload must succeed for each platform before publication.
+The artifact audit streams its redacted report to the job log, including when it fails.
+Candidate compatibility tests exercise the current product policy as well as historical pins;
+the source manifest's published pin alone cannot establish candidate-policy compatibility.
 The full-suite subprocess excludes the parent PR's history-selection variables so disposable
 test repositories select their own history. The build process retains Actions context for evidence.
 

@@ -175,7 +175,7 @@ def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
 @pytest.fixture(scope="module")
 def wheel_cache(tmp_path_factory: pytest.TempPathFactory) -> Path:
 	cache = tmp_path_factory.mktemp("wheel-cache")
-	for version in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0"):
+	for version in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0", f"v{__version__}"):
 		prepare_edit_cache(cache, version)
 	return cache
 
@@ -250,7 +250,9 @@ def test_wheel_exposes_read_only_edits_without_extraction(
 	assert digest(engine_wheel.read_bytes()) == wheel_hash
 
 
-@pytest.mark.parametrize("policy", ["v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0"])
+@pytest.mark.parametrize(
+	"policy", ["v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0", f"v{__version__}"]
+)
 @pytest.mark.parametrize("module", ["quality_gate.cli", "quality_gate.edit_cli"])
 def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 	tmp_path: Path,

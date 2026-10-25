@@ -155,6 +155,7 @@ def _artifact(root: Path, version: str = "2.0.0", *, valid_wheel: bool = True) -
 				"from types import SimpleNamespace\n"
 				"from ._probe import record\n"
 				"def bootstrap_audit(root, *, policy_release):\n"
+				'    print("release artifact audit diagnostic", flush=True)\n'
 				'    record("audit", policy_release, root)\n'
 				"    return SimpleNamespace(exit_code=0)\n",
 			)
@@ -300,6 +301,7 @@ def test_release_controller_binds_candidate_to_product_version_not_policy_pin(
 def test_release_controller_rejects_a_failed_artifact_stage(
 	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
+	capfd: pytest.CaptureFixture[str],
 	stage: str,
 	expected_calls: list[str],
 	error: str,
@@ -314,6 +316,7 @@ def test_release_controller_rejects_a_failed_artifact_stage(
 		verify_release_candidate(tmp_path, _artifact(tmp_path))
 
 	assert marker.read_text(encoding="utf-8").splitlines() == expected_calls
+	assert ("release artifact audit diagnostic" in capfd.readouterr().out) == (stage == "audit")
 
 
 def test_release_controller_rejects_an_unlearned_lesson(tmp_path: Path) -> None:
