@@ -8,8 +8,8 @@ An open provider PR does not install a hook or publish an immutable release.
 
 ## Invocation and request
 
-Install the interface engine from the published Quality Gate **v3.1.0** wheel.
-The compatible v3.2.0 candidate becomes installable after publication. Invoke
+Install the interface engine from the published Quality Gate **v4.0.0** release. It supports
+all exact policy pins in the compatibility matrix below, including v4.0.0. Invoke
 `quality-gate edit-check` or `python -I -B -m quality_gate.cli edit-check` with one UTF-8
 JSON object on stdin and close stdin. The equivalent entry point is `quality-gate-edit`.
 The regular module route dispatches before loading full Gate orchestration and is the
@@ -95,20 +95,20 @@ a fallback for an invalid manifest, incompatible managed pin, or missing managed
 
 ## Selection, preparation and compatibility
 
-| Selected policy | v3.0.0 engine | v3.1.0 engine | v3.2.0 engine | Coverage |
-| --- | --- | --- | --- | --- |
-| v2.4.2 | Supported | Supported | Supported | Exact old policy; initial skills consumer pin |
-| v2.5.0 | Supported | Supported | Supported | Exact old policy |
-| v2.6.0 | Supported | Supported | Supported | Exact published policy |
-| v2.6.1 | Supported | Supported | Supported | Exact published policy |
-| v2.6.2 | Supported | Supported | Supported | Exact published policy |
-| v3.0.0 | Supported | Supported | Supported | Exact published policy |
-| v3.1.0 | — | Supported | Supported | Published policy |
-| v3.2.0 | — | — | Supported after publication | Candidate policy |
-| Any other version | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | Explicit consumer update required |
+| Selected policy | v3.0.0 engine | v3.1.0 engine | v3.2.0 engine | v4.0.0 engine | Coverage |
+| --- | --- | --- | --- | --- | --- |
+| v2.4.2 | Supported | Supported | Supported | Supported | Exact old policy |
+| v2.5.0 | Supported | Supported | Supported | Supported | Exact old policy |
+| v2.6.0 | Supported | Supported | Supported | Supported | Exact published policy |
+| v2.6.1 | Supported | Supported | Supported | Supported | Exact published policy |
+| v2.6.2 | Supported | Supported | Supported | Supported | Exact published policy |
+| v3.0.0 | Supported | Supported | Supported | Supported | Exact published policy |
+| v3.1.0 | — | Supported | Supported | Supported | Published policy |
+| v3.2.0 | — | — | Supported | Supported | Published policy |
+| v4.0.0 | — | — | — | Supported | Published policy |
+| Any other version | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | Explicit policy update required |
 
-The v4.0.0 engine supports every exact policy listed above and its own v4.0.0
-policy after immutable publication. Other versions remain unsupported.
+Other exact versions remain unsupported.
 
 The compatibility adapter uses schema 2 and the same component path membership and
 released Ruff configuration as these releases. Their Python manifest/runtime/Ruff
@@ -311,16 +311,11 @@ Session/event attribution and deduplicating delivered messages remain host respo
 
 ## Handoff and acceptance evidence
 
-The reuse feature shipped as PATCH v2.6.2. The current engine candidate targets
-v3.0.0 because the separate secret interface corrects persisted fingerprint
-semantics; Ruff's schema, policy and reuse contract are unchanged. The provider
-source manifest remains on its current published v2.5.0 policy. Owner merge and
-the existing Windows/Linux release verification/publication must finish before host
-installation. Then the host must record the engine wheel/release identities, explicitly
-select its baseline, retain/provision `edit-setup` for baseline and managed pins, validate its
-result reader and complete real Codex-event and latency acceptance. No consumer pin
-migration is required for the initial v2.4.2 consumer. Other pins require the matrix
-check above; this PR does not activate host settings or change consumer pins.
+The reuse feature shipped as PATCH v2.6.2. The separate secret interface shipped in
+v3.0.0, and the published v4.0.0 engine supports the exact policies in the matrix above.
+The provider manifest now selects policy v4.0.0. Host installation, baseline selection,
+result-reader validation, real Codex-event delivery, and latency acceptance remain
+separate host work. The provider release does not activate host settings.
 
 Provider test commands, real release comparison, cleanup, timing evidence and limitations
 are recorded in [the provider acceptance record](audits/edit-check-provider.md).

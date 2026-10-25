@@ -37,12 +37,22 @@ making the release candidate depend on its own unpublished wheel.
 
 ## Product verification
 
-The v3.2.0 candidate adds [read-only touched-file integrity](edit-integrity.md)
-and retains the published v3.1.0 typing interface, including its separately
-selected background schema. This is MINOR relative to published v3.1.0.
-The [integrity provider evidence](audits/edit-integrity-provider.md) separates
-source verification from publication and host activation. The provider source
-manifest stays on published v3.1.0 until the separate post-publication activation.
+The published v4.0.0 release changes normal `check` and `audit` output to summarize
+passed statuses. Failed and unchecked statuses remain visible, and `--verbose` returns
+the complete status map and safely collected findings. This is MAJOR relative to
+published v3.2.0 because tools that parse individual success lines must use
+`--verbose`. The checks, first `Quality Gate: <exit_code>` line, and exit-code
+precedence stay the same.
+
+The release also adds v4.0.0 policy support to the edit commands and prints the
+release audit report in CI logs. The [provider v4.0.0 acceptance record](audits/provider-v4.0.0-acceptance.md)
+records its immutable release evidence and the separate self-policy activation.
+
+The v3.2.0 release added [read-only touched-file integrity](edit-integrity.md)
+and retained the v3.1.0 typing interface, including its separately selected
+background schema. This was MINOR relative to published v3.1.0. The
+[integrity provider evidence](audits/edit-integrity-provider.md) records that
+candidate's source verification; it does not certify host activation.
 
 The v3.1.0 release added [whole-scope typing](edit-types.md), preserving schema 1
 and adding the separately selected schema 2 background/cancellation envelope.
@@ -62,7 +72,7 @@ actual-secret fingerprints in the shared scanner transport. Persisted waivers fo
 the old redacted placeholder require explicit review and reissue, so this is MAJOR
 relative to v2.6.2. Interface schemas and detector rules remain unchanged. Both edit
 interfaces retain exact v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2 policy compatibility and
-support the published v3.0.0 policy.
+support the published v3.0.0, v3.1.0, v3.2.0, and v4.0.0 policies.
 The source policy pin stays on its current published release; activation uses the separate route above. Host
 installation/activation and the initial v2.4.2 consumer's `edit-setup` remain separate post-publication
 work; the provider acceptance record does not establish installed host-event acceptance.
@@ -175,6 +185,6 @@ retains projection and timeout checks. Existing adapter, distribution, installat
 failure-injection tests remain the product evidence; test doubles never replace the actual platform
 acceptance in the final release workflow.
 
-The release preserves the schema 2 CLI, v2 hook/runtime contract, platform ZIP delivery, consumer
+The release preserves the schema 2 CLI, schema 2 hook/runtime contract, platform ZIP delivery, consumer
 activation, rollback, cache retention, and backup responsibilities. Publishing the provider does
 not automatically change consumer workflow pins or deploy services.

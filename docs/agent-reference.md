@@ -30,7 +30,7 @@ files remain beside their persistent targets. `sync`, `setup`, rollback, confirm
 `format`, `edit-setup`, and `edit-check` are the explicit mutation commands.
 
 1. Run `quality-gate validate` after editing `quality-gate.toml`.
-2. Run `quality-gate doctor` to inspect the selected release and component runtimes.
+2. Run `quality-gate doctor` to verify the selected release and component runtimes are available.
 3. For changes to this repository's source or policy, run the current-source `quality-gate check`
    before committing. For a consumer implementation, complete staged verification through its
    active workflow; its commit-hook Quality Gate satisfies this step. For standalone verification,
@@ -41,11 +41,18 @@ files remain beside their persistent targets. `sync`, `setup`, rollback, confirm
 4. Use `quality-gate format <explicit-path>...`, stage the result, and rerun the current-source
    `quality-gate check`
    for Quality Gate changes or return to the active workflow for consumer changes.
-5. Use `quality-gate version` to confirm which installed policy engine is executing.
+5. The `quality-gate version` command prints the installed engine package version. The repository's
+   `quality-gate.toml` selects the policy release; `quality-gate doctor` checks that release and its
+   runtimes but does not print its version. `quality-gate setup` prints the selected release when it
+   prepares the policy and runtimes.
 
-The native pre-commit wrapper reads the staged manifest, verifies its exact cached v2 wheel, and
-calls the release-backed gate without importing mutable repository source. The native pre-push
-wrapper blocks updates and deletion of the remote default branch when Git can prove its name.
+The native pre-commit wrapper reads the staged manifest, resolves `quality.policy_release`,
+verifies that exact cached release, and calls the Gate without importing mutable repository source.
+The wrapper has no separate policy-version pin. After activation, stage the manifest pin so the hook
+selects the new release. If CI reports a v2 release, inspect the `policy_bootstrap` output and the
+staged manifest. The bootstrap release is used only when this repository's selected release API
+returns 404. The native pre-push wrapper blocks updates and deletion of the remote default branch
+when Git can prove its name.
 
 ## Manifest maintenance
 

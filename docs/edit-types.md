@@ -306,8 +306,8 @@ supported; overflow is unchecked, never truncated success.
 
 ## Scope, prerequisites and compatibility
 
-The v4.0.0 engine retains the previously supported exact policies through v3.2.0
-and adds its own v4.0.0 policy after immutable publication.
+The published v4.0.0 engine retains the previously supported exact policies through
+v3.2.0 and supports its own v4.0.0 policy.
 
 Managed: use the working-tree manifest's exact release, each affected component's
 declared Python and already prepared Gate runtime/dependencies. Analyze the whole
@@ -317,12 +317,12 @@ dependency changes route their consumers. Deletions retain their old path for
 routing and must still be absent at completion. Files outside managed components
 are explicitly inapplicable; they do not override a component's opt-out.
 
-The new release adds optional schema 2 `python[].typecheck: boolean` (default
+Policy v3.1.0 added optional schema 2 `python[].typecheck: boolean` (default
 true). Full Gate and edits honor false. Policies through v3.0.0 do not support
 this field: explicitly using it with an older selected policy is unchecked,
 including explicit true. Existing manifests without it retain their exact
-v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2/v3.0.0 policy selection. The source self-policy
-pin remains published; upgrading the interface does not update consumer pins.
+v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2/v3.0.0 policy selection. The provider manifest
+selects v4.0.0. Host activation remains a separate operation.
 
 Managed discovery matches the pinned mypy directory discovery: skip names starting
 `.` and names `__pycache__`, `site-packages`, `node_modules`; include `build`,
