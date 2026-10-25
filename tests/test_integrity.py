@@ -786,12 +786,12 @@ def test_provider_only_workflow_exception_does_not_inherit_parent_repository_ori
 	assert not integrity._is_quality_gate_origin(nested_temp)
 
 
-def test_provider_self_policy_v310_uses_only_the_parity_waiver() -> None:
+def test_provider_self_policy_v400_uses_only_the_parity_waiver() -> None:
 	manifest = load_manifest(Path(__file__).resolve().parents[1])
 	waivers = [waiver for waiver in manifest.waivers if waiver.check_id == "repository.workflow"]
 	parity_target = ".github/workflows/parity.yml"
 
-	assert manifest.policy_release == "v3.1.0"
+	assert manifest.policy_release == "v4.0.0"
 	assert {waiver.target for waiver in waivers} == {parity_target}
 	assert len(manifest.waivers) == 1
 	parity_waivers = [waiver for waiver in waivers if waiver.target == parity_target]
