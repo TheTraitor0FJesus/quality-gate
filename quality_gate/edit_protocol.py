@@ -25,7 +25,18 @@ MAX_BACKGROUND_DEADLINE_MS = 30_000
 BACKGROUND_SCHEMA = 2
 DELIVERY_RESERVE_SECONDS = 0.05
 SUPPORTED_POLICIES = frozenset(
-	{"v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0", "v3.1.0", "v3.2.0", "v4.0.0"}
+	{
+		"v2.4.2",
+		"v2.5.0",
+		"v2.6.0",
+		"v2.6.1",
+		"v2.6.2",
+		"v3.0.0",
+		"v3.1.0",
+		"v3.2.0",
+		"v4.0.0",
+		"v4.1.0",
+	}
 )
 SAFE_FIXES = ("I001",)
 RECOVERY = {
@@ -95,7 +106,7 @@ def decode_request(
 		raise EditError("invalid_request") from error
 	if len(payload) > MAX_REQUEST_BYTES or not isinstance(request, dict):
 		raise EditError("invalid_request")
-	background = _validate_envelope(request, types=types)
+	background = _validate_envelope(request, secrets=secrets, types=types, integrity=integrity)
 	deadline = request.get("deadline_unix_ms")
 	if type(deadline) is not int:
 		raise EditError("invalid_request")
@@ -114,14 +125,25 @@ def decode_request(
 		if background:
 			deadline_error.background = background_identity(request)
 		raise deadline_error
-	if remaining_ms > (MAX_BACKGROUND_DEADLINE_MS if background else MAX_DEADLINE_MS):
+	read_only_ruff = not read_only and request.get("phase") == "validate"
+	maximum_deadline_ms = (
+		MAX_BACKGROUND_DEADLINE_MS if background or read_only_ruff else MAX_DEADLINE_MS
+	)
+	if remaining_ms > maximum_deadline_ms:
 		raise EditError("invalid_request")
 	return request
 
 
-def _validate_envelope(request: dict[str, Any], *, types: bool) -> bool:
+def _validate_envelope(
+	request: dict[str, Any], *, secrets: bool, types: bool, integrity: bool = False
+) -> bool:
+	read_only = _read_only_reader(secrets, integrity, types)
 	allowed = {"schema", "root", "files", "deadline_unix_ms", "baseline", "cache_dir"}
 	background = types and request.get("schema") == BACKGROUND_SCHEMA
+	if not read_only:
+		allowed.add("phase")
+	if "phase" in request and (read_only or request.get("phase") not in {"write", "validate"}):
+		raise EditError("invalid_request")
 	if background:
 		allowed |= {"mode", "event_id", "cancel_path"}
 		_validate_background(request)
