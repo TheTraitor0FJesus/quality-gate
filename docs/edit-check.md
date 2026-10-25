@@ -107,6 +107,9 @@ a fallback for an invalid manifest, incompatible managed pin, or missing managed
 | v3.2.0 | — | — | Supported after publication | Candidate policy |
 | Any other version | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | Explicit consumer update required |
 
+The v4.0.0 engine supports every exact policy listed above and its own v4.0.0
+policy after immutable publication. Other versions remain unsupported.
+
 The compatibility adapter uses schema 2 and the same component path membership and
 released Ruff configuration as these releases. Their Python manifest/runtime/Ruff
 semantics are identical. It verifies the complete exact release inventory and every
