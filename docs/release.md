@@ -37,6 +37,11 @@ making the release candidate depend on its own unpublished wheel.
 
 ## Product verification
 
+The v4.1.0 candidate adds optional `phase: write` and `phase: validate` requests to the working-tree
+Ruff interface. Requests without a phase preserve the synchronous behavior. Phase requests require
+engine v4.1.0 or newer; older exact policy pins and hosts that keep phase-less requests remain
+compatible. Host activation stays separate. This is MINOR relative to published v4.0.0.
+
 The v3.2.0 candidate adds [read-only touched-file integrity](edit-integrity.md)
 and retains the published v3.1.0 typing interface, including its separately
 selected background schema. This is MINOR relative to published v3.1.0.
@@ -83,10 +88,20 @@ each product job syncs the platform archive for the source manifest's pinned pol
 isolated cache, preserving both the published baseline and the release candidate.
 `quality_gate.temp_workspace` scopes check, parity, publisher, and release-process temporary files
 under the checked repository's ignored `temp/` directory. A read-only checkout or candidate
-snapshot uses a private hashed workspace per repository under the user-local system temporary directory. Release cache
-staging and atomic replacement files remain beside their persistent targets. Release verification
-defaults to this run workspace; the explicit `--workspace-parent` option remains available when an
-operator needs a shorter path.
+snapshot uses a private hashed workspace per repository under the user-local system temporary
+directory. Release cache staging and atomic replacement files remain beside their persistent
+targets. Release verification defaults to this run workspace; the explicit `--workspace-parent`
+option remains available when an operator needs a shorter path. On Windows, the release controller
+measures the resolved final workspace path, including existing junctions and symlinks, and rejects
+paths longer than 180 characters before artifact synchronization or audit. Its error reports the
+actual length, limit, minimum shortening, and the option to shorten or move the worktree directory.
+The provider's pytest collection preflight exercises the same nested temporary-workspace creation
+for every release-test `tmp_path` before tests run. This limit applies to release workspaces only; it
+is not a general checkout-length limit for consumers.
+
+Provider verification budgets are nested: the Python test stage is limited to 20 minutes, the
+complete Quality Gate to 23 minutes, and the reusable CI job to 25 minutes including bootstrap and
+cleanup. The provider full-suite test runner keeps its independent aggregate 25-minute deadline.
 
 The `Verify package` step and artifact upload must succeed for each platform before publication.
 The artifact audit streams its redacted report to the job log, including when it fails.

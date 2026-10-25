@@ -26,8 +26,10 @@ ignored `temp/` directory, removes stale inactive runs when it starts, and remov
 directory when it exits. Read-only checkouts and candidate snapshots use a private hashed workspace
 per repository under the user-local system temporary directory. Every consumer repository must ignore its root
 `temp/` directory in `.gitignore` (for example, with `/temp/`). Cache staging and atomic replacement
-files remain beside their persistent targets. `sync`, `setup`, rollback, confirmed prune, and
-`format`, `edit-setup`, and `edit-check` are the explicit mutation commands.
+files remain beside their persistent targets. `sync`, `setup`, rollback, confirmed prune,
+`format`, and `edit-setup` are explicit mutation commands. An `edit-check` request with
+`phase: "write"` applies approved Ruff fixes and formatting only; `phase: "validate"` is
+read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnostics behavior.
 
 1. Run `quality-gate validate` after editing `quality-gate.toml`.
 2. Run `quality-gate doctor` to inspect the selected release and component runtimes.
@@ -43,18 +45,28 @@ files remain beside their persistent targets. `sync`, `setup`, rollback, confirm
    for Quality Gate changes or return to the active workflow for consumer changes.
 5. Use `quality-gate version` to confirm which installed policy engine is executing.
 
+For this provider, the Python test stage has a 20-minute limit, the complete Gate has a 23-minute
+limit, and the reusable CI job has a 25-minute outer limit. The job limit includes bootstrap and
+cleanup.
+
 The native pre-commit wrapper reads the staged manifest, verifies its exact cached v2 wheel, and
 calls the release-backed gate without importing mutable repository source. The native pre-push
 wrapper blocks updates and deletion of the remote default branch when Git can prove its name.
 
 ## Manifest maintenance
 
-For synchronous post-edit Ruff checks, use the separate [working-tree interface](edit-check.md).
-It checks explicit complete working-tree files, including unmanaged and non-Git projects, with a
-versioned JSON result and a shared caller deadline. `edit-setup` explicitly provisions the selected
-release's native Ruff; `edit-check` performs no downloads, dependency installation or environment
-creation. Its supervisor removes its isolated same-volume workspace after completion or timeout.
-It is an explicit writer and does not replace staged/full Gate verification. Keep the interface
+For post-edit Ruff checks, use the separate [working-tree interface](edit-check.md). Its explicit
+`phase: "write"` applies approved fixes and formatting synchronously to explicit complete
+working-tree files, including unmanaged and non-Git projects, without running final diagnostics.
+After those writes finish, `phase: "validate"` runs the final lint and format checks without changing
+project files; the host may run this phase in the shared bounded background worker. It accepts the
+shared 30-second work limit while the writer keeps its 10-second limit. Omitting `phase` preserves
+the earlier synchronous writer-and-diagnostics behavior. Each phase returns a versioned JSON result
+for the exact selected policy and content. The read-only phase requires an immutable engine release
+that implements it; keep host activation pending until that release is published and verified.
+`edit-setup` explicitly provisions the selected release's native Ruff; neither phase downloads tools,
+installs dependencies or creates runtimes. The supervisor removes its temporary workspace after
+completion or timeout. These phases do not replace staged/full Gate verification. Keep the interface
 engine identity separate from the consumer policy pin; consult its supported-release matrix before
 activation, including when the selected policy predates the command.
 

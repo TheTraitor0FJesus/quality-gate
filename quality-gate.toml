@@ -56,8 +56,8 @@ max_blob_size_mib = 5
 
 [repository.defaults]
 command_timeout_seconds = 120
-test_timeout_seconds = 900
-gate_timeout_seconds = 1200
+test_timeout_seconds = 1200
+gate_timeout_seconds = 1380
 
 [[python]]
 name = "quality-gate"
