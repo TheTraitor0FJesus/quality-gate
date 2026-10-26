@@ -406,7 +406,7 @@ def test_cancellation_during_release_wait_closes_the_slot_handle(
 	cache_root = tmp_path / "machine-cache" / "quality-gate"
 	control_holder: tuple[subprocess.Popen[str], Path] | None = None
 	try:
-		with pytest.raises(KeyboardInterrupt):
+		with pytest.raises(KeyboardInterrupt), monkeypatch.context() as cancellation:
 			with admission.gate_admission(cache_root=cache_root):
 				slot = int(
 					admission.child_admission_environment()[admission._LEASE_SLOT_ENVIRONMENT]
@@ -414,7 +414,7 @@ def test_cancellation_during_release_wait_closes_the_slot_handle(
 				control_holder = _start_control_holder(
 					cache_root, tmp_path / "cancelled-control-lock-owner"
 				)
-				monkeypatch.setattr(
+				cancellation.setattr(
 					admission.time,
 					"sleep",
 					lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt),
