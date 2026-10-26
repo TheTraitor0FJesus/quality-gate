@@ -2,7 +2,7 @@ waivers = []
 
 [quality]
 schema = 2
-policy_release = "v4.2.0"
+policy_release = "v4.2.1"
 
 [repository]
 name = "REVIEW_REQUIRED"
@@ -20,6 +20,17 @@ gate_timeout_seconds = 600
 # Add one [[python]] table for each Python component when needed.
 # Optional typecheck = false disables component mypy on policy v3.1.0 or newer.
 # Older selected policies reject typecheck, including explicit true; omit it there.
+# Declare whether tests apply. If tests do not apply, use an empty test_paths list and provide
+# a non-empty tests_reason; if tests apply, list at least one test path and omit tests_reason.
+# [[python]]
+# name = "backend"
+# path = "src"
+# python_version = "3.12"
+# dependency_inputs = []
+# test_paths = []
+# tests_applicable = false
+# tests_reason = "This component has no automated tests."
+# timeout_seconds = 300
 # Paths describe component layout; they do not override shared quality rules.
 # The consumer's GitHub workflow must call the reusable workflow at a full commit SHA.
 # Its optional python-version input may override the versions declared by the components.

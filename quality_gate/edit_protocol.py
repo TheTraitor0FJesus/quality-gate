@@ -37,9 +37,10 @@ SUPPORTED_POLICIES = frozenset(
 		"v4.0.0",
 		"v4.1.0",
 		"v4.2.0",
+		"v4.2.1",
 	}
 )
-SAFE_FIXES = ("I001",)
+SAFE_FIXES = ("I001", "F401")
 RECOVERY = {
 	"invalid_request": "Send a schema 1 request with explicit files and current SHA-256 values.",
 	"deadline": "Retry fresh content within the shared edit deadline; inspect slow prerequisites.",

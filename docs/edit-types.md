@@ -230,12 +230,17 @@ isolated probe's actual base Python executable as
 the environment. Hash the canonical JSON array of records with the identity
 serialization above. Cap at 20,000 records and 512 MiB total bytes; check the
 remaining deadline while walking and reading. An empty/missing `pyvenv.cfg`,
-`include-system-site-packages` other than false, unexpected site paths, `.pth`
-files or editable dependency contexts are unchecked. A `.pth` containing only
-blank lines or comments is allowed; executable/path-bearing `.pth` is unchecked.
-The probe runs isolated
-with `-I -S -B` and emits only standard-library metadata; mypy gets explicit
-verified site directories without executing site startup or project plugins.
+`include-system-site-packages` other than false, unexpected site paths, unknown
+or changed `.pth` files, or editable dependency contexts are unchecked. Blank
+and `#` comment-only `.pth` lines remain allowed. The managed runtime also allows
+the exact known payloads for `a1_coverage.pth`, `pytest-cov.pth`, and
+`distutils-precedence.pth`; each payload is hashed after CRLF-to-LF
+normalization (the observed coverage file uses CRLF). Their contents are
+validated, never executed: the probe runs isolated with `-I -S -B`. Mypy gets
+explicit verified site directories without executing site startup or project
+plugins. Any other executable or path-bearing entry, malformed content, or
+changed payload remains unchecked; review and update the allowlist only when a
+managed dependency payload changes.
 The host performs the same tree operation for final delivery freshness; caps
 bound work, not a latency guarantee. Measure provider initial/final and host
 rehash together before activation.

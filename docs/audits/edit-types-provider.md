@@ -47,8 +47,10 @@ Unmanaged consumers explicitly prepare `root/.venv`, disable system-site-package
 and install the selected release's exact mypy and required dependencies, together
 with their own project dependencies and typing stubs. The release's platform wheel
 must match the selected Python ABI; current release builds use CPython 3.12.
-There is no fallback to global Python, editable installation, executable `.pth`,
-project plugin or another project's environment.
+There is no fallback to global Python, editable installation, project plugin or
+another project's environment. Typing validates the reviewed managed-runtime
+`.pth` payloads but never executes site startup; unknown or changed `.pth`
+content remains unchecked.
 
 The environment certificate hashes actual regular files and the documented POSIX
 interpreter aliases. Tool package origins and their complete installed package
