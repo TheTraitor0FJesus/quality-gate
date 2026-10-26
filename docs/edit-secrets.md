@@ -5,8 +5,8 @@ contract for `skills/.scratch/python-quality-hooks/issues/02-secret-hook.md`.
 The host owns attribution, Ruff-before-readers ordering, feedback and activation.
 The provider owns scanner selection, exact content verification and typed waivers.
 The interface was introduced in published v3.0.0. The v3.2.0 release added
-`edit-integrity` while retaining this command, and the published v4.0.0 policy
-supports both edit commands. Host activation remains a separate step. The published
+`edit-integrity` while retaining this command. Published v4.0.0 and v4.1.0 policies
+support both edit commands. Host activation remains a separate step. The published
 v2.6.2 engine has no `edit-secrets`.
 
 ## Invocation
@@ -164,7 +164,7 @@ starts in the entry function. The host measures outer launch-to-delivery time.
 ## Materialization and compatibility
 
 The supported exact pins are v2.4.2, v2.5.0, v2.6.0, v2.6.1, v2.6.2 and v3.0.0.
-Published v3.1.0, v3.2.0, and v4.0.0 are also supported.
+Published v3.1.0, v3.2.0, v4.0.0, and v4.1.0 are also supported.
 The complete immutable release inventory is verified offline without repairing
 or quarantining it. Its native Gitleaks 8.30.1 and embedded policy are selected;
 there is no dependency setup, download, Python runtime probe, history scan,

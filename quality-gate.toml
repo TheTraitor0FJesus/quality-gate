@@ -21,6 +21,7 @@ required_documents = [
     ".agents/skills/post-release-quality-gate/SKILL.md",
     ".agents/skills/post-release-quality-gate/agents/openai.yaml",
     "docs/audits/provider-v4.0.0-acceptance.md",
+    "docs/audits/provider-v4.1.0-acceptance.md",
     ".release/release-tools.toml",
     ".release/release-requirements.txt",
     ".release/version.toml",

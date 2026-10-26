@@ -4,8 +4,9 @@ Paths are relative to the Quality Gate repository root. This contract supports
 the `python-quality-hooks` host ticket 03. The host owns event attribution,
 post-Ruff hashes, activation and model feedback. The provider owns exact policy
 selection, Gate marker semantics, typed waiver resolution and response freshness.
-The additive provider feature shipped in v3.2.0. The published v4.0.0 policy
-supports this command. Host activation remains a separate owner-controlled step.
+The additive provider feature shipped in v3.2.0. Published v4.0.0 and v4.1.0
+policies support this command. Host activation remains a separate owner-controlled
+step.
 
 ## Invocation
 

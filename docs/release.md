@@ -79,7 +79,7 @@ actual-secret fingerprints in the shared scanner transport. Persisted waivers fo
 the old redacted placeholder require explicit review and reissue, so this is MAJOR
 relative to v2.6.2. Interface schemas and detector rules remain unchanged. Both edit
 interfaces retain exact v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2 policy compatibility and
-support the published v3.0.0, v3.1.0, v3.2.0, and v4.0.0 policies.
+support the published v3.0.0, v3.1.0, v3.2.0, v4.0.0, and v4.1.0 policies.
 The source policy pin stays on its current published release; activation uses the separate route above. Host
 installation/activation and the initial v2.4.2 consumer's `edit-setup` remain separate post-publication
 work; the provider acceptance record does not establish installed host-event acceptance.
