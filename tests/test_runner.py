@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
@@ -16,12 +17,14 @@ from typing import cast
 import pytest
 
 from quality_gate import runner
+from quality_gate.admission import AdmissionError
 from quality_gate.distribution import ExternalTool, ReleaseFile, ReleaseManifest
 from quality_gate.launcher import PreparedEnvironment
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXPECTED_TIMEOUT_WAIT_CALLS = 2
 EXPECTED_BIOME_INVOCATIONS = 2
+UNCHECKED_EXIT = 2
 
 
 def _fake_candidate_snapshot(root: Path) -> AbstractContextManager[SimpleNamespace]:
@@ -311,6 +314,10 @@ def test_safe_environment_isolated_from_user_python_state(
 	monkeypatch.setenv("PYTHONPATH", "user-pythonpath")
 	monkeypatch.setenv("VIRTUAL_ENV", "user-venv")
 	monkeypatch.setenv("QUALITY_GATE_POLICY_ROOT", "user-policy-root")
+	monkeypatch.setenv("LOCALAPPDATA", "parent-local-app-data")
+	monkeypatch.setenv("XDG_CACHE_HOME", "parent-xdg-cache")
+	monkeypatch.setenv("CI", "true")
+	monkeypatch.setenv("GITHUB_ACTIONS", "true")
 
 	environment = runner._safe_environment("quality-gate-temporary")
 
@@ -322,6 +329,113 @@ def test_safe_environment_isolated_from_user_python_state(
 	assert "PYTHONPATH" not in environment
 	assert "VIRTUAL_ENV" not in environment
 	assert "QUALITY_GATE_POLICY_ROOT" not in environment
+	assert "LOCALAPPDATA" not in environment
+	assert "XDG_CACHE_HOME" not in environment
+	assert "CI" not in environment
+	assert "GITHUB_ACTIONS" not in environment
+	assert "QUALITY_GATE_ADMISSION_ROOT" not in environment
+	assert "RAYON_NUM_THREADS" not in environment
+
+
+def test_expired_admission_returns_before_snapshot_construction(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	def reject_admission() -> AbstractContextManager[None]:
+		raise AdmissionError("local queue wait expired; no check was run", "free a local slot")
+
+	monkeypatch.setattr(runner, "running_in_ci", lambda: False)
+	monkeypatch.setattr(runner, "gate_admission", reject_admission)
+	monkeypatch.setattr(
+		runner,
+		"candidate_snapshot",
+		lambda _root: pytest.fail("snapshot construction ran without queue admission"),
+	)
+
+	verdict = runner.check(tmp_path)
+
+	assert verdict.exit_code == UNCHECKED_EXIT
+	assert verdict.results[0].check_id == "runtime.admission"
+	assert verdict.results[0].status is runner.Status.UNCHECKED
+
+
+def test_check_skips_local_admission_in_ci(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+	monkeypatch.setattr(runner, "running_in_ci", lambda: True)
+	monkeypatch.setattr(
+		runner,
+		"gate_admission",
+		lambda: pytest.fail("CI must not wait on the local queue"),
+	)
+	monkeypatch.setattr(runner, "temporary_workspace", lambda _root: nullcontext())
+	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
+	passed = runner.Verdict(
+		(runner.CheckResult("ci.fixture", runner.Status.PASSED, "CI check completed"),)
+	)
+	monkeypatch.setattr(runner, "_check_snapshot", lambda *_args, **_kwargs: passed)
+
+	assert runner._run_snapshot(tmp_path) is passed
+
+
+def test_ruff_children_receive_a_bounded_worker_environment(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	monkeypatch.delenv(runner.RUFF_THREADS_ENV, raising=False)
+	actual_run = runner.run
+	observed: list[str] = []
+
+	def inspect_child_environment(
+		_command: list[str],
+		root: Path,
+		environment: dict[str, str],
+		*,
+		timeout: float | None = None,
+	) -> str:
+		assert timeout is not None and timeout > 0
+		output = actual_run(
+			[
+				sys.executable,
+				"-c",
+				"import os; print(os.environ.get('RAYON_NUM_THREADS', 'unset'))",
+			],
+			root,
+			environment,
+			timeout=timeout,
+		)
+		observed.append(output.strip())
+		return output
+
+	monkeypatch.setattr(runner, "run", inspect_child_environment)
+	base_environment = runner._safe_environment("quality-gate-temporary")
+	deadline = time.monotonic() + 30
+	executed, errors, _outputs = runner._execute_commands(
+		tmp_path,
+		base_environment,
+		[
+			("python.component_1.ruff", ["ruff", "check"], 10),
+			("python.component_1.format", ["ruff", "format"], 10),
+			("python.component_1.mypy", ["mypy"], 10),
+		],
+		10,
+		deadline,
+	)
+
+	assert executed == [
+		"python.component_1.ruff",
+		"python.component_1.format",
+		"python.component_1.mypy",
+	]
+	assert errors == []
+	assert observed == ["4", "4", "unset"]
+
+
+def test_ruff_worker_override_is_validated_and_applied_only_to_ruff(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	monkeypatch.setenv(runner.RUFF_THREADS_ENV, "8")
+	assert runner._ruff_environment({}) == {"RAYON_NUM_THREADS": "8"}
+	for invalid in ("0", "65", "-1", "many"):
+		monkeypatch.setenv(runner.RUFF_THREADS_ENV, invalid)
+		with pytest.raises(runner.QualityGateError, match=runner.RUFF_THREADS_ENV):
+			runner._ruff_environment({})
 
 
 def test_missing_external_tool_is_unchecked(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -352,6 +466,8 @@ def test_missing_external_tool_is_unchecked(monkeypatch: pytest.MonkeyPatch) -> 
 def test_format_uses_only_explicit_paths(monkeypatch: pytest.MonkeyPatch) -> None:
 	root = FIXTURES / "valid"
 	calls: list[list[str]] = []
+	environments: list[dict[str, str]] = []
+	monkeypatch.setenv(runner.RUFF_THREADS_ENV, "8")
 	monkeypatch.setattr(
 		runner,
 		"prepare",
@@ -368,6 +484,7 @@ def test_format_uses_only_explicit_paths(monkeypatch: pytest.MonkeyPatch) -> Non
 		command: list[str], root: Path, environment: dict[str, str], *, timeout: float
 	) -> None:
 		calls.append(command)
+		environments.append(environment)
 
 	monkeypatch.setattr(runner, "run", record_run)
 
@@ -377,6 +494,7 @@ def test_format_uses_only_explicit_paths(monkeypatch: pytest.MonkeyPatch) -> Non
 	assert calls[0][calls[0].index("format") + 1] == "--config"
 	assert calls[0][-1] == "app"
 	assert "--check" not in calls[0]
+	assert "RAYON_NUM_THREADS" not in environments[0]
 
 
 def test_policy_access_error_is_unchecked(monkeypatch: pytest.MonkeyPatch) -> None:

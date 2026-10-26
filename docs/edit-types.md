@@ -306,8 +306,10 @@ supported; overflow is unchecked, never truncated success.
 
 ## Scope, prerequisites and compatibility
 
-The published v4.0.0 engine retains the previously supported exact policies through
-v3.2.0 and supports its own v4.0.0 policy.
+The published v4.0.0 engine supports exact policies through v4.0.0. The
+published v4.1.0 engine retains those policies and adds v4.1.0. The v4.2.0
+candidate retains supported exact policies through v4.1.0 and adds its own
+v4.2.0 policy after immutable publication.
 
 Managed: use the working-tree manifest's exact release, each affected component's
 declared Python and already prepared Gate runtime/dependencies. Analyze the whole

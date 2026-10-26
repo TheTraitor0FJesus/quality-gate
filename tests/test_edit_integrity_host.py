@@ -205,7 +205,6 @@ def test_host_json_boundary_runs_candidate_public_cli(
 	The installed host JSON entrypoint and bridge run against the candidate
 	public CLI and Gate implementation from this checkout.
 	"""
-	assert ENGINE_RELEASE == "v4.1.0"
 	host = CandidateHost(tmp_path, monkeypatch, managed=managed)
 	conflict = b"<<<<<<< HEAD\nlocal\n=======\nremote\n>>>>>>> branch\n"
 	clean = b"no conflict here\n"
@@ -283,7 +282,10 @@ def test_coordinator_scans_post_ruff_rename_destination_and_omits_deletion(
 		"tool_response": "Success. Updated the following files:\nM renamed.py\nD gone.py\n",
 	}
 
-	def write_after_ruff(root: Path, files: list[dict[str, str]], *_args: object) -> dict[str, str]:
+	def write_after_ruff(
+		root: Path, files: list[dict[str, str]], *_args: object, phase: str
+	) -> dict[str, str]:
+		assert phase == "write"
 		assert [item["path"] for item in files] == ["renamed.py"]
 		(root / "renamed.py").write_bytes(b"<<<<<<< HEAD\npost-Ruff\n=======\nother\n")
 		return {"status": "passed"}

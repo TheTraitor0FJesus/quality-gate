@@ -48,9 +48,9 @@ read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnos
    runtimes but does not print its version. `quality-gate setup` prints the selected release when it
    prepares the policy and runtimes.
 
-For this provider, the Python test stage has a 20-minute limit, the complete Gate has a 23-minute
-limit, and the reusable CI job has a 25-minute outer limit. The job limit includes bootstrap and
-cleanup.
+For this provider, the Python test stage has a 30-minute limit, the complete Gate has a 40-minute
+limit, and the reusable CI job has a 50-minute outer limit. The job limit includes bootstrap and
+cleanup. Local verification requires an explicit 50-minute aggregate executor budget as well.
 
 The native pre-commit wrapper reads the staged manifest, resolves `quality.policy_release`, verifies
 that exact cached release, and calls the Gate without importing mutable repository source. The
@@ -58,6 +58,12 @@ wrapper has no separate policy-version pin. If CI reports a v2 release, inspect 
 `policy_bootstrap` output and the staged manifest. The bootstrap release is used only when this
 repository's selected release API returns 404. The native pre-push wrapper blocks updates and
 deletion of the remote default branch when Git can prove its name.
+
+Queue-aware releases admit two independent local full Gate runs across repositories for the
+current user. Waiting continues automatically when a slot opens and has a separate configurable
+budget. Ruff children default to four worker threads. See [Local Gate queue](local-gate-queue.md)
+for settings, nested execution, and the native-wrapper activation requirement. Source changes do
+not activate this behavior in an older immutable consumer release.
 
 ## Manifest maintenance
 

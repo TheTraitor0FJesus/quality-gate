@@ -104,9 +104,11 @@ probe, full-tree scan, history scan or source-file write. The worker rechecks
 the manifest, selected immutable release and all raw file bytes before
 publishing.
 
-The published v4.0.0 engine retains previously supported policy pins, including
-v3.1.0 and v3.2.0, and supports its own v4.0.0 release. This engine compatibility
-does not change the contents selected by an existing older policy pin or alter
-Ruff, secret, or security checks. It does not install Codex hooks or enable a host
-setting. Actual event delivery, rollback, and aggregate latency remain host
-acceptance work.
+The published v4.0.0 engine supports exact policy releases through v4.0.0. The
+published v4.1.0 engine retains those releases and adds v4.1.0. The v4.2.0
+candidate retains supported releases through v4.1.0 and adds its own v4.2.0 pin
+after immutable publication. These engine versions do not change policy contents
+selected by an existing older pin or alter Ruff, secret, or security checks.
+They do not install Codex hooks or enable host settings. Actual event delivery,
+rollback, and aggregate latency remain host acceptance work after owner merge
+and immutable release publication.
