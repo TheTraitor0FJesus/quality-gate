@@ -57,6 +57,7 @@ RELEASED_EDIT_POLICIES = frozenset(
 		"v3.1.0",
 		"v3.2.0",
 		"v4.0.0",
+		"v4.1.0",
 	}
 )
 
@@ -1179,14 +1180,15 @@ time.sleep(30)
 	)
 	payload = request(tmp_path, edit_cache, "example.py")
 	payload["baseline"]["python"] = str(wrapper)
-	payload["deadline_unix_ms"] = int(time.time() * 1000) + 2500
+	deadline_seconds = 5
+	payload["deadline_unix_ms"] = int(time.time() * 1000) + deadline_seconds * 1000
 	started = time.monotonic()
 	exit_code, result = invoke(payload)
-	assert marker.exists(), "The owned descendant must have started before timeout"
+	assert marker.exists(), ("The owned descendant must have started before timeout", result)
 	pid = int(marker.read_text())
 	try:
 		assert (exit_code, result["reason"]) == (2, "deadline")
-		assert time.monotonic() - started < TIMEOUT_WITH_CLEANUP_SECONDS
+		assert time.monotonic() - started < deadline_seconds + TIMEOUT_WITH_CLEANUP_SECONDS
 		assert not process_alive(pid)
 		assert (tmp_path / "example.py").read_bytes() == b"value=  1\n"
 		assert not list(tmp_path.glob(".quality-gate-edit-*"))

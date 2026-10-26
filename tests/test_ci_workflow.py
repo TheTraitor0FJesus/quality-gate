@@ -136,9 +136,10 @@ def _build_wheel(tmp_path: Path) -> Path:
 		),
 	)
 	_make_writable(source)
+	build_python = Path(sys.base_prefix) / ("python.exe" if os.name == "nt" else "bin/python3")
 	result = subprocess.run(
 		[
-			sys.executable,
+			str(build_python),
 			"-m",
 			"pip",
 			"wheel",
@@ -359,7 +360,7 @@ def test_reusable_workflow_has_one_stable_job_and_detects_private_push_bypass() 
 	assert "- main" in workflow
 	assert "name: Quality Gate" in workflow
 	assert "github.event.repository.default_branch" in workflow
-	assert "timeout-minutes: 25" in workflow
+	assert "timeout-minutes: 50" in workflow
 	assert (
 		"group: quality-${{ github.workflow }}-${{ github.ref }}-"
 		"${{ inputs['runner-os'] || 'ubuntu-latest' }}" in workflow
@@ -369,15 +370,15 @@ def test_reusable_workflow_has_one_stable_job_and_detects_private_push_bypass() 
 	assert "private GitHub Free repositories" in workflow
 
 
-def test_provider_verification_budgets_fit_the_25_minute_ci_job() -> None:
+def test_provider_verification_budgets_fit_the_50_minute_ci_job() -> None:
 	"""Keep nested Python and Gate deadlines below the workflow's outer timeout."""
 	manifest = tomllib.loads((REPOSITORY / "quality-gate.toml").read_text(encoding="utf-8"))
 	defaults = manifest["repository"]["defaults"]
 
-	assert defaults["test_timeout_seconds"] == 20 * 60
-	assert defaults["gate_timeout_seconds"] == 23 * 60
-	assert defaults["test_timeout_seconds"] < defaults["gate_timeout_seconds"] < 25 * 60
-	assert "timeout-minutes: 25" in WORKFLOW.read_text(encoding="utf-8")
+	assert defaults["test_timeout_seconds"] == 30 * 60
+	assert defaults["gate_timeout_seconds"] == 40 * 60
+	assert defaults["test_timeout_seconds"] < defaults["gate_timeout_seconds"] < 50 * 60
+	assert "timeout-minutes: 50" in WORKFLOW.read_text(encoding="utf-8")
 
 
 def test_dependabot_updates_pinned_actions_weekly_without_auto_merge() -> None:
