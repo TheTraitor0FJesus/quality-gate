@@ -305,7 +305,7 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert 'QUALITY_GATE_WHEEL="$(python .quality-gate-ci/quality_gate/ci_release.py' in workflow
 	assert "manifest_python.outputs.versions" in workflow
 	assert 'default: "3.12"' not in workflow
-	assert manifest["quality"]["policy_release"] == "v4.1.0"
+	assert manifest["quality"]["policy_release"] == "v4.2.0"
 	version = tomllib.loads((REPOSITORY / ".release" / "version.toml").read_text(encoding="utf-8"))
 	assert template["quality"]["policy_release"] == f"v{version['version']}"
 	assert fixture["quality"]["policy_release"] == manifest["quality"]["policy_release"]
@@ -425,8 +425,7 @@ def test_parity_requests_verbose_status_lines_for_the_complete_check_map(
 			command,
 			0,
 			stdout=(
-				"first.check: passed - complete\n"
-				"second.check: unchecked - runtime unavailable\n"
+				"first.check: passed - complete\nsecond.check: unchecked - runtime unavailable\n"
 			),
 			stderr="",
 		)

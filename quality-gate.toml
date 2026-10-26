@@ -11,7 +11,7 @@ expires_on = "2027-08-26"
 
 [quality]
 schema = 2
-policy_release = "v4.1.0"
+policy_release = "v4.2.0"
 
 [repository]
 name = "quality-gate"
@@ -22,6 +22,7 @@ required_documents = [
     ".agents/skills/post-release-quality-gate/agents/openai.yaml",
     "docs/audits/provider-v4.0.0-acceptance.md",
     "docs/audits/provider-v4.1.0-acceptance.md",
+    "docs/audits/provider-v4.2.0-acceptance.md",
     ".release/release-tools.toml",
     ".release/release-requirements.txt",
     ".release/version.toml",
