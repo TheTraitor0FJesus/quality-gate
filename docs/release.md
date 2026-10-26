@@ -55,6 +55,16 @@ requests remain compatible. Host activation stays separate. This is MINOR relati
 v4.0.0. The [provider v4.1.0 acceptance record](audits/provider-v4.1.0-acceptance.md) records its
 immutable release evidence and current self-policy activation.
 
+The published v4.2.0 release adds a user-local queue for full Gate runs. Two runs may proceed across
+repositories for the same user; later runs wait up to 120 seconds by default and return `unchecked`
+without starting when the wait budget expires. `QUALITY_GATE_QUEUE_TIMEOUT_SECONDS` configures the
+wait. Ruff uses four worker threads by default, adjustable with `QUALITY_GATE_RUFF_THREADS`. CI
+skips the local queue. Provider budgets are 30 minutes for pytest, 40 minutes for the Gate, and
+50 minutes for CI. Before activating v4.2.0 in a native commit hook, its external timeout bridge must
+cover the full Gate and configured queue wait. This is MINOR relative to published v4.1.0. The
+[provider v4.2.0 acceptance record](audits/provider-v4.2.0-acceptance.md) records its immutable
+release evidence and self-policy activation.
+
 The v3.2.0 release added [read-only touched-file integrity](edit-integrity.md)
 and retained the v3.1.0 typing interface, including its separately selected
 background schema. This was MINOR relative to published v3.1.0. The
@@ -79,7 +89,7 @@ actual-secret fingerprints in the shared scanner transport. Persisted waivers fo
 the old redacted placeholder require explicit review and reissue, so this is MAJOR
 relative to v2.6.2. Interface schemas and detector rules remain unchanged. Both edit
 interfaces retain exact v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2 policy compatibility and
-support the published v3.0.0, v3.1.0, v3.2.0, v4.0.0, and v4.1.0 policies.
+support the published v3.0.0, v3.1.0, v3.2.0, v4.0.0, v4.1.0, and v4.2.0 policies.
 The source policy pin stays on its current published release; activation uses the separate route above. Host
 installation/activation and the initial v2.4.2 consumer's `edit-setup` remain separate post-publication
 work; the provider acceptance record does not establish installed host-event acceptance.
