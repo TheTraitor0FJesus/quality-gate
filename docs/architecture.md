@@ -4,7 +4,7 @@ Use this map before non-trivial codebase questions, design work, or code changes
 
 ## Navigation
 
-- **CLI and orchestration** — `quality_gate/cli.py` parses commands; `quality_gate/contracts.py` validates schema 2 and defines verdicts; `quality_gate/migration.py` prints read-only schema 1 proposals; `quality_gate/snapshot.py` materializes the read-only Git index candidate; `quality_gate/integrity.py` checks Git hygiene, workflow hygiene, and mechanical documentation health; `quality_gate/lessons.py` validates escaped-defect lessons and release readiness; `quality_gate/runner.py` executes checks and audits against that candidate; `quality_gate/launcher.py` selects a pinned release and prepares consumer runtimes; `quality_gate/hooks.py` exposes the native Git launch and push protocol; `quality_gate/hook_setup.py` installs managed wrappers safely; `quality_gate/release.py` validates a self-host source and exact release artifact before publication.
+- **CLI and orchestration** — `quality_gate/cli.py` parses commands; `quality_gate/contracts.py` validates schema 2 and defines verdicts; `quality_gate/migration.py` prints read-only schema 1 proposals; `quality_gate/snapshot.py` materializes the read-only Git index candidate; `quality_gate/integrity.py` checks Git hygiene, workflow hygiene, and mechanical documentation health; `quality_gate/lessons.py` validates escaped-defect lessons and release readiness; `quality_gate/runner.py` executes checks and audits against that candidate; `quality_gate/launcher.py` selects a pinned release and prepares consumer runtimes; `quality_gate/hooks.py` exposes the native Git launch and push protocol; `quality_gate/hook_setup.py` installs managed wrappers safely; `quality_gate/release.py` validates a self-host source and exact release artifact before publication and checks the resolved Windows workspace path against its 180-character limit.
 - **Verdict reporting** — `quality_gate/reporting.py` summarizes every observed status, keeps every failed/unchecked result visible, and bounds per-check and overall redacted finding details; `quality_gate/contracts.py` carries known and unknown upstream finding-omission metadata.
 - **Policy distribution** — `quality_gate/release_contract.py` defines the exact unified-release inventory; `quality_gate/distribution.py` validates release manifests, that inventory, and SHA-256 digests, installs releases through a locked same-volume replacement, quarantines corrupt entries, and retains active/previous selections.
 - **Temporary workspace** — `quality_gate/temp_workspace.py` clears stale inactive run directories under the checked repository's ignored `temp/`, routes Python and child-process temporary files into a per-run subdirectory, and removes that subdirectory at exit. Read-only checkouts and candidate snapshots use a private hashed workspace per repository under user-local system temp. Staging beside persistent caches and atomic replacement targets stays beside those targets.
@@ -23,13 +23,16 @@ Use this map before non-trivial codebase questions, design work, or code changes
   runs the source-free failure boundary. `edit_inputs.py` captures explicit files and
   configuration freshness; `edit_policy.py` verifies exact compatible releases and explicitly
   provisions native Ruff through `edit-setup`; `edit_check.py` selects only relevant prepared
-  runtimes, batches isolated safe fixes/format/final checks, then publishes current bytes.
+  runtimes, preserves the legacy synchronous writer-and-diagnostics path, or separates the explicit
+  `phase: write` safe-fix/formatting path from the read-only `phase: validate` final checks. Only the
+  writer phases publish current bytes.
   `edit_reuse.py` stores bounded authenticated complete results; fresh provider selection,
   artifact/configuration checks and `edit_inputs.py` import-layout facts govern reuse.
   This path uses schema validation through `contracts.parse_manifest` without expanding
   supplemental test targets. It creates no Git-index candidate and runs no full checks or setup.
-  The supervisor imports the explicit engine directory or wheel and starts the worker in
-  its private same-volume workspace; an archive path is never used as a working directory.
+  The supervisor imports the explicit engine directory or wheel and starts the writer in
+  its private same-volume workspace; read-only validation uses a temporary workspace outside
+  the project. An archive path is never used as a working directory.
   See [the public protocol and compatibility contract](edit-check.md).
 
 - **Working-tree secret checking** — public `edit-secrets` shares `edit_cli.py`,
@@ -85,7 +88,9 @@ Use this map before non-trivial codebase questions, design work, or code changes
   [the integrity protocol](edit-integrity.md).
 - **Local and CI checking** — `quality-gate check` → `quality_gate/temp_workspace.py` → `quality_gate/snapshot.py` → `quality_gate/runner.py` → validated manifest → structured verdict → Git hygiene, Gitleaks, workflow/documentation checks, staged web asset budgets, standalone Biome lint and formatting, Ruff, mypy, deptry dependency hygiene, pytest, and report-only coverage when pinned. Default reports summarize observed outcomes and retain every failed/unchecked result; `--verbose` lists all statuses and available redacted findings. `.github/workflows/quality.yml` verifies and installs the release wheel, syncs the manifest release, prepares declared Python versions, and passes pull-request base/head SHAs; `quality_gate/ci_parity.py` requests verbose output from that installed console entry point so its parser receives the complete status map, then emits the comparison surface; `quality-gate audit` adds full reachable-history secret scanning and complete lessons.
   Provider self-checks also prepare the hash-locked release build backend for real-wheel
-  test fixtures; consumer runs keep their own dependency preparation contract.
+  test fixtures; `tests/conftest.py` checks the nested release-test workspace path before any tests
+  run; consumer runs keep their own dependency preparation contract. This 180-character bound is
+  specific to release workspaces and does not limit consumer checkout paths.
 - **Release and runtime preparation** — `quality-gate sync` → verified immutable release cache → `quality-gate setup` → repository-keyed runtime fingerprint → isolated Python environment; `quality-gate doctor` reports missing prerequisites as unchecked.
 - **Project bootstrap** — `$setup-repo` → `quality-gate.toml` and a CI caller → reusable `quality.yml`.
 - **Unified agent verification** — typed test-runner `scope: full` → repository-owned supplemental tests when declared → one staged Quality Gate; without a manifest, ordinary complete-suite discovery remains in use.

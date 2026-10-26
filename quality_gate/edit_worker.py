@@ -43,6 +43,16 @@ def _handlers(
 	return execute, unchecked
 
 
+def _apply_phase_metadata(result: dict[str, Any], request: dict[str, Any] | None) -> None:
+	if request is None:
+		return
+	phase = request.get("phase")
+	if phase in {"write", "validate"}:
+		result["phase"] = phase
+	if phase == "validate":
+		result["writes_may_have_occurred"] = False
+
+
 def main(
 	workspace: Path, *, secrets: bool = False, types: bool = False, integrity: bool = False
 ) -> None:
@@ -80,6 +90,7 @@ def main(
 	# never leak an exception containing source, configuration or subprocess output.
 	except Exception:
 		result = unchecked("tool_output")
+	_apply_phase_metadata(result, request)
 	if types:
 		result.update(background_identity(request) | background)
 	sys.stdout.buffer.write(encode(result))

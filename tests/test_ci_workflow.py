@@ -369,6 +369,17 @@ def test_reusable_workflow_has_one_stable_job_and_detects_private_push_bypass() 
 	assert "private GitHub Free repositories" in workflow
 
 
+def test_provider_verification_budgets_fit_the_25_minute_ci_job() -> None:
+	"""Keep nested Python and Gate deadlines below the workflow's outer timeout."""
+	manifest = tomllib.loads((REPOSITORY / "quality-gate.toml").read_text(encoding="utf-8"))
+	defaults = manifest["repository"]["defaults"]
+
+	assert defaults["test_timeout_seconds"] == 20 * 60
+	assert defaults["gate_timeout_seconds"] == 23 * 60
+	assert defaults["test_timeout_seconds"] < defaults["gate_timeout_seconds"] < 25 * 60
+	assert "timeout-minutes: 25" in WORKFLOW.read_text(encoding="utf-8")
+
+
 def test_dependabot_updates_pinned_actions_weekly_without_auto_merge() -> None:
 	"""Verify Dependabot proposes weekly GitHub Actions updates without merging them."""
 

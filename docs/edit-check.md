@@ -9,7 +9,8 @@ An open provider PR does not install a hook or publish an immutable release.
 ## Invocation and request
 
 Install the interface engine from the published Quality Gate **v4.0.0** release. It supports
-all exact policy pins in the compatibility matrix below, including v4.0.0. Invoke
+the exact published policy pins in the compatibility matrix below, including v4.0.0. The v4.1.0
+candidate becomes installable after publication. Invoke
 `quality-gate edit-check` or `python -I -B -m quality_gate.cli edit-check` with one UTF-8
 JSON object on stdin and close stdin. The equivalent entry point is `quality-gate-edit`.
 The regular module route dispatches before loading full Gate orchestration and is the
@@ -42,15 +43,25 @@ to v2.6.1 after publication while retaining the selected policy pin.
 }
 ```
 
+The request above omits `phase` and retains the existing synchronous writer-and-diagnostics
+behavior. Add `"phase": "write"` to apply only approved fixes and formatting synchronously;
+it does not run final lint diagnostics. After that writer completes, add
+`"phase": "validate"` for read-only final lint and format checks. Both phases accept the same
+exact file hashes, manifest/runtime selection and cache inputs. They are available only in engine
+versions that implement them; older immutable engines reject the extra key and return `unchecked`.
+This source change requires publication and verification of a compatible immutable engine before
+host activation.
+
 `root` is required, absolute, and may be a non-Git directory. Paths are exact,
 root-relative files, not globs or directories. Duplicate paths with the same hash are
 coalesced; conflicting hashes are invalid. Hashes cover raw bytes, including line endings.
 The host computes `deadline_unix_ms` immediately before launching the engine, from its
-shared edit budget. The example timestamp is illustrative: send a fresh deadline, at
-most 10 seconds ahead. Startup, selection, integrity, tools, writes and delivery share
-that deadline. The host must close stdin and supervise the complete invocation with
-the same deadline; the CLI also bounds request intake to 10 seconds. Allow a bounded
-process-tree cleanup interval on timeout; no result from a timed-out invocation is clean.
+shared edit budget. The example timestamp is illustrative. A writer request is limited
+to 10 seconds; `phase: "validate"` may use the shared background work limit of 30 seconds.
+Startup, selection, integrity, tools and delivery share the selected deadline. The host
+must close stdin and supervise the complete invocation with the same deadline; the CLI
+also bounds request intake to 10 seconds. Allow a bounded process-tree cleanup interval
+on timeout; no result from a timed-out invocation is clean.
 `cache_dir` is optional (the normal Gate user cache is the default). Unknown keys and
 unsupported schema versions are unchecked. An empty file list is explicitly inapplicable.
 
@@ -95,20 +106,23 @@ a fallback for an invalid manifest, incompatible managed pin, or missing managed
 
 ## Selection, preparation and compatibility
 
-| Selected policy | v3.0.0 engine | v3.1.0 engine | v3.2.0 engine | v4.0.0 engine | Coverage |
-| --- | --- | --- | --- | --- | --- |
-| v2.4.2 | Supported | Supported | Supported | Supported | Exact old policy |
-| v2.5.0 | Supported | Supported | Supported | Supported | Exact old policy |
-| v2.6.0 | Supported | Supported | Supported | Supported | Exact published policy |
-| v2.6.1 | Supported | Supported | Supported | Supported | Exact published policy |
-| v2.6.2 | Supported | Supported | Supported | Supported | Exact published policy |
-| v3.0.0 | Supported | Supported | Supported | Supported | Exact published policy |
-| v3.1.0 | — | Supported | Supported | Supported | Published policy |
-| v3.2.0 | — | — | Supported | Supported | Published policy |
-| v4.0.0 | — | — | — | Supported | Published policy |
-| Any other version | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | Explicit policy update required |
+| Selected policy | v3.0.0 engine | v3.1.0 engine | v3.2.0 engine | v4.0.0 engine | v4.1.0 engine | Coverage |
+| --- | --- | --- | --- | --- | --- | --- |
+| v2.4.2 | Supported | Supported | Supported | Supported | Supported | Exact old policy; initial skills consumer pin |
+| v2.5.0 | Supported | Supported | Supported | Supported | Supported | Exact old policy |
+| v2.6.0 | Supported | Supported | Supported | Supported | Supported | Exact published policy |
+| v2.6.1 | Supported | Supported | Supported | Supported | Supported | Exact published policy |
+| v2.6.2 | Supported | Supported | Supported | Supported | Supported | Exact published policy |
+| v3.0.0 | Supported | Supported | Supported | Supported | Supported | Exact published policy |
+| v3.1.0 | — | Supported | Supported | Supported | Supported | Published policy |
+| v3.2.0 | — | — | Supported | Supported | Supported | Published policy |
+| v4.0.0 | — | — | — | Supported | Supported | Published policy |
+| v4.1.0 | — | — | — | — | Supported after publication | Candidate policy |
+| Any other version | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | Explicit consumer update required |
 
-Other exact versions remain unsupported.
+Engine v4.1.0 retains the exact supported pins above and adds its own policy after
+immutable publication. Older engines do not support newer policy releases or the new
+`phase` request field.
 
 The compatibility adapter uses schema 2 and the same component path membership and
 released Ruff configuration as these releases. Their Python manifest/runtime/Ruff
@@ -174,12 +188,23 @@ Eligible files are batched by selected release and runtime. Work happens on isol
 copies with the same relative names in a supervisor-owned `.quality-gate-edit-*` directory
 under the explicit root. Keeping this workspace on the same volume permits atomic file
 replacement. The supervisor removes it after stopping the worker, including on timeout.
-The pipeline is:
+For `phase: "validate"`, the temporary workspace is outside the project and the provider
+never publishes staged bytes back to the project. It rechecks current file, configuration,
+release and runtime identities before returning.
+
+With `phase` omitted, the legacy synchronous writer-and-diagnostics pipeline is:
 
 1. Ruff safe fix: only reviewed `I001` import ordering, `--no-unsafe-fixes`, explicit
    `F401` unfixable. All other enabled lint rules still run; unused imports survive.
 2. Ruff format, even when the first step reports residual lint errors.
 3. Ruff lint without fixes, JSON findings, then Ruff format `--check` on final bytes.
+
+With `phase: "write"`, the provider runs only the safe fix and format steps above. It returns
+the resulting file identities and an empty findings list; this confirms the writer phase completed,
+not that final lint diagnostics passed. A syntax error that prevents formatting is left for the
+validation phase to report. `phase: "validate"` skips both write steps and runs only Ruff
+`check --no-fix` and `format --check` against the exact current bytes. It preserves fixable findings
+such as `I001` and `F401` for the host to deliver after the writer's automatic edits have finished.
 
 No tests, mypy, dependency/history/secret scanning, Git-index candidate, full-repository
 discovery or setup is part of this operation. Relevant working-tree manifest,
@@ -230,6 +255,12 @@ fresh bytes and retry the entire batch. Results never claim checks for a stale v
 
 The schema is additive only within version 1: readers must reject unknown schema
 versions and validate required fields/types/status consistency before accepting results.
+Write-phase responses include `"phase": "write"`; they contain no findings and set
+`writes_may_have_occurred` to whether any file changed. A passed write phase confirms only
+that approved fixes and formatting completed. Validation-phase responses include
+`"phase": "validate"`; complete responses set `writes_may_have_occurred` to false, each
+file's `changed` to false, and its `sha256` to the same value as `input_sha256`. The provider
+transport rejects a response that does not preserve these phase-specific invariants.
 `selection` indexes `selections`. `inputs` contains configuration identities, never
 contents. Absence of a relevant optional configuration file is recorded with `sha256: null`.
 `process_count` counts direct provider starts (entry, worker, runtime probe and Ruff
@@ -237,19 +268,21 @@ commands). It excludes the host bridge, console launchers and OS interpreter red
 the host must measure those separately for complete process accounting.
 `elapsed_ms` starts at the JSON entry function, after Python module initialization;
 measure external launch-to-response wall time for complete startup and delivery cost.
-The final file hash, not the input hash, is the identity for subsequent read-only hooks.
+After a writer changes a file, use its final hash for the next read-only validation request.
+The validation phase reports the unchanged input hash and final hash as the same identity.
 The result is not a substitute for full Gate verification.
 
 | Status | Exit | Meaning |
 | --- | ---: | --- |
-| `passed` | 0 | Every eligible file passed final lint and format checks |
+| `passed` | 0 | With no phase or `validate`, every eligible file passed final lint and format checks; with `write`, approved fixes and formatting completed |
 | `failed` | 1 | Complete checks found residual lint/syntax/format failures |
 | `not_applicable` | 0 | No eligible files (empty, non-Python or policy excluded) |
 | `unchecked` | 2 | Incomplete verification; never accept as clean |
 
 Unchecked replies use fixed reason/action codes, no exception text. `files: []` on
-failure means discard earlier coverage, and `writes_may_have_occurred: true` requires
-fresh capture before retry. Reasons include `invalid_request`, `deadline`, `unsafe_path`,
+failure means discard earlier coverage. Accepted validation-phase failures also identify
+the phase and guarantee that project files were not written; writer failures with
+`writes_may_have_occurred: true` require fresh capture before retry. Reasons include `invalid_request`, `deadline`, `unsafe_path`,
 `limits`, `stale_input`, `manifest`, `unsupported_policy`, `release`, `runtime`, `tool`,
 `configuration`, `tool_output` and `io`.
 If output delivery blocks or fails, the process exits 2 at the common deadline and may
@@ -277,7 +310,8 @@ so their response alone is insufficient for safe host-owned reuse.
 
 Every invocation freshly resolves the exact selected release and validates its full
 inventory, native Ruff bytes, interpreter bytes/version and prepared runtime metadata.
-The reuse identity binds engine version, canonical root, ordered complete file batch
+The reuse identity includes the phase, so legacy, write and validate results never share a cache entry.
+It also binds engine version, canonical root, ordered complete file batch
 and final hashes, managed/baseline coverage, selection identities, configuration,
 waiver/dependency inputs and artifact paths/digests. It also observes filesystem facts
 under the explicit root and `src` for bounded source identifier/dotted-name candidates:
@@ -313,9 +347,15 @@ Session/event attribution and deduplicating delivered messages remain host respo
 
 The reuse feature shipped as PATCH v2.6.2. The separate secret interface shipped in
 v3.0.0, and the published v4.0.0 engine supports the exact policies in the matrix above.
-The provider manifest now selects policy v4.0.0. Host installation, baseline selection,
-result-reader validation, real Codex-event delivery, and latency acceptance remain
-separate host work. The provider release does not activate host settings.
+Engine v4.1.0 adds the explicit writer and read-only validation phases while retaining
+the schema 1 request and exact policy compatibility matrix above. The v4.0.0 engine and
+older releases reject the new `phase` field. Owner merge and the existing Windows/Linux
+release verification and publication must finish before host installation. The host must
+then record the engine wheel and release identities, retain and provision `edit-setup` for
+its baseline and managed pins, validate its result reader, and complete real event and
+latency acceptance. No policy pin migration is required, but the host must select the v4.1.0
+engine before sending either phase. This PR does not activate host settings or change
+consumer pins.
 
 Provider test commands, real release comparison, cleanup, timing evidence and limitations
 are recorded in [the provider acceptance record](audits/edit-check-provider.md).

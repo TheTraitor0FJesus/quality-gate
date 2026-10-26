@@ -63,6 +63,8 @@ class Invocation:
 
 	def __init__(self, request: dict[str, Any], deadline: float, workspace: Path) -> None:
 		self.request = request
+		self.read_only = request.get("phase") == "validate"
+		self.write_only = request.get("phase") == "write"
 		root = Path(request["root"])
 		if (
 			not root.is_absolute()
@@ -268,8 +270,61 @@ class Invocation:
 			staged.parent.mkdir(parents=True, exist_ok=True)
 			staged.write_bytes(file.content)
 		paths = [str(workspace / file.path) for file in eligible]
+		if self.read_only:
+			return self.validate_batch(selection, eligible, common, paths, workspace, included)
+		syntax = self.apply_batch(selection, eligible, common, paths, workspace, included)
+		if self.write_only:
+			return {
+				file.path: {
+					"status": "passed",
+					"format": "not_applicable" if file.path in syntax else "passed",
+					"findings": [],
+				}
+				for file in eligible
+			}
 		commands = [
+			["check", *common, "--no-fix", "--output-format", "json"],
+			["format", *common, "--check", "--output-format", "json"],
+		]
+		lint_code, lint_output, _stderr = self.run(
+			[str(selection.tool), *commands[0], "--", *paths], cwd=workspace
+		)
+		findings = self.findings(lint_code, lint_output, workspace, included)
+		check_code, format_output, _stderr = self.run(
+			[str(selection.tool), *commands[1], "--", *paths], cwd=workspace
+		)
+		syntax = {item["path"] for item in findings if item["rule"] == "invalid-syntax"}
+		if check_code not in {0, 1, EXIT_UNCHECKED} or (
+			check_code == EXIT_UNCHECKED and not syntax
+		):
+			raise EditError("tool_output")
+		unformatted = _format_report(check_code, format_output, workspace, included)
+		for file in eligible:
+			own_findings = [
+				{key: value for key, value in item.items() if key != "path"}
+				for item in findings
+				if item["path"] == file.path
+			]
+			results[file.path] = {
+				"status": "failed" if own_findings or file.path in unformatted else "passed",
+				"format": "failed" if file.path in syntax | unformatted else "passed",
+				"findings": own_findings,
+			}
+		return results
+
+	def apply_batch(
+		self,
+		selection: Selection,
+		files: list[SourceFile],
+		common: list[str],
+		paths: list[str],
+		workspace: Path,
+		included: set[str],
+	) -> set[str]:
+		"""Apply only the approved fixes and formatting to isolated file copies."""
+		fix_code, fix_output, _stderr = self.run(
 			[
+				str(selection.tool),
 				"check",
 				*common,
 				"--fix",
@@ -280,32 +335,65 @@ class Invocation:
 				"--no-unsafe-fixes",
 				"--output-format",
 				"json",
+				"--",
+				*paths,
 			],
-			["format", *common],
-			["check", *common, "--no-fix", "--output-format", "json"],
-			["format", *common, "--check", "--output-format", "json"],
-		]
-		fix_code, fix_output, _stderr = self.run(
-			[str(selection.tool), *commands[0], "--", *paths], cwd=workspace
+			cwd=workspace,
 		)
-		self.findings(fix_code, fix_output, workspace, included)
+		findings = self.findings(fix_code, fix_output, workspace, included)
 		format_code, _output, _stderr = self.run(
-			[str(selection.tool), *commands[1], "--", *paths], cwd=workspace
-		)
-		lint_code, lint_output, _stderr = self.run(
-			[str(selection.tool), *commands[2], "--", *paths], cwd=workspace
-		)
-		findings = self.findings(lint_code, lint_output, workspace, included)
-		check_code, format_output, _stderr = self.run(
-			[str(selection.tool), *commands[3], "--", *paths], cwd=workspace
+			[str(selection.tool), "format", *common, "--", *paths], cwd=workspace
 		)
 		syntax = {item["path"] for item in findings if item["rule"] == "invalid-syntax"}
-		if (format_code not in {0, EXIT_UNCHECKED} or check_code not in {0, 1, EXIT_UNCHECKED}) or (
-			(format_code == EXIT_UNCHECKED or check_code == EXIT_UNCHECKED) and not syntax
+		if format_code not in {0, EXIT_UNCHECKED} or (format_code == EXIT_UNCHECKED and not syntax):
+			raise EditError("tool_output")
+		return syntax
+
+	def validate_batch(
+		self,
+		selection: Selection,
+		files: list[SourceFile],
+		common: list[str],
+		paths: list[str],
+		workspace: Path,
+		included: set[str],
+	) -> dict[str, dict[str, Any]]:
+		"""Run final lint and format checks on copies without changing project files."""
+		lint_code, lint_output, _stderr = self.run(
+			[
+				str(selection.tool),
+				"check",
+				*common,
+				"--no-fix",
+				"--output-format",
+				"json",
+				"--",
+				*paths,
+			],
+			cwd=workspace,
+		)
+		findings = self.findings(lint_code, lint_output, workspace, included)
+		format_code, format_output, _stderr = self.run(
+			[
+				str(selection.tool),
+				"format",
+				*common,
+				"--check",
+				"--output-format",
+				"json",
+				"--",
+				*paths,
+			],
+			cwd=workspace,
+		)
+		syntax = {item["path"] for item in findings if item["rule"] == "invalid-syntax"}
+		if format_code not in {0, 1, EXIT_UNCHECKED} or (
+			format_code == EXIT_UNCHECKED and not syntax
 		):
 			raise EditError("tool_output")
-		unformatted = _format_report(check_code, format_output, workspace, included)
-		for file in eligible:
+		unformatted = _format_report(format_code, format_output, workspace, included)
+		results: dict[str, dict[str, Any]] = {}
+		for file in files:
 			own_findings = [
 				{key: value for key, value in item.items() if key != "path"}
 				for item in findings
@@ -384,14 +472,7 @@ def _component(manifest: Manifest | None, path: str) -> PythonComponent | None:
 def _publish(
 	invocation: Invocation, files: list[SourceFile], workspace: Path, records: list[dict[str, Any]]
 ) -> None:
-	invocation.assert_configuration_current()
-	invocation.assert_artifacts_current()
-	for file in files:
-		if (
-			sha256(read_bounded(regular_path(invocation.root, file.path), MAX_FILE_BYTES))
-			!= file.sha256
-		):
-			raise EditError("stale_input")
+	_assert_inputs_current(invocation, files)
 	for file, record in zip(files, records, strict=True):
 		if not record["changed"]:
 			continue
@@ -412,8 +493,19 @@ def _publish(
 			raise EditError("stale_input")
 
 
+def _assert_inputs_current(invocation: Invocation, files: list[SourceFile]) -> None:
+	invocation.assert_configuration_current()
+	invocation.assert_artifacts_current()
+	for file in files:
+		if (
+			sha256(read_bounded(regular_path(invocation.root, file.path), MAX_FILE_BYTES))
+			!= file.sha256
+		):
+			raise EditError("stale_input")
+
+
 def execute(request: dict[str, Any], deadline: float, workspace: Path) -> dict[str, Any]:
-	"""Execute one independently isolated batch; incomplete verification fails closed."""
+	"""Execute one isolated writer or read-only validation batch; fail closed when incomplete."""
 	invocation = Invocation(request, deadline, workspace)
 	try:
 		return _execute(invocation, workspace)
@@ -430,6 +522,11 @@ def _reuse_identity(
 	return identity_digest(
 		{
 			"engine": __version__,
+			"phase": "validate"
+			if invocation.read_only
+			else "write-only"
+			if invocation.write_only
+			else "legacy",
 			"root": str(invocation.root),
 			"files": [
 				{
@@ -463,7 +560,10 @@ def _reused_result(
 	for record in cached["files"]:
 		record.update(input_sha256=record["sha256"], changed=False)
 	cached.update(process_count=invocation.process_count, writes_may_have_occurred=False)
-	_publish(invocation, files, workspace, cached["files"])
+	if invocation.read_only:
+		_assert_inputs_current(invocation, files)
+	else:
+		_publish(invocation, files, workspace, cached["files"])
 	return cached
 
 
@@ -479,16 +579,13 @@ def _working_manifest(configuration: Configuration) -> Manifest | None:
 		raise EditError("manifest") from error
 
 
-def _execute(invocation: Invocation, workspace: Path) -> dict[str, Any]:
-	request = invocation.request
-	files = sources(invocation.root, request["files"])
-	invocation.imports = ImportContext(invocation.root, files)
-	configuration = invocation.configuration
-	manifest = _working_manifest(configuration)
-	configuration.for_sources(files)
+def _source_batches(
+	invocation: Invocation, files: list[SourceFile], manifest: Manifest | None
+) -> tuple[list[dict[str, Any]], list[Selection], dict[int, list[SourceFile]]]:
+	"""Build result records and the exact policy batches for these source files."""
 	batches: dict[int, list[SourceFile]] = {}
 	selections: list[Selection] = []
-	records = []
+	records: list[dict[str, Any]] = []
 	for file in files:
 		component = _component(manifest, file.path)
 		record: dict[str, Any] = {
@@ -511,30 +608,58 @@ def _execute(invocation: Invocation, workspace: Path) -> dict[str, Any]:
 			record["selection"] = index
 			batches.setdefault(index, []).append(file)
 		records.append(record)
-	cached = _reused_result(invocation, files, records, selections, workspace)
-	if cached is not None:
-		return cached
+	return records, selections, batches
+
+
+def _apply_batches(
+	invocation: Invocation,
+	workspace: Path,
+	files: list[SourceFile],
+	selections: list[Selection],
+	batches: dict[int, list[SourceFile]],
+	records: list[dict[str, Any]],
+) -> None:
 	for index, batch in batches.items():
 		results = invocation.check_batch(selections[index], batch, workspace)
 		for record in records:
-			if record["path"] in results:
-				record.update(results[record["path"]])
-				staged = workspace / record["path"]
-				if record["status"] != "not_applicable":
-					record["sha256"] = sha256(read_bounded(staged, MAX_FILE_BYTES))
-					record["changed"] = record["sha256"] != record["input_sha256"]
+			if record["path"] not in results:
+				continue
+			record.update(results[record["path"]])
+			if record["status"] == "not_applicable":
+				continue
+			staged = workspace / record["path"]
+			record["sha256"] = sha256(read_bounded(staged, MAX_FILE_BYTES))
+			record["changed"] = record["sha256"] != record["input_sha256"]
+
+
+def _result_status(records: list[dict[str, Any]]) -> str:
+	statuses = {record["status"] for record in records}
+	if "failed" in statuses:
+		return "failed"
+	if "passed" in statuses:
+		return "passed"
+	return "not_applicable"
+
+
+def _execute(invocation: Invocation, workspace: Path) -> dict[str, Any]:
+	request = invocation.request
+	files = sources(invocation.root, request["files"])
+	invocation.imports = ImportContext(invocation.root, files)
+	configuration = invocation.configuration
+	manifest = _working_manifest(configuration)
+	configuration.for_sources(files)
+	records, selections, batches = _source_batches(invocation, files, manifest)
+	cached = _reused_result(invocation, files, records, selections, workspace)
+	if cached is not None:
+		return cached
+	_apply_batches(invocation, workspace, files, selections, batches, records)
 	if sum(len(record["findings"]) for record in records) > MAX_FINDINGS:
 		raise EditError("limits")
-	statuses = {record["status"] for record in records}
 	result = {
 		"schema": 1,
 		"engine_version": __version__,
 		"root": str(invocation.root),
-		"status": "failed"
-		if "failed" in statuses
-		else "passed"
-		if "passed" in statuses
-		else "not_applicable",
+		"status": _result_status(records),
 		"reason": None,
 		"files": records,
 		"selections": [selection.identity for selection in selections],
@@ -542,8 +667,13 @@ def _execute(invocation: Invocation, workspace: Path) -> dict[str, Any]:
 		"process_count": invocation.process_count,
 		"writes_may_have_occurred": any(record["changed"] for record in records),
 	}
+	if invocation.read_only:
+		result["phase"] = "validate"
 	encode(result)
-	_publish(invocation, files, workspace, records)
+	if invocation.read_only:
+		_assert_inputs_current(invocation, files)
+	else:
+		_publish(invocation, files, workspace, records)
 	ResultReuse(invocation.deadline).remember(
 		_reuse_identity(invocation, records, selections), result
 	)

@@ -23,8 +23,13 @@ import pytest
 from quality_gate import __version__
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import default_cache_root
+from quality_gate.edit_check import Invocation, execute as execute_edit_check
 from quality_gate.edit_inputs import Configuration
-from quality_gate.edit_protocol import EditError
+from quality_gate.edit_protocol import (
+	EditError,
+	SUPPORTED_POLICIES as EDIT_SUPPORTED_POLICIES,
+	decode_request,
+)
 from quality_gate.release_contract import (
 	UNIFIED_RELEASE_DEPENDENCIES,
 	UNIFIED_RELEASE_PLATFORM_TOOL_PATHS,
@@ -41,6 +46,23 @@ REUSED_PROCESSES = 3
 REUSED_TWO_SELECTION_PROCESSES = 4
 STILL_ACTIVE = 259
 TIMEOUT_WITH_CLEANUP_SECONDS = 5
+RELEASED_EDIT_POLICIES = frozenset(
+	{
+		"v2.4.2",
+		"v2.5.0",
+		"v2.6.0",
+		"v2.6.1",
+		"v2.6.2",
+		"v3.0.0",
+		"v3.1.0",
+		"v3.2.0",
+		"v4.0.0",
+	}
+)
+
+
+def test_supported_policy_matrix_keeps_all_released_pins() -> None:
+	assert EDIT_SUPPORTED_POLICIES == RELEASED_EDIT_POLICIES | {f"v{__version__}"}
 
 
 @pytest.mark.parametrize(
@@ -175,7 +197,7 @@ def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
 @pytest.fixture(scope="module")
 def wheel_cache(tmp_path_factory: pytest.TempPathFactory) -> Path:
 	cache = tmp_path_factory.mktemp("wheel-cache")
-	for version in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0", f"v{__version__}"):
+	for version in sorted(EDIT_SUPPORTED_POLICIES):
 		prepare_edit_cache(cache, version)
 	return cache
 
@@ -251,7 +273,7 @@ def test_wheel_exposes_read_only_edits_without_extraction(
 
 
 @pytest.mark.parametrize(
-	"policy", ["v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0", f"v{__version__}"]
+	"policy", sorted(EDIT_SUPPORTED_POLICIES)
 )
 @pytest.mark.parametrize("module", ["quality_gate.cli", "quality_gate.edit_cli"])
 def test_wheel_on_pythonpath_checks_working_files_without_extraction(
@@ -405,7 +427,7 @@ def test_import_layout_change_invalidates_reuse(
 
 def test_policy_selection_change_requires_fresh_ruff(tmp_path: Path, wheel_cache: Path) -> None:
 	(tmp_path / "example.py").write_bytes(b"import os\n")
-	for policy in ("v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0"):
+	for policy in sorted(EDIT_SUPPORTED_POLICIES):
 		for expected_processes in (FRESH_PROCESSES, REUSED_PROCESSES):
 			payload = request(tmp_path, wheel_cache, "example.py")
 			payload["baseline"]["policy_release"] = policy
@@ -559,6 +581,7 @@ def test_safe_fixes_keep_unused_import_and_format_residual_lint(
 	exit_code, result = invoke(request(tmp_path, edit_cache, "example.py"))
 	assert exit_code == 1, (result.get("reason"), result.get("stage"))
 	assert result["status"] == "failed"
+	assert "phase" not in result
 	file = result["files"][0]
 	assert {finding["rule"] for finding in file["findings"]} == {"F401"}
 	assert file["format"] == "passed"
@@ -568,6 +591,187 @@ def test_safe_fixes_keep_unused_import_and_format_residual_lint(
 	assert unrelated.read_bytes() == b"other=   2\n"
 	path.write_text("import os\nimport sys\n\nvalue = (os.name, sys.version)\n", encoding="utf-8")
 	assert invoke(request(tmp_path, edit_cache, "example.py"))[0] == 0
+
+
+def test_read_only_validation_reports_final_ruff_findings_without_writing(
+	tmp_path: Path, edit_cache: Path
+) -> None:
+	path = tmp_path / "example.py"
+	original = b"import sys\nimport os\n\nvalue=  1\n"
+	path.write_bytes(original)
+	original_mtime = path.stat().st_mtime_ns
+	payload = request(tmp_path, edit_cache, "example.py")
+	payload["phase"] = "validate"
+	payload["deadline_unix_ms"] = int(time.time() * 1000) + 20_000
+
+	exit_code, result = invoke(payload)
+
+	assert exit_code == 1, result
+	assert result["phase"] == "validate"
+	assert result["status"] == "failed"
+	assert result["writes_may_have_occurred"] is False
+	file = result["files"][0]
+	assert file["input_sha256"] == digest(original)
+	assert file["sha256"] == digest(original)
+	assert file["changed"] is False
+	assert {finding["rule"] for finding in file["findings"]} >= {"F401", "I001"}
+	assert file["format"] == "failed"
+	assert path.read_bytes() == original
+	assert path.stat().st_mtime_ns == original_mtime
+	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+
+
+@pytest.mark.parametrize("policy", sorted(EDIT_SUPPORTED_POLICIES))
+def test_read_only_validation_supports_every_policy_pin(
+	tmp_path: Path, wheel_cache: Path, policy: str
+) -> None:
+	path = tmp_path / "example.py"
+	original = b"value = 1\n"
+	path.write_bytes(original)
+	original_mtime = path.stat().st_mtime_ns
+	payload = request(tmp_path, wheel_cache, "example.py")
+	payload["baseline"]["policy_release"] = policy
+	payload["phase"] = "validate"
+	payload["deadline_unix_ms"] = int(time.time() * 1000) + 25_000
+
+	exit_code, result = invoke(payload)
+
+	assert exit_code == 0, result
+	assert result["phase"] == "validate"
+	assert result["status"] == "passed"
+	assert result["writes_may_have_occurred"] is False
+	assert result["selections"][0]["policy_release"] == policy
+	file = result["files"][0]
+	assert file["input_sha256"] == digest(original)
+	assert file["sha256"] == digest(original)
+	assert file["changed"] is False
+	assert path.read_bytes() == original
+	assert path.stat().st_mtime_ns == original_mtime
+	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+
+
+@pytest.mark.parametrize("changed_input", ["source", "configuration"])
+def test_read_only_validation_rejects_inputs_changed_during_checks(
+	tmp_path: Path,
+	tmp_path_factory: pytest.TempPathFactory,
+	edit_cache: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	changed_input: str,
+) -> None:
+	path = tmp_path / "example.py"
+	original = b"value = 1\n"
+	path.write_bytes(original)
+	configuration = tmp_path / "ruff.toml"
+	if changed_input == "configuration":
+		configuration.write_bytes(b"# captured before Ruff starts\n")
+	payload = request(tmp_path, edit_cache, "example.py")
+	payload["phase"] = "validate"
+	original_run = Invocation.run
+	changed = False
+
+	def run_then_change(self: Invocation, command: list[str], *, cwd: Path) -> tuple[int, bytes, bytes]:
+		nonlocal changed
+		result = original_run(self, command, cwd=cwd)
+		if command[1] == "format" and "--check" in command and not changed:
+			changed = True
+			if changed_input == "source":
+				path.write_bytes(b"value = 2\n")
+			else:
+				configuration.write_bytes(b"# changed during Ruff\n")
+		return result
+
+	monkeypatch.setattr(Invocation, "run", run_then_change)
+	with tempfile.TemporaryDirectory(
+		prefix="quality-gate-validate-test-", dir=tmp_path_factory.getbasetemp()
+	) as directory:
+		with pytest.raises(EditError, match="stale_input"):
+			execute_edit_check(
+				payload, time.monotonic() + 25, Path(directory)
+			)
+
+	assert changed
+	assert path.read_bytes() == (b"value = 2\n" if changed_input == "source" else original)
+	assert {item.name for item in tmp_path.iterdir()} == (
+		{"example.py", "ruff.toml"} if changed_input == "configuration" else {"example.py"}
+	)
+
+
+def test_write_phase_applies_only_safe_fixes_and_formatting(
+	tmp_path: Path, edit_cache: Path
+) -> None:
+	path = tmp_path / "example.py"
+	original = b"import sys\nimport os\n\nvalue=  1\n"
+	path.write_bytes(original)
+	payload = request(tmp_path, edit_cache, "example.py")
+	payload["phase"] = "write"
+
+	exit_code, result = invoke(payload)
+
+	assert exit_code == 0, result
+	assert result["phase"] == "write"
+	assert result["status"] == "passed"
+	assert result["writes_may_have_occurred"] is True
+	file = result["files"][0]
+	assert file["input_sha256"] == digest(original)
+	assert file["sha256"] == digest(path.read_bytes())
+	assert file["changed"] is True
+	assert file["findings"] == []
+	assert file["format"] == "passed"
+	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = 1\n"
+	assert "F401" not in json.dumps(result)
+	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+
+
+def test_read_only_validation_keeps_unchecked_prerequisites_incomplete(
+	tmp_path: Path, edit_cache: Path
+) -> None:
+	path = tmp_path / "example.py"
+	original = b"value = 1\n"
+	path.write_bytes(original)
+	payload = request(tmp_path, edit_cache, "example.py")
+	payload["phase"] = "validate"
+	payload["baseline"]["policy_release"] = "v99.0.0"
+
+	exit_code, result = invoke(payload)
+
+	assert exit_code == EXIT_UNCHECKED
+	assert result["status"] == "unchecked"
+	assert result["phase"] == "validate"
+	assert result["writes_may_have_occurred"] is False
+	assert path.read_bytes() == original
+	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+
+
+def test_unknown_edit_phase_is_rejected_without_falling_back_to_writer(
+	tmp_path: Path, edit_cache: Path
+) -> None:
+	path = tmp_path / "example.py"
+	original = b"value=  1\n"
+	path.write_bytes(original)
+	payload = request(tmp_path, edit_cache, "example.py")
+	payload["phase"] = "rewrite"
+
+	exit_code, result = invoke(payload)
+
+	assert exit_code == EXIT_UNCHECKED
+	assert result["status"] == "unchecked"
+	assert result["reason"] == "invalid_request"
+	assert path.read_bytes() == original
+	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+
+
+@pytest.mark.parametrize("reader", ["secrets", "types", "integrity"])
+def test_ruff_phase_is_rejected_by_other_edit_readers(tmp_path: Path, reader: str) -> None:
+	payload = {
+		"schema": 1,
+		"root": str(tmp_path),
+		"files": [],
+		"deadline_unix_ms": int(time.time() * 1000) + 5000,
+		"phase": "validate",
+	}
+
+	with pytest.raises(EditError, match="invalid_request"):
+		decode_request(json.dumps(payload).encode(), **{reader: True})
 
 
 def test_preexisting_rules_production_test_suppression_and_redaction(

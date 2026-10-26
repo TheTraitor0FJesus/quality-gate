@@ -224,6 +224,30 @@ def _windows_final_path(path: Path) -> Path:
 	return Path(final)
 
 
+def _checked_windows_workspace_path(path: Path) -> Path:
+	"""Resolve and enforce the Windows-only release workspace path limit."""
+	try:
+		final = _windows_final_path(path)
+	except (OSError, ReleaseControllerError) as error:
+		raise ReleaseControllerError(
+			"release workspace final path is unavailable; provide a shorter "
+			"--workspace-parent directory or shorten/move the worktree directory"
+		) from error
+
+	actual_length = len(str(final))
+	if actual_length > WINDOWS_MAX_WORKSPACE_PATH_CHARS:
+		required_shortening = actual_length - WINDOWS_MAX_WORKSPACE_PATH_CHARS
+		unit = "character" if required_shortening == 1 else "characters"
+		raise ReleaseControllerError(
+			f"release workspace path is too long: actual final path is {actual_length} "
+			f"characters, limit is {WINDOWS_MAX_WORKSPACE_PATH_CHARS}; shorten the parent "
+			f"by at least {required_shortening} {unit}. Provide a shorter "
+			"--workspace-parent or shorten/move the worktree directory; changing only "
+			"the Git branch name does not shorten the directory"
+		)
+	return final
+
+
 def _workspace_parents(workspace_parent: Path | str | None) -> tuple[Path, ...]:
 	if workspace_parent is None:
 		return (Path(tempfile.gettempdir()),)
@@ -259,18 +283,7 @@ def _release_workspace(workspace_parent: Path | str | None) -> Iterator[Path]:
 	with temporary:
 		workspace = Path(temporary.name)
 		if os.name == "nt":
-			try:
-				final = _windows_final_path(workspace)
-			except (OSError, ReleaseControllerError) as error:
-				raise ReleaseControllerError(
-					"release workspace final path is unavailable; provide a shorter "
-					"--workspace-parent directory"
-				) from error
-			if len(str(final)) > WINDOWS_MAX_WORKSPACE_PATH_CHARS:
-				raise ReleaseControllerError(
-					"release workspace path is too long; provide a shorter "
-					"--workspace-parent directory"
-				)
+			_checked_windows_workspace_path(workspace)
 		yield workspace
 
 
@@ -278,17 +291,7 @@ def _default_release_workspace() -> Path:
 	workspace = Path(tempfile.gettempdir())
 	if os.name != "nt":
 		return workspace
-	try:
-		final = _windows_final_path(workspace)
-	except (OSError, ReleaseControllerError) as error:
-		raise ReleaseControllerError(
-			"release workspace final path is unavailable; provide a shorter "
-			"--workspace-parent directory"
-		) from error
-	if len(str(final)) > WINDOWS_MAX_WORKSPACE_PATH_CHARS:
-		raise ReleaseControllerError(
-			"release workspace path is too long; provide a shorter --workspace-parent directory"
-		)
+	_checked_windows_workspace_path(workspace)
 	return workspace
 
 

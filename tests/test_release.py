@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from quality_gate.release import ReleaseControllerError, verify_release_candidate
+import conftest
+import quality_gate.release as release
+from quality_gate.release import (
+	WINDOWS_MAX_WORKSPACE_PATH_CHARS,
+	ReleaseControllerError,
+	verify_release_candidate,
+)
 from quality_gate.release_contract import (
 	UNIFIED_RELEASE_DEPENDENCIES,
 	UNIFIED_RELEASE_PLATFORM_TOOL_PATHS,
@@ -231,6 +237,81 @@ def test_release_controller_accepts_a_verified_self_host_candidate(tmp_path: Pat
 
 	assert candidate.version == "v2.0.0"
 	assert candidate.manifest.wheel is not None
+
+
+def test_windows_release_workspace_path_accepts_the_limit(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	assert WINDOWS_MAX_WORKSPACE_PATH_CHARS == 180
+	final_path = Path("C:\\" + "x" * (WINDOWS_MAX_WORKSPACE_PATH_CHARS - len("C:\\")))
+	monkeypatch.setattr(release, "_windows_final_path", lambda _: final_path)
+
+	assert len(str(release._checked_windows_workspace_path(tmp_path))) == (
+		WINDOWS_MAX_WORKSPACE_PATH_CHARS
+	)
+
+
+def test_windows_release_workspace_path_reports_actual_overflow(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	actual_length = WINDOWS_MAX_WORKSPACE_PATH_CHARS + 7
+	final_path = Path("C:\\" + "x" * (actual_length - len("C:\\")))
+	monkeypatch.setattr(release, "_windows_final_path", lambda _: final_path)
+
+	with pytest.raises(ReleaseControllerError) as error:
+		release._checked_windows_workspace_path(tmp_path)
+
+	assert f"actual final path is {actual_length} characters" in str(error.value)
+	assert f"limit is {WINDOWS_MAX_WORKSPACE_PATH_CHARS}" in str(error.value)
+	assert "shorten the parent by at least 7 characters" in str(error.value)
+	assert "shorten/move the worktree directory" in str(error.value)
+	assert "changing only the Git branch name does not shorten the directory" in str(error.value)
+
+
+def test_provider_release_path_preflight_stops_before_release_test_actions(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	from types import SimpleNamespace
+
+	def reject_release_workspace() -> Path:
+		raise ReleaseControllerError("release workspace path is too long")
+
+	monkeypatch.setattr(conftest, "_default_release_workspace", reject_release_workspace)
+	item = SimpleNamespace(
+		name="test_release_path_preflight",
+		path=Path(conftest.__file__).with_name("test_release.py"),
+		fixturenames=("tmp_path",),
+	)
+	factory = SimpleNamespace(getbasetemp=lambda: tmp_path)
+	session = SimpleNamespace(items=(item,), config=SimpleNamespace(_tmp_path_factory=factory))
+	release_action = tmp_path / "release-action-ran"
+
+	with pytest.raises(pytest.UsageError, match="before test execution"):
+		conftest._preflight_release_test_paths(session)
+		release_action.touch()
+
+	assert not release_action.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows release workspace path check only")
+def test_release_controller_rejects_long_final_path_before_artifact_actions(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	_source(tmp_path)
+	marker = tmp_path / "release-probe.txt"
+	actual_length = WINDOWS_MAX_WORKSPACE_PATH_CHARS + 1
+	final_path = Path("C:\\" + "x" * (actual_length - len("C:\\")))
+	monkeypatch.setattr(release, "_windows_final_path", lambda _: final_path)
+	monkeypatch.setenv("QUALITY_GATE_RELEASE_PROBE", str(marker))
+	monkeypatch.setenv("QUALITY_GATE_RELEASE_EXPECT_ROOT", str(tmp_path))
+
+	with pytest.raises(
+		ReleaseControllerError,
+		match=f"actual final path is {actual_length} characters",
+	):
+		verify_release_candidate(tmp_path, _artifact(tmp_path))
+
+	assert not marker.exists()
 
 
 def test_release_controller_rejects_an_unavailable_workspace_parent(tmp_path: Path) -> None:
