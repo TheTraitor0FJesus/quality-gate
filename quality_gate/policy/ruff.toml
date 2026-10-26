@@ -93,8 +93,6 @@ select = [
     "S704",
 ]
 ignore = ["W191"]
-unfixable = ["F401"]
-
 [lint.mccabe]
 max-complexity = 10
 

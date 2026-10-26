@@ -33,6 +33,9 @@ read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnos
 
 1. Run `quality-gate validate` after editing `quality-gate.toml`.
 2. Run `quality-gate doctor` to verify the selected release and component runtimes are available.
+   Run `quality-gate setup` after selecting a policy release or adding/changing Python components.
+   Setup provisions the tools and component runtime before editing; edit-time hooks do not
+   install them, and a missing runtime is reported as `unchecked`.
 3. For changes to this repository's source or policy, run the current-source `quality-gate check`
    before committing. For a consumer implementation, complete staged verification through its
    active workflow; its commit-hook Quality Gate satisfies this step. For standalone verification,
@@ -129,6 +132,10 @@ during `scope: full`; repository CI remains the enforcement owner.
 After every `quality-gate.toml` edit, run `quality-gate validate`. Use
 [templates/quality-gate.toml](../templates/quality-gate.toml) as the canonical shape; do not create
 a project-local manifest copy in an agent skill.
+
+For each Python component, set `tests_applicable` explicitly. When it is false, keep
+`test_paths` empty and provide a non-empty `tests_reason`; when it is true, declare at least one
+`test_paths` entry and omit `tests_reason`. The validator rejects a false setting without a reason.
 
 ## Setup and unavailable verification
 

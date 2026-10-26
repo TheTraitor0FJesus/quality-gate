@@ -35,6 +35,13 @@ MYPY_DEPENDENCIES = frozenset(
 	{"ast_serialize", "librt", "mypy_extensions", "pathspec", "typing_extensions"}
 )
 RECORD_FIELDS = 3
+# Exact standard managed-runtime .pth payloads, with CRLF normalized to LF.
+# Other executable or path-bearing entries remain outside the typing trust boundary.
+_MANAGED_RUNTIME_PTH_SHA256 = {
+	"a1_coverage.pth": "ef2ed06d19867ec669c09a804060666a9cd5e383af0a9d11aa2de79b77d448e8",
+	"distutils-precedence.pth": "2638ce9e2500e572a5e0de7faed6661eb569d1b696fcba07b0dd223da5f5d224",
+	"pytest-cov.pth": "f47446a60fdf5905e84e7d7c892baf92f8d5a3226d0da1599b9c014eab6c7ddb",
+}
 
 
 def process_environment(workspace: Path) -> dict[str, str]:
@@ -188,15 +195,24 @@ def _validate_site(site: Path) -> None:
 	for path in site.iterdir():
 		if path.suffix == ".egg-link":
 			raise EditError("dependencies")
-		if path.suffix == ".pth" and any(
-			line.strip() and not line.lstrip().startswith(b"#")
-			for line in read_bounded(path, 256 * 1024).splitlines()
+		if path.suffix == ".pth" and not _allowed_managed_pth(
+			path.name, read_bounded(path, 256 * 1024)
 		):
 			raise EditError("dependencies")
 		if path.name.endswith(".dist-info") and (path / "direct_url.json").exists():
 			metadata = json.loads(read_bounded(path / "direct_url.json", 256 * 1024))
 			if metadata.get("dir_info", {}).get("editable"):
 				raise EditError("dependencies")
+
+
+def _allowed_managed_pth(name: str, content: bytes) -> bool:
+	has_non_comment = any(
+		line.strip() and not line.startswith(b"#") for line in content.splitlines()
+	)
+	if not has_non_comment:
+		return True
+	expected = _MANAGED_RUNTIME_PTH_SHA256.get(name)
+	return expected is not None and sha256(content.replace(b"\r\n", b"\n")) == expected
 
 
 def _verify_installed_wheel(

@@ -102,13 +102,15 @@ must carry that correction explicitly; immutable old releases remain unchanged.
 
 The additive working-tree [edit-check interface](edit-check.md) reuses the exact released Ruff
 policy and tool without changing ordinary Gate scope or rule selection. Its explicit automatic
-fix allowlist contains only safe `I001`; `F401` remains unfixable. The explicit `phase: "write"`
-runs only those fixes and formatting; `phase: "validate"` runs the read-only final lint and format
-checks after the writer. Omitting `phase` preserves the earlier synchronous writer-and-diagnostics
-behavior. The final validation checks every released enabled rule. Interface-engine updates do not
-activate new consumer policy pins, and unsupported pins fail closed rather than falling back to
-baseline. Host use of these phases requires an immutable engine release that implements them; keep
-activation pending until that release is published and verified.
+fix allowlist contains safe `I001` import ordering and `F401` unused-import removal; Ruff's
+`--no-unsafe-fixes` remains enabled, so unsafe removals in `__init__.py` are not applied. Intentional
+public re-exports should use a redundant alias or `__all__`. The explicit `phase: "write"` runs only
+those fixes and formatting; `phase: "validate"` runs the read-only final lint and format checks after
+the writer. Omitting `phase` preserves the earlier synchronous writer-and-diagnostics behavior. The
+final validation checks every released enabled rule. Interface-engine updates do not activate new
+consumer policy pins, and unsupported pins fail closed rather than falling back to baseline. Host use
+of these phases requires an immutable engine release that implements them; keep activation pending
+until that release is published and verified.
 
 ## Ruff policy selection
 

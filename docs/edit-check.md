@@ -196,8 +196,9 @@ release and runtime identities before returning.
 
 With `phase` omitted, the legacy synchronous writer-and-diagnostics pipeline is:
 
-1. Ruff safe fix: only reviewed `I001` import ordering, `--no-unsafe-fixes`, explicit
-   `F401` unfixable. All other enabled lint rules still run; unused imports survive.
+1. Ruff safe fixes: reviewed `I001` import ordering and unambiguous `F401` unused imports,
+   with `--no-unsafe-fixes` retained. In `__init__.py`, declare intentional public re-exports
+   with a redundant alias or `__all__`; Ruff's unsafe removals remain disabled.
 2. Ruff format, even when the first step reports residual lint errors.
 3. Ruff lint without fixes, JSON findings, then Ruff format `--check` on final bytes.
 
@@ -205,8 +206,8 @@ With `phase: "write"`, the provider runs only the safe fix and format steps abov
 the resulting file identities and an empty findings list; this confirms the writer phase completed,
 not that final lint diagnostics passed. A syntax error that prevents formatting is left for the
 validation phase to report. `phase: "validate"` skips both write steps and runs only Ruff
-`check --no-fix` and `format --check` against the exact current bytes. It preserves fixable findings
-such as `I001` and `F401` for the host to deliver after the writer's automatic edits have finished.
+`check --no-fix` and `format --check` against the exact current bytes. It preserves findings such as
+`I001` and `F401` for the host to deliver after the writer's automatic edits have finished.
 
 No tests, mypy, dependency/history/secret scanning, Git-index candidate, full-repository
 discovery or setup is part of this operation. Relevant working-tree manifest,

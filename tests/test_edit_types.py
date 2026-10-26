@@ -26,6 +26,8 @@ from test_typing_optout import manifest_text
 
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import default_cache_root, verify_release
+from quality_gate.edit_protocol import EditError
+from quality_gate.edit_type_environment import _MANAGED_RUNTIME_PTH_SHA256, _validate_site
 from quality_gate.edit_type_inputs import environment_tree, inventory, request_files
 from quality_gate.edit_types import execute
 from quality_gate.runtime import RuntimeManager, runtime_fingerprint, runtime_identity
@@ -37,6 +39,27 @@ MEASUREMENT_CASES = 4
 
 def digest(content: bytes) -> str:
 	return hashlib.sha256(content).hexdigest()
+
+
+STANDARD_MANAGED_RUNTIME_PTH = {
+	"a1_coverage.pth": (
+		b'import sys; exec(\'import os\\n\\nif os.getenv("COVERAGE_PROCESS_START") or '
+		b'os.getenv("COVERAGE_PROCESS_CONFIG"):\\n try:\\n  import coverage\\n except:\\n  pass'
+		b'\\n else:\\n  coverage.process_startup(slug="pth")\')\r\n'
+	),
+	"pytest-cov.pth": (
+		b"import os, sys;exec('if \\'COV_CORE_SOURCE\\' in os.environ:\\n try:\\n  "
+		b"from pytest_cov.embed import init\\n  init()\\n except Exception as exc:\\n  "
+		b'sys.stderr.write(\\n   "pytest-cov: Failed to setup subprocess coverage. "\\n   '
+		b'"Environ: {0!r} "\\n   "Exception: {1!r}\\\\n".format(\\n    '
+		b"dict((k, v) for k, v in os.environ.items() if k.startswith(\\'COV_CORE\\')),\\n"
+		b"    exc\\n   )\\n  )\\n')\n"
+	),
+	"distutils-precedence.pth": (
+		b"import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = os.environ.get(var, 'local') "
+		b"== 'local'; enabled and __import__('_distutils_hack').add_shim(); \n"
+	),
+}
 
 
 @pytest.fixture(scope="module")
@@ -280,6 +303,32 @@ def test_typing_does_not_require_unrelated_released_pytest_dependencies(
 	assert (code, result["status"]) == (0, "passed"), result
 
 
+def test_standard_managed_runtime_pth_reaches_component_inventory_and_mypy(
+	tmp_path: Path, typing_policy: Path, typing_environment: Path
+) -> None:
+	shutil.copytree(typing_environment, tmp_path / ".venv", symlinks=True)
+	site = (
+		tmp_path
+		/ ".venv"
+		/ (
+			"Lib/site-packages"
+			if os.name == "nt"
+			else f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+		)
+	)
+	for name, content in STANDARD_MANAGED_RUNTIME_PTH.items():
+		(site / name).write_bytes(content)
+	source = b"value: int = 1\n"
+	(tmp_path / "source.py").write_bytes(source)
+
+	code, result = invoke(request(tmp_path, typing_policy, "source.py", background=True))
+
+	assert (code, result["status"]) == (0, "passed"), result
+	assert result["components"][0]["inventory"] == [{"path": "source.py", "sha256": digest(source)}]
+	assert result["selections"][0]["mypy_version"] == "2.3.1"
+	assert not list(tmp_path.glob(".quality-gate-edit-*"))
+
+
 def full_component_diagnostics(
 	root: Path,
 	policy: Path,
@@ -413,6 +462,63 @@ def test_malformed_project_settings_are_unchecked(
 	assert result["components"] == []
 
 
+@pytest.mark.parametrize(("name", "content"), STANDARD_MANAGED_RUNTIME_PTH.items())
+def test_standard_managed_runtime_pth_payloads_are_allowed(
+	tmp_path: Path, name: str, content: bytes
+) -> None:
+	assert digest(content.replace(b"\r\n", b"\n")) == _MANAGED_RUNTIME_PTH_SHA256[name]
+	site = tmp_path / "site"
+	site.mkdir()
+	(site / name).write_bytes(content)
+
+	_validate_site(site)
+
+
+@pytest.mark.parametrize(
+	"name,content",
+	[
+		pytest.param("unknown.pth", b"../outside/site-packages\n", id="path-entry"),
+		pytest.param(
+			"unknown.pth", b"  # relative path-looking entry\n", id="indented-comment-path"
+		),
+		pytest.param("unknown.pth", b"import os; os.environ['BAD'] = '1'\n", id="arbitrary-code"),
+		pytest.param(
+			"a1_coverage.pth",
+			STANDARD_MANAGED_RUNTIME_PTH["a1_coverage.pth"] + b"import os\n",
+			id="modified-approved-name",
+		),
+		pytest.param(
+			"unapproved-name.pth",
+			STANDARD_MANAGED_RUNTIME_PTH["a1_coverage.pth"],
+			id="approved-content-wrong-name",
+		),
+		pytest.param("pytest-cov.pth", b"\xff\n", id="malformed-bytes"),
+	],
+)
+def test_unrecognized_or_modified_managed_runtime_pth_is_rejected(
+	tmp_path: Path, name: str, content: bytes
+) -> None:
+	site = tmp_path / "site"
+	site.mkdir()
+	(site / name).write_bytes(content)
+
+	with pytest.raises(EditError) as error:
+		_validate_site(site)
+
+	assert error.value.reason == "dependencies"
+
+
+@pytest.mark.parametrize("content", [b"", b"\n# harmless comment\r\n"])
+def test_blank_and_comment_only_managed_runtime_pth_remains_allowed(
+	tmp_path: Path, content: bytes
+) -> None:
+	site = tmp_path / "site"
+	site.mkdir()
+	(site / "unrecognized.pth").write_bytes(content)
+
+	_validate_site(site)
+
+
 @pytest.mark.parametrize(
 	"mutation,reason",
 	[
@@ -496,6 +602,31 @@ def test_shadowed_tool_module_is_rejected_without_execution(
 	code, result = invoke(request(tmp_path, typing_policy, "source.py", background=True))
 	assert not marker.exists()
 	assert (code, result["status"], result["reason"]) == (2, "unchecked", "tool"), result
+
+
+def test_untrusted_managed_runtime_pth_is_rejected_without_execution(
+	tmp_path: Path, typing_policy: Path, typing_environment: Path
+) -> None:
+	shutil.copytree(typing_environment, tmp_path / ".venv", symlinks=True)
+	site = (
+		tmp_path
+		/ ".venv"
+		/ (
+			"Lib/site-packages"
+			if os.name == "nt"
+			else f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+		)
+	)
+	marker = tmp_path / "pth-startup-executed"
+	(site / "untrusted.pth").write_text(
+		f"import pathlib; pathlib.Path({str(marker)!r}).touch()\n", encoding="utf-8"
+	)
+	(tmp_path / "source.py").write_bytes(b"value: int = 1\n")
+
+	code, result = invoke(request(tmp_path, typing_policy, "source.py", background=True))
+
+	assert not marker.exists()
+	assert (code, result["status"], result["reason"]) == (2, "unchecked", "dependencies"), result
 
 
 def test_unverified_bytecode_cache_is_never_executed(

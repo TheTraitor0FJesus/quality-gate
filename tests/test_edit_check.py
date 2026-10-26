@@ -23,11 +23,14 @@ import pytest
 from quality_gate import __version__
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import default_cache_root
-from quality_gate.edit_check import Invocation, execute as execute_edit_check
+from quality_gate.edit_check import Invocation
+from quality_gate.edit_check import execute as execute_edit_check
 from quality_gate.edit_inputs import Configuration
 from quality_gate.edit_protocol import (
-	EditError,
 	SUPPORTED_POLICIES as EDIT_SUPPORTED_POLICIES,
+)
+from quality_gate.edit_protocol import (
+	EditError,
 	decode_request,
 )
 from quality_gate.release_contract import (
@@ -58,6 +61,7 @@ RELEASED_EDIT_POLICIES = frozenset(
 		"v3.2.0",
 		"v4.0.0",
 		"v4.1.0",
+		"v4.2.0",
 	}
 )
 
@@ -273,9 +277,7 @@ def test_wheel_exposes_read_only_edits_without_extraction(
 	assert digest(engine_wheel.read_bytes()) == wheel_hash
 
 
-@pytest.mark.parametrize(
-	"policy", sorted(EDIT_SUPPORTED_POLICIES)
-)
+@pytest.mark.parametrize("policy", sorted(EDIT_SUPPORTED_POLICIES))
 @pytest.mark.parametrize("module", ["quality_gate.cli", "quality_gate.edit_cli"])
 def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 	tmp_path: Path,
@@ -287,7 +289,7 @@ def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 	project = tmp_path / "project with spaces"
 	project.mkdir()
 	path = project / "example.py"
-	path.write_bytes(b"import sys\nimport os\n\nvalue=  1\n")
+	path.write_bytes(b"import sys\nimport os\n\nvalue= (os.name, sys.version)\n")
 	launcher = tmp_path / "launcher"
 	launcher.mkdir()
 	payload = request(project, wheel_cache, "example.py")
@@ -318,16 +320,16 @@ def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 		)
 		assert completed.stderr == b"", completed.stderr.decode(errors="replace")
 		result = json.loads(completed.stdout)
-		assert completed.returncode == 1, result
-		assert result["status"] == "failed"
+		assert completed.returncode == 0, result
+		assert result["status"] == "passed"
 		assert result["engine_version"] == __version__
-		assert {finding["rule"] for finding in result["files"][0]["findings"]} == {"F401"}
+		assert result["files"][0]["findings"] == []
 		assert result["files"][0]["input_sha256"] == payload["files"][0]["sha256"]
 		assert result["files"][0]["sha256"] == digest(path.read_bytes())
 		assert result["files"][0]["format"] == "passed"
 		assert result["selections"][0]["policy_release"] == policy
 		assert result["process_count"] == expected_processes
-	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = 1\n"
+	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = (os.name, sys.version)\n"
 	assert {item.name for item in project.iterdir()} == {"example.py"}
 	assert list(launcher.iterdir()) == []
 	assert digest(engine_wheel.read_bytes()) == wheel_hash
@@ -370,7 +372,10 @@ def invoke(payload: object) -> tuple[int, dict[str, Any]]:
 
 @pytest.mark.parametrize(
 	("initial", "expected_exit", "expected_rules"),
-	[(b"value=  1\n", 0, set()), (b"import os\n\nvalue=  1\n", 1, {"F401"})],
+	[
+		(b"value=  1\n", 0, set()),
+		(b"value= missing_name\n", 1, {"F821"}),
+	],
 )
 def test_unchanged_final_result_reuses_verified_selection(
 	tmp_path: Path,
@@ -409,31 +414,35 @@ def test_import_layout_change_invalidates_reuse(
 ) -> None:
 	module_name = module_path.removesuffix(".pyi").removesuffix(".py").replace("/", ".")
 	path = tmp_path / "example.py"
-	path.write_bytes(f"import {module_name}\nimport alpha\n".encode())
+	path.write_bytes(
+		f"import {module_name}\nimport alpha\n\nvalue = ({module_name}, alpha)\n".encode()
+	)
 	first_exit, first = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert first_exit == 1, first
+	assert first_exit == 0, first
 	warm_exit, warm = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert warm_exit == 1 and warm["process_count"] == REUSED_PROCESSES, warm
+	assert warm_exit == 0 and warm["process_count"] == REUSED_PROCESSES, warm
 	module = tmp_path / module_path
 	module.parent.mkdir(parents=True, exist_ok=True)
 	module.write_bytes(b"# Local module appeared after the previous checks.\n")
 	changed_exit, changed = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert changed_exit == 1, changed
+	assert changed_exit == 0, changed
 	assert changed["process_count"] == FRESH_PROCESSES
-	assert path.read_bytes() == f"import alpha\n\nimport {module_name}\n".encode()
+	assert path.read_bytes() == (
+		f"import alpha\n\nimport {module_name}\n\nvalue = ({module_name}, alpha)\n".encode()
+	)
 	assert changed["files"][0]["sha256"] == digest(path.read_bytes())
-	assert {finding["rule"] for finding in changed["files"][0]["findings"]} == {"F401"}
+	assert changed["files"][0]["findings"] == []
 	assert module.read_bytes() == b"# Local module appeared after the previous checks.\n"
 
 
 def test_policy_selection_change_requires_fresh_ruff(tmp_path: Path, wheel_cache: Path) -> None:
-	(tmp_path / "example.py").write_bytes(b"import os\n")
+	(tmp_path / "example.py").write_bytes(b"import os\nvalue = os.name\n")
 	for policy in sorted(EDIT_SUPPORTED_POLICIES):
 		for expected_processes in (FRESH_PROCESSES, REUSED_PROCESSES):
 			payload = request(tmp_path, wheel_cache, "example.py")
 			payload["baseline"]["policy_release"] = policy
 			exit_code, result = invoke(payload)
-			assert exit_code == 1, result
+			assert exit_code == 0, result
 			assert result["process_count"] == expected_processes
 			assert result["selections"][0]["policy_release"] == policy
 
@@ -460,7 +469,7 @@ def test_working_tree_changes_invalidate_reuse(
 	tmp_path: Path, edit_cache: Path, change: str
 ) -> None:
 	path = tmp_path / "example.py"
-	path.write_bytes(b"import os\n\nvalue = 1\n")
+	path.write_bytes(b"import os\n\nvalue = os.name\n")
 	manifest = tmp_path / "quality-gate.toml"
 	manifest.write_text(
 		'[quality]\nschema = 2\npolicy_release = "v2.4.2"\n'
@@ -469,7 +478,7 @@ def test_working_tree_changes_invalidate_reuse(
 		encoding="utf-8",
 	)
 	exit_code, original = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert exit_code == 1, original
+	assert exit_code == 0, original
 	if change == "file":
 		path.write_bytes(b"import os\n\nvalue=  2\n")
 	elif change == "waiver":
@@ -482,9 +491,9 @@ def test_working_tree_changes_invalidate_reuse(
 	else:
 		(tmp_path / change).write_bytes(b"# Working-tree configuration changed.\n")
 	exit_code, changed = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert exit_code == 1, changed
+	assert exit_code == 0, changed
 	assert changed["process_count"] == FRESH_PROCESSES
-	assert {finding["rule"] for finding in changed["files"][0]["findings"]} == {"F401"}
+	assert changed["files"][0]["findings"] == []
 	assert changed["files"][0]["sha256"] == digest(path.read_bytes())
 	if change != "file":
 		assert changed["inputs"] != original["inputs"]
@@ -497,7 +506,7 @@ def test_corrupt_reuse_cannot_supply_a_clean_verdict(
 	tmp_path: Path, edit_cache: Path, failure: str
 ) -> None:
 	path = tmp_path / "example.py"
-	path.write_bytes(b"import os\n\nvalue = 1\n")
+	path.write_bytes(b"value = missing_name\n")
 	exit_code, first = invoke(request(tmp_path, edit_cache, "example.py"))
 	assert exit_code == 1, first
 	cache = tmp_path.parent / f"{tmp_path.name}-user-cache" / "quality-gate/edit-results-v1"
@@ -522,9 +531,9 @@ def test_corrupt_reuse_cannot_supply_a_clean_verdict(
 	exit_code, checked = invoke(request(tmp_path, edit_cache, "example.py"))
 	assert exit_code == 1, checked
 	assert checked["process_count"] == FRESH_PROCESSES
-	assert {finding["rule"] for finding in checked["files"][0]["findings"]} == {"F401"}
+	assert {finding["rule"] for finding in checked["files"][0]["findings"]} == {"F821"}
 	assert checked["files"][0]["sha256"] == digest(path.read_bytes())
-	assert path.read_bytes() == b"import os\n\nvalue = 1\n"
+	assert path.read_bytes() == b"value = missing_name\n"
 
 
 def test_invalid_request_is_unchecked_and_does_not_echo_input() -> None:
@@ -572,11 +581,45 @@ def test_invalid_envelope_is_source_free(tmp_path: Path, field: str, value: obje
 	assert list(tmp_path.iterdir()) == []
 
 
-def test_safe_fixes_keep_unused_import_and_format_residual_lint(
+def test_write_phase_removes_safe_f401_unused_import_from_module(
 	tmp_path: Path, edit_cache: Path
 ) -> None:
 	path = tmp_path / "example.py"
-	path.write_text("import sys\nimport os\n\nvalue=  1\n", encoding="utf-8")
+	path.write_bytes(b"import os\nvalue=1\n")
+	payload = request(tmp_path, edit_cache, "example.py")
+	payload["phase"] = "write"
+
+	exit_code, result = invoke(payload)
+
+	assert exit_code == 0, result
+	assert result["status"] == "passed"
+	assert path.read_bytes() == b"value = 1\n"
+
+
+def test_write_phase_preserves_explicit_public_reexport_in_init(
+	tmp_path: Path, edit_cache: Path
+) -> None:
+	package = tmp_path / "sample_package"
+	package.mkdir()
+	path = package / "__init__.py"
+	original = b"from .api import public_name as public_name\n"
+	path.write_bytes(original)
+	(package / "api.py").write_bytes(b"public_name = 1\n")
+	payload = request(tmp_path, edit_cache, "sample_package/__init__.py")
+	payload["phase"] = "write"
+
+	exit_code, result = invoke(payload)
+
+	assert exit_code == 0, result
+	assert result["status"] == "passed"
+	assert path.read_bytes() == original
+
+
+def test_safe_fixes_remove_unused_import_and_report_residual_lint(
+	tmp_path: Path, edit_cache: Path
+) -> None:
+	path = tmp_path / "example.py"
+	path.write_text("import sys\nimport os\n\nvalue= missing_name\n", encoding="utf-8")
 	unrelated = tmp_path / "unrelated.py"
 	unrelated.write_bytes(b"other=   2\n")
 	exit_code, result = invoke(request(tmp_path, edit_cache, "example.py"))
@@ -584,11 +627,11 @@ def test_safe_fixes_keep_unused_import_and_format_residual_lint(
 	assert result["status"] == "failed"
 	assert "phase" not in result
 	file = result["files"][0]
-	assert {finding["rule"] for finding in file["findings"]} == {"F401"}
+	assert {finding["rule"] for finding in file["findings"]} == {"F821"}
 	assert file["format"] == "passed"
 	assert file["coverage"] == "baseline"
 	assert file["sha256"] == digest(path.read_bytes())
-	assert path.read_text(encoding="utf-8") == "import os\nimport sys\n\nvalue = 1\n"
+	assert path.read_text(encoding="utf-8") == "value = missing_name\n"
 	assert unrelated.read_bytes() == b"other=   2\n"
 	path.write_text("import os\nimport sys\n\nvalue = (os.name, sys.version)\n", encoding="utf-8")
 	assert invoke(request(tmp_path, edit_cache, "example.py"))[0] == 0
@@ -670,7 +713,9 @@ def test_read_only_validation_rejects_inputs_changed_during_checks(
 	original_run = Invocation.run
 	changed = False
 
-	def run_then_change(self: Invocation, command: list[str], *, cwd: Path) -> tuple[int, bytes, bytes]:
+	def run_then_change(
+		self: Invocation, command: list[str], *, cwd: Path
+	) -> tuple[int, bytes, bytes]:
 		nonlocal changed
 		result = original_run(self, command, cwd=cwd)
 		if command[1] == "format" and "--check" in command and not changed:
@@ -686,9 +731,7 @@ def test_read_only_validation_rejects_inputs_changed_during_checks(
 		prefix="quality-gate-validate-test-", dir=tmp_path_factory.getbasetemp()
 	) as directory:
 		with pytest.raises(EditError, match="stale_input"):
-			execute_edit_check(
-				payload, time.monotonic() + 25, Path(directory)
-			)
+			execute_edit_check(payload, time.monotonic() + 25, Path(directory))
 
 	assert changed
 	assert path.read_bytes() == (b"value = 2\n" if changed_input == "source" else original)
@@ -701,7 +744,7 @@ def test_write_phase_applies_only_safe_fixes_and_formatting(
 	tmp_path: Path, edit_cache: Path
 ) -> None:
 	path = tmp_path / "example.py"
-	original = b"import sys\nimport os\n\nvalue=  1\n"
+	original = b"import sys\nimport os\n\nvalue= (os.name, sys.version)\n"
 	path.write_bytes(original)
 	payload = request(tmp_path, edit_cache, "example.py")
 	payload["phase"] = "write"
@@ -718,7 +761,7 @@ def test_write_phase_applies_only_safe_fixes_and_formatting(
 	assert file["changed"] is True
 	assert file["findings"] == []
 	assert file["format"] == "passed"
-	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = 1\n"
+	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = (os.name, sys.version)\n"
 	assert "F401" not in json.dumps(result)
 	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
 
@@ -985,9 +1028,9 @@ def test_working_tree_is_checked_without_reading_or_rewriting_index(
 	index_before = (tmp_path / ".git/index").read_bytes()
 	path.write_bytes(b"import os\nvalue=  2\n")
 	exit_code, result = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert exit_code == 1, result
-	assert {item["rule"] for item in result["files"][0]["findings"]} == {"F401"}
-	assert path.read_bytes() == b"import os\n\nvalue = 2\n"
+	assert exit_code == 0, result
+	assert result["files"][0]["findings"] == []
+	assert path.read_bytes() == b"value = 2\n"
 	assert (tmp_path / ".git/index").read_bytes() == index_before
 	process = subprocess.run(
 		["git", "-C", str(tmp_path), "show", ":example.py"], capture_output=True, check=False
