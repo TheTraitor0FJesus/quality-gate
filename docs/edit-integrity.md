@@ -4,8 +4,9 @@ Paths are relative to the Quality Gate repository root. This contract supports
 the `python-quality-hooks` host ticket 03. The host owns event attribution,
 post-Ruff hashes, activation and model feedback. The provider owns exact policy
 selection, Gate marker semantics, typed waiver resolution and response freshness.
-The additive provider candidate is v3.2.0; immutable publication and host
-activation remain separate owner-controlled steps.
+The additive provider feature shipped in v3.2.0. Published v4.0.0 and v4.1.0
+policies support this command. Host activation remains a separate owner-controlled
+step.
 
 ## Invocation
 
@@ -103,9 +104,11 @@ probe, full-tree scan, history scan or source-file write. The worker rechecks
 the manifest, selected immutable release and all raw file bytes before
 publishing.
 
-The v4.2.0 engine retains previously supported policy pins, including published
-v3.1.0, v3.2.0, v4.0.0 and v4.1.0, and adds its own v4.2.0 release after publication. This capability does
-not change the selected policy contents or Ruff/secret/security checks. It does not install Codex
-hooks, enable a host setting, replace baseline policy or update consumers.
-Actual event delivery, rollback and aggregate latency remain host acceptance
-work after owner merge and immutable release publication.
+The published v4.0.0 engine supports exact policy releases through v4.0.0. The
+published v4.1.0 engine retains those releases and adds v4.1.0. The v4.2.0
+candidate retains supported releases through v4.1.0 and adds its own v4.2.0 pin
+after immutable publication. These engine versions do not change policy contents
+selected by an existing older pin or alter Ruff, secret, or security checks.
+They do not install Codex hooks or enable host settings. Actual event delivery,
+rollback, and aggregate latency remain host acceptance work after owner merge
+and immutable release publication.

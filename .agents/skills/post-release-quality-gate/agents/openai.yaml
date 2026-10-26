@@ -1,0 +1,6 @@
+interface:
+  display_name: "Update Quality Gate after release"
+  short_description: "Verify and activate the latest provider release"
+  default_prompt: "Inspect the latest stable Quality Gate release and reconcile this provider repository."
+policy:
+  allow_implicit_invocation: false

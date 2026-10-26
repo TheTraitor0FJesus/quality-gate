@@ -8,11 +8,11 @@ the Gate's marker and waiver logic through `git_conflict_marker_results` and onl
 reads an explicit bounded set of complete working-tree files. The host owns event
 attribution, the final post-Ruff snapshot, feedback, registration and rollback.
 
-The candidate is additive engine v3.2.0; published v3.1.0 delivered `edit-types`.
-The provider source remains pinned to published policy v3.1.0. It does not alter shared detector
-policy, native Git hooks, secret checks, legacy protection or backup behavior.
-The provider selection continues to bind an immutable policy pin; the engine
-version and consumer policy version remain distinct identities.
+This record describes the v3.2.0 candidate that added `edit-integrity`; published
+v3.1.0 had delivered `edit-types`. During candidate verification, the provider source
+remained pinned to v3.1.0. The later v4.1.0 self-policy activation is recorded in
+[the provider v4.1.0 acceptance record](provider-v4.1.0-acceptance.md). The provider
+selection binds an immutable policy pin; engine and policy versions remain distinct.
 
 ## Acceptance map
 

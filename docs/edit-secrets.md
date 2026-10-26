@@ -4,13 +4,14 @@ Paths are relative to the Quality Gate repository root. This is the provider
 contract for `skills/.scratch/python-quality-hooks/issues/02-secret-hook.md`.
 The host owns attribution, Ruff-before-readers ordering, feedback and activation.
 The provider owns scanner selection, exact content verification and typed waivers.
-The interface was introduced in published v3.0.0; the v3.2.0 candidate adds
-`edit-integrity` while retaining this command. Host activation remains a separate
-consumer step. The published v2.6.2 engine has no `edit-secrets`.
+The interface was introduced in published v3.0.0. The v3.2.0 release added
+`edit-integrity` while retaining this command. Published v4.0.0 and v4.1.0 policies
+support both edit commands. Host activation remains a separate step. The published
+v2.6.2 engine has no `edit-secrets`.
 
 ## Invocation
 
-The candidate command is `quality-gate edit-secrets`. Send one UTF-8 JSON object
+The command is `quality-gate edit-secrets`. Send one UTF-8 JSON object
 on stdin and close stdin. The module route is `python -I -B -m quality_gate.cli
 edit-secrets` when the candidate package is explicitly installed for development.
 For host tests without installation, use this argument vector with a preinstalled
@@ -28,8 +29,9 @@ command = [
 This is a development-only seam. Bind its source hashes in test evidence. The
 native verified-wheel launcher continues to own actual release activation.
 Candidate source must never replace an immutable cached wheel or impersonate a
-published engine. The v3.0.0 engine introduced this command; source/commit hashes
-identify the v3.2.0 candidate until its immutable publication completes.
+published engine. The v3.0.0 release introduced this command; v3.2.0 added
+`edit-integrity`, and v4.0.0 added support for its own exact policy pin. Source
+hashes identify any unpublished development changes.
 
 ```json
 {
@@ -162,8 +164,8 @@ starts in the entry function. The host measures outer launch-to-delivery time.
 ## Materialization and compatibility
 
 The supported exact pins are v2.4.2, v2.5.0, v2.6.0, v2.6.1, v2.6.2 and v3.0.0.
-Policies v3.1.0, v3.2.0, v4.0.0 and v4.1.0 are also supported. The v4.2.0 candidate adds its own
-pin, usable only after immutable publication.
+Published v3.1.0, v3.2.0, v4.0.0, and v4.1.0 are also supported. The v4.2.0
+candidate adds its own pin, which becomes usable after immutable publication.
 The complete immutable release inventory is verified offline without repairing
 or quarantining it. Its native Gitleaks 8.30.1 and embedded policy are selected;
 there is no dependency setup, download, Python runtime probe, history scan,
