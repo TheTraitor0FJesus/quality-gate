@@ -322,7 +322,7 @@ true). Full Gate and edits honor false. Policies through v3.0.0 do not support
 this field: explicitly using it with an older selected policy is unchecked,
 including explicit true. Existing manifests without it retain their exact
 v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2/v3.0.0 policy selection. The provider manifest
-selects v4.0.0. Host activation remains a separate operation.
+selects v4.1.0. Host activation remains a separate operation.
 
 Managed discovery matches the pinned mypy directory discovery: skip names starting
 `.` and names `__pycache__`, `site-packages`, `node_modules`; include `build`,

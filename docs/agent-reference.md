@@ -68,8 +68,8 @@ After those writes finish, `phase: "validate"` runs the final lint and format ch
 project files; the host may run this phase in the shared bounded background worker. It accepts the
 shared 30-second work limit while the writer keeps its 10-second limit. Omitting `phase` preserves
 the earlier synchronous writer-and-diagnostics behavior. Each phase returns a versioned JSON result
-for the exact selected policy and content. The read-only phase requires an immutable engine release
-that implements it; keep host activation pending until that release is published and verified.
+for the exact selected policy and content. The read-only phase requires a published, verified engine
+release that implements it. Publication alone does not install the engine or accept host activation.
 `edit-setup` explicitly provisions the selected release's native Ruff; neither phase downloads tools,
 installs dependencies or creates runtimes. The supervisor removes its temporary workspace after
 completion or timeout. These phases do not replace staged/full Gate verification. Keep the interface

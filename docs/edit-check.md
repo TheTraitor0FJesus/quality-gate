@@ -8,9 +8,8 @@ An open provider PR does not install a hook or publish an immutable release.
 
 ## Invocation and request
 
-Install the interface engine from the published Quality Gate **v4.0.0** release. It supports
-the exact published policy pins in the compatibility matrix below, including v4.0.0. The v4.1.0
-candidate becomes installable after publication. Invoke
+Install the interface engine from the published Quality Gate **v4.1.0** release. It supports
+the exact published policy pins in the compatibility matrix below, including v4.1.0. Invoke
 `quality-gate edit-check` or `python -I -B -m quality_gate.cli edit-check` with one UTF-8
 JSON object on stdin and close stdin. The equivalent entry point is `quality-gate-edit`.
 The regular module route dispatches before loading full Gate orchestration and is the
@@ -117,12 +116,12 @@ a fallback for an invalid manifest, incompatible managed pin, or missing managed
 | v3.1.0 | — | Supported | Supported | Supported | Supported | Published policy |
 | v3.2.0 | — | — | Supported | Supported | Supported | Published policy |
 | v4.0.0 | — | — | — | Supported | Supported | Published policy |
-| v4.1.0 | — | — | — | — | Supported after publication | Candidate policy |
+| v4.1.0 | — | — | — | — | Supported | Published policy |
 | Any other version | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | Explicit consumer update required |
 
-Engine v4.1.0 retains the exact supported pins above and adds its own policy after
-immutable publication. Older engines do not support newer policy releases or the new
-`phase` request field.
+The published v4.1.0 engine retains the exact supported pins above and supports its
+own policy. Older engines do not support newer policy releases or the new `phase`
+request field.
 
 The compatibility adapter uses schema 2 and the same component path membership and
 released Ruff configuration as these releases. Their Python manifest/runtime/Ruff
@@ -346,16 +345,15 @@ Session/event attribution and deduplicating delivered messages remain host respo
 ## Handoff and acceptance evidence
 
 The reuse feature shipped as PATCH v2.6.2. The separate secret interface shipped in
-v3.0.0, and the published v4.0.0 engine supports the exact policies in the matrix above.
-Engine v4.1.0 adds the explicit writer and read-only validation phases while retaining
-the schema 1 request and exact policy compatibility matrix above. The v4.0.0 engine and
-older releases reject the new `phase` field. Owner merge and the existing Windows/Linux
-release verification and publication must finish before host installation. The host must
-then record the engine wheel and release identities, retain and provision `edit-setup` for
-its baseline and managed pins, validate its result reader, and complete real event and
-latency acceptance. No policy pin migration is required, but the host must select the v4.1.0
-engine before sending either phase. This PR does not activate host settings or change
-consumer pins.
+v3.0.0. Published engine v4.1.0 retains the exact policy compatibility matrix above and
+adds explicit writer and read-only validation phases while retaining the schema 1 request.
+The v4.0.0 engine and older releases reject the new `phase` field. The v4.1.0 release is
+published; host installation and acceptance remain separate. The host must record the
+engine wheel and release identities, retain and provision `edit-setup` for its baseline
+and managed pins, validate its result reader, and complete real event and latency
+acceptance. No policy pin migration is required, but the host must select the v4.1.0
+engine before sending either phase. Provider publication does not activate host settings
+or change consumer pins.
 
 Provider test commands, real release comparison, cleanup, timing evidence and limitations
 are recorded in [the provider acceptance record](audits/edit-check-provider.md).

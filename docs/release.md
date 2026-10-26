@@ -46,12 +46,14 @@ precedence stay the same.
 
 The release also adds v4.0.0 policy support to the edit commands and prints the
 release audit report in CI logs. The [provider v4.0.0 acceptance record](audits/provider-v4.0.0-acceptance.md)
-records its immutable release evidence and the separate self-policy activation.
+records its immutable release evidence.
 
-The v4.1.0 candidate adds optional `phase: write` and `phase: validate` requests to the working-tree
-Ruff interface. Requests without a phase preserve the synchronous behavior. Phase requests require
-engine v4.1.0 or newer; older exact policy pins and hosts that keep phase-less requests remain
-compatible. Host activation stays separate. This is MINOR relative to published v4.0.0.
+The published v4.1.0 release adds optional `phase: write` and `phase: validate` requests to the
+working-tree Ruff interface. Requests without a phase preserve the synchronous behavior. Phase
+requests require engine v4.1.0 or newer; older exact policy pins and hosts that keep phase-less
+requests remain compatible. Host activation stays separate. This is MINOR relative to published
+v4.0.0. The [provider v4.1.0 acceptance record](audits/provider-v4.1.0-acceptance.md) records its
+immutable release evidence and current self-policy activation.
 
 The v3.2.0 release added [read-only touched-file integrity](edit-integrity.md)
 and retained the v3.1.0 typing interface, including its separately selected

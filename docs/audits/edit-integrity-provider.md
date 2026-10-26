@@ -10,8 +10,8 @@ attribution, the final post-Ruff snapshot, feedback, registration and rollback.
 
 This record describes the v3.2.0 candidate that added `edit-integrity`; published
 v3.1.0 had delivered `edit-types`. During candidate verification, the provider source
-remained pinned to v3.1.0. The separate v4.0.0 self-policy activation is recorded in
-[the provider v4.0.0 acceptance record](provider-v4.0.0-acceptance.md). The provider
+remained pinned to v3.1.0. The later v4.1.0 self-policy activation is recorded in
+[the provider v4.1.0 acceptance record](provider-v4.1.0-acceptance.md). The provider
 selection binds an immutable policy pin; engine and policy versions remain distinct.
 
 ## Acceptance map
