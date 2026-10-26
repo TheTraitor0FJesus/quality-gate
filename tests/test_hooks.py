@@ -8,10 +8,12 @@ from pathlib import Path
 
 import pytest
 
+from quality_gate.contracts import ValidationError
 from quality_gate.hook_setup import HookIntegrationError, install_hooks
 from quality_gate.hooks import (
 	HookInputError,
 	PushRef,
+	commit_gate_timeout_seconds,
 	default_branch_names,
 	pre_push,
 	protected_push_refs,
@@ -50,7 +52,9 @@ def test_native_pre_push_hook_uses_explicit_root_and_does_not_fall_back(tmp_path
 	selected_hook_root = _selected_settings_root({"CODEX_HOME": str(selected_root)}, profile)
 
 	assert selected_hook_root == selected_root
-	with pytest.raises(pytest.skip.Exception, match="native pre-push hook is unavailable") as missing:
+	with pytest.raises(
+		pytest.skip.Exception, match="native pre-push hook is unavailable"
+	) as missing:
 		_native_pre_push_hook(selected_hook_root)
 	assert str(selected_root) in str(missing.value)
 
@@ -233,6 +237,89 @@ def test_run_commit_gate_reports_an_unavailable_runtime(
 
 	assert run_commit_gate(tmp_path, tmp_path / "missing-runtime") == UNCHECKED_EXIT
 	assert "runtime is unavailable" in capsys.readouterr().err
+
+
+def test_run_commit_gate_adds_queue_budget_to_its_outer_timeout(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	gate_timeout_seconds = 5
+	queue_timeout_seconds = 2
+	outer_timeout_seconds = gate_timeout_seconds + queue_timeout_seconds
+	runtime_root = tmp_path / "runtime"
+	python = runtime_root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+	python.parent.mkdir(parents=True)
+	python.write_bytes(b"stub")
+	working_manifest = (
+		'[quality]\nschema = 2\npolicy_release = "v3.1.0"\n\n'
+		'[repository]\nname = "hook-test"\ndomains = ["repository"]\n'
+		'required_documents = ["quality-gate.toml"]\n\n'
+		"[repository.defaults]\ngate_timeout_seconds = 19\n"
+	)
+	(tmp_path / "quality-gate.toml").write_text(working_manifest, encoding="utf-8")
+	staged_manifest = working_manifest.replace(
+		"gate_timeout_seconds = 19", f"gate_timeout_seconds = {gate_timeout_seconds}"
+	).encode("utf-8")
+	monkeypatch.setenv("QUALITY_GATE_QUEUE_TIMEOUT_SECONDS", str(queue_timeout_seconds))
+	monkeypatch.delenv("CI", raising=False)
+	monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+	monkeypatch.delenv("QUALITY_GATE_ADMISSION_CI", raising=False)
+	calls: list[dict[str, object]] = []
+
+	def fake_run(*_arguments: object, **options: object) -> subprocess.CompletedProcess[str]:
+		calls.append(options)
+		return subprocess.CompletedProcess([], 0)
+
+	monkeypatch.setattr("quality_gate.hooks.subprocess.run", fake_run)
+
+	assert run_commit_gate(tmp_path, runtime_root, staged_manifest=staged_manifest) == 0
+	assert calls[0]["timeout"] == outer_timeout_seconds
+
+
+def test_commit_gate_timeout_uses_staged_schema_two_budget_and_skips_queue_in_ci() -> None:
+	gate_timeout_seconds = 5
+	queue_timeout_seconds = 2
+	staged_manifest = f"""[quality]
+schema = 2
+policy_release = "v3.1.0"
+
+[repository]
+name = "hook-test"
+domains = ["repository"]
+required_documents = ["quality-gate.toml"]
+
+[repository.defaults]
+gate_timeout_seconds = {gate_timeout_seconds}
+""".encode()
+
+	assert (
+		commit_gate_timeout_seconds(
+			staged_manifest,
+			environment={"QUALITY_GATE_QUEUE_TIMEOUT_SECONDS": str(queue_timeout_seconds)},
+		)
+		== gate_timeout_seconds + queue_timeout_seconds
+	)
+	assert (
+		commit_gate_timeout_seconds(
+			staged_manifest,
+			environment={"CI": "true", "QUALITY_GATE_QUEUE_TIMEOUT_SECONDS": "invalid"},
+		)
+		== gate_timeout_seconds
+	)
+	assert (
+		commit_gate_timeout_seconds(
+			staged_manifest,
+			environment={
+				"QUALITY_GATE_ADMISSION_CI": "1",
+				"QUALITY_GATE_QUEUE_TIMEOUT_SECONDS": "invalid",
+			},
+		)
+		== gate_timeout_seconds
+	)
+
+
+def test_commit_gate_timeout_rejects_invalid_staged_manifest_bytes() -> None:
+	with pytest.raises(ValidationError, match="valid UTF-8 TOML"):
+		commit_gate_timeout_seconds(b"\xff")
 
 
 def test_pre_push_reports_invalid_input_as_unchecked(

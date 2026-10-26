@@ -99,9 +99,10 @@ The provider's pytest collection preflight exercises the same nested temporary-w
 for every release-test `tmp_path` before tests run. This limit applies to release workspaces only; it
 is not a general checkout-length limit for consumers.
 
-Provider verification budgets are nested: the Python test stage is limited to 20 minutes, the
-complete Quality Gate to 23 minutes, and the reusable CI job to 25 minutes including bootstrap and
-cleanup. The provider full-suite test runner keeps its independent aggregate 25-minute deadline.
+Provider verification budgets are nested: the Python test stage is limited to 30 minutes, the
+complete Quality Gate to 40 minutes, and the reusable CI job to 50 minutes including bootstrap and
+cleanup. Local provider verification requires an explicit 50-minute aggregate executor budget;
+the ordinary 25-minute test-runner budget is insufficient for these inner limits.
 
 The `Verify package` step and artifact upload must succeed for each platform before publication.
 The artifact audit streams its redacted report to the job log, including when it fails.
