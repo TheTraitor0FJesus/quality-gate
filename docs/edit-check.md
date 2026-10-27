@@ -359,5 +359,5 @@ acceptance. No policy pin migration is required, but the host must select the v4
 engine before sending either phase. Provider publication does not activate host settings
 or change consumer pins.
 
-Provider test commands, real release comparison, cleanup, timing evidence and limitations
-are recorded in [the provider acceptance record](audits/edit-check-provider.md).
+Follow the [interface verification requirements](release.md#working-tree-interface-verification)
+for real-wheel parity, host events, latency and cleanup.

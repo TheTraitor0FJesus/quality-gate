@@ -104,7 +104,7 @@ owned background invocation with cancellation; the host still owns delivery and
 drain. Managed setup prepares the declared component runtime. Unmanaged projects
 explicitly prepare their own `.venv` with the exact released mypy and required
 dependencies/stubs. Editing performs no provisioning. See the
-[provider evidence and activation prerequisites](audits/edit-types-provider.md).
+[interface verification and activation prerequisites](release.md#working-tree-interface-verification).
 
 Policy v3.1.0 adds optional `python[].typecheck` (boolean, default true). False
 produces an explicit mypy `not_applicable` result in full Gate and edit typing;

@@ -185,8 +185,11 @@ including configurations containing both `[extend]` and `[EXTEND]`.
 UTF-8, ASCII and UTF-8 BOM are supported without decoding or rewriting scanner
 input. Invalid UTF-8, NUL-bearing/binary and UTF-16/32 inputs are coverage
 unchecked rather than silently accepted. All requested text extensions are
-eligible. There is no supplemental detector in this provider. Preserve legacy
-host protection separately until its narrow remaining coverage is reviewed.
+eligible. There is no supplemental detector in this provider. Before retiring legacy
+host scanning, verify its remaining coverage separately from Gitleaks: legacy patterns
+can detect short credential-like values and isolated private-key headers that the
+selected defaults do not detect. Keep any reviewed supplemental findings and waivers
+distinct from Gate findings, and preserve the host's sensitive-file access protection.
 
 The exact scanner runs with bounded trace diagnostics in memory. The provider
 recognizes only its pinned lifecycle/severity format, requires the completed
@@ -223,4 +226,5 @@ separately from detector/path parity. Release preparation and consumer rollout
 must explicitly carry this correction. Local candidate tests do not authorize
 immutable publication or host activation.
 
-The provider acceptance record is [here](audits/edit-secrets-provider.md).
+Follow the [interface verification requirements](release.md#working-tree-interface-verification)
+before host activation.
