@@ -59,7 +59,7 @@ Use this map before non-trivial codebase questions, design work, or code changes
   replacement, active-turn delivery and Stop/drain. `contracts.py`, `runner.py`
   and `runtime.py` share the new policy's optional `typecheck` opt-out while
   retaining default-true older runtime identities. See the [wire contract](edit-types.md)
-  and [provider preparation evidence](audits/edit-types-provider.md).
+  and [interface verification requirements](release.md#working-tree-interface-verification).
 
 - **Dependabot owner review** — `.github/workflows/dependabot-review.yml` handles non-draft
   Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
@@ -71,8 +71,6 @@ Use this map before non-trivial codebase questions, design work, or code changes
   incomplete changes. This read-only path leaves the generated PR description untouched.
   `.github/dependabot.yml` assigns issues separately; provider calls here use same-repository
   references, so external-provider update grouping is unnecessary.
-  [The v2.4.2 acceptance audit](audits/provider-v2.4.2-acceptance.md) records the immutable
-  provider handoff, activation reruns and remaining consumer/live-event acceptance.
 
 - **Working-tree integrity checking** — public `edit-integrity` shares the bounded
   `edit_cli.py`, `edit_protocol.py`, `edit_worker.py` and `edit_process.py` transport.

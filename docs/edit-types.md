@@ -277,7 +277,7 @@ The provider checks it before launch, at most every 50 ms while waiting for its
 worker, and before delivery. Cancellation terminates/reaps the owned worker and
 descendant tree before returning `unchecked`, `reason: "cancelled"`, exit 2.
 Work has one absolute deadline at most 30 seconds ahead, including startup and
-provider evidence; owned cleanup has the same separate maximum three seconds.
+freshness evidence; owned cleanup has the same separate maximum three seconds.
 Neither this allowance nor a later delivery event grants schema 1 more time.
 
 Every valid schema 2 response has all schema 1 result fields, `schema: 2`, and
@@ -328,8 +328,8 @@ Policy v3.1.0 added optional schema 2 `python[].typecheck: boolean` (default
 true). Full Gate and edits honor false. Policies through v3.0.0 do not support
 this field: explicitly using it with an older selected policy is unchecked,
 including explicit true. Existing manifests without it retain their exact
-v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2/v3.0.0 policy selection. The provider manifest
-selects v4.1.0. Host activation remains a separate operation.
+v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2/v3.0.0 policy selection. Host activation
+remains a separate operation.
 
 Managed discovery matches the pinned mypy directory discovery: skip names starting
 `.` and names `__pycache__`, `site-packages`, `node_modules`; include `build`,
@@ -357,5 +357,8 @@ runtime-dependent typing remain policy limits, not demonstrated correctness.
 Setup is explicit: sync the exact immutable policy, run managed `setup` and
 `doctor`; unmanaged users prepare `.venv` and its declared dependencies/stubs
 explicitly. Editing uses no global Python fallback. Corrupt installed tools or
-changed dependencies require explicit repair/setup. Analysis caches and measured
-cold/warm behavior are documented in the provider evidence before release.
+changed dependencies require explicit repair/setup. Mypy analysis caches are private
+to one invocation and removed with its workspace; there is no persistent typing-result
+cache, incremental database or daemon. Warm filesystem pages do not reuse prior analysis.
+Follow the [interface verification requirements](release.md#working-tree-interface-verification)
+for same-release parity, cold/warm measurements and host activation.
