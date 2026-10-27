@@ -188,14 +188,46 @@ reusable entry points to that same full SHA; their policy/runtime versions chang
 explicit rollout. A ticket PR or feature merge alone is not a completed provider handoff.
 
 The provider's `quality-gate.toml` stays on the latest published policy until the candidate's policy
-asset is published. After publication, advance the self-policy pin and remove any temporary provider
-workflow waivers used to validate the candidate in a separate no-release PR.
-Update the active provider pin assertion in `tests/test_ci_workflow.py` and waiver assertion
-in `tests/test_integrity.py` in the same candidate. Select the accepted published policy in
-`tests/fixtures/release-parity/quality-gate.toml` as well, so platform parity exercises that
-policy. Preserve the comparator's expected outcomes and the non-gating parity waiver. This
-activation and its fixture update keep the published helper R and product version unchanged.
-Do not make the provider depend on an unpublished policy asset.
+asset is published. Only after the publish job verifies the release does `release.yml` send the
+`quality-gate-release-published` repository event. Its `client_payload` contains plain `version`
+and full lowercase `provider_sha`, for example:
+
+```json
+{"version": "4.2.1", "provider_sha": "0123456789abcdef0123456789abcdef01234567"}
+```
+
+The dispatch job requires successful publication and `build-required` preparation. Failed, skipped,
+no-release, and already-complete publication paths emit no event. Before dispatch, the helper checks
+the stable published release, its retained receipt, and its tag. The payload version must match the
+receipt's candidate version; the SHA must match `verification.provider_sha`, the reusable helper
+that verified publication. A mismatch fails before sending the event.
+
+`release-rollout.yml` consumes that event from the default branch and repeats these identity checks
+before opening or refreshing the provider activation PR. Recovery dispatch accepts the same two
+fields. Configure `QUALITY_GATE_ROLLOUT_APP_CLIENT_ID` as a repository variable and
+`QUALITY_GATE_ROLLOUT_APP_PRIVATE_KEY` as an Actions secret. Install the GitHub App on `quality-gate`
+with Contents and Pull requests write access. The event sender requests only Contents write; the
+activation job also requests Pull requests write. Both installation tokens are scoped to this
+repository. The dispatch and activation jobs keep their built-in `GITHUB_TOKEN` read-only.
+
+The provider activation pull request updates `quality-gate.toml`, the release-parity fixture, and
+active policy-version assertions in `tests/test_ci_workflow.py` and `tests/test_integrity.py`. If a
+release-candidate waiver is temporary, put `# quality-gate-rollout:remove-after-release` immediately
+before its `[[waivers]]` table. The bot removes only marked waiver tables; leave permanent waivers
+unmarked. Preserve comparator outcomes and the permanent non-gating parity waiver. This activation
+keeps the published helper R and product version unchanged and declares `No release`. Repeated
+delivery makes no additional changes. A newer release refreshes the same open PR, while an older
+event cannot downgrade it. A closed PR stays closed for its last selected release; a later release
+can create a new PR. Rollout executions are serialized without cancelling an active update. Human
+review and merge complete activation. Never make the provider depend on an unpublished policy asset.
+
+If publication succeeds but event dispatch or rollout is unavailable, run `release-rollout.yml`
+manually only with the version and helper SHA from the verified publication record. This recovers the
+same release and does not start a new publication.
+
+```shell
+gh workflow run release-rollout.yml --ref <default-branch> -f version=<MAJOR.MINOR.PATCH> -f provider_sha=<verified-full-sha>
+```
 
 For an existing qualified release, verify its complete retained receipt, exact-source platform
 verification jobs, tag, notes, helper R, and both downloadable ZIP byte digests before recording
@@ -214,5 +246,5 @@ failure-injection tests remain the product evidence; test doubles never replace 
 acceptance in the final release workflow.
 
 The release preserves the schema 2 CLI, schema 2 hook/runtime contract, platform ZIP delivery, consumer
-activation, rollback, cache retention, and backup responsibilities. Publishing the provider does
-not automatically change consumer workflow pins or deploy services.
+activation, rollback, cache retention, and backup responsibilities. Publishing the provider opens
+reviewed activation pull requests; it does not merge them or deploy consumer services.

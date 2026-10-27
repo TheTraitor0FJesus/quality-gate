@@ -44,6 +44,7 @@ required_documents = [
     "docs/quality-policy-changes.md",
     "docs/release.md",
     "docs/publication.md",
+    ".github/workflows/release-rollout.yml",
     ".github/workflows/release.yml",
     ".github/workflows/release-prepare.yml",
     ".github/workflows/release-publish.yml",
@@ -53,6 +54,7 @@ required_documents = [
     "scripts/release_adapter.py",
     "scripts/release_build.py",
     "scripts/release_metadata.py",
+    "quality_gate/release_rollout.py",
     "quality-gate.toml",
 ]
 
