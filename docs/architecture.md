@@ -61,10 +61,19 @@ Use this map before non-trivial codebase questions, design work, or code changes
   retaining default-true older runtime identities. See the [wire contract](edit-types.md)
   and [interface verification requirements](release.md#working-tree-interface-verification).
 
-- **Dependabot owner review** — `.github/workflows/dependabot-review.yml` handles non-draft
-  Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
+- **Dependabot review and patch auto-merge.** `.github/workflows/dependabot-review.yml` handles
+  non-draft Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
   `pull-requests: write`, requests the repository owner's review, and skips duplicate requests
   when the owner is already requested or has reviewed. It checks out and executes no PR code.
+  The exact `.github/workflows/dependabot-auto-merge.yml` template is the only other
+  Dependabot-specific PR-triggered write exception in `quality_gate/integrity.py`. It checks
+  non-draft Dependabot bot PRs targeting `main`, obtains metadata with a full-SHA-pinned action,
+  and fails closed unless
+  every grouped update is an object whose `ghsaId` is exactly the empty string. It requests
+  auto-merge only when the action reports the PR's highest update type as semver-patch. Workflow
+  findings at that path cannot be waived. It has job-scoped write permissions and does not check
+  out or execute PR code. See
+  [the quality policy change guide](quality-policy-changes.md) for its required conditions.
   The v2.5.0 rule in `quality_gate/publication_flow.py` interprets a missing `## Release` section as
   `No release` only for Dependabot bot PRs whose complete, stable API file list contains workflow
   YAML files directly under `.github/workflows/`; it checks old names on renames and skips mixed or

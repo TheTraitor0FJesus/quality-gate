@@ -1,7 +1,7 @@
-# Quality Gate 4.2.1
+# Quality Gate 4.3.0
 
-Исправлены два дефекта edit-hook: managed Types runtime принимает только три
-`.pth` файла с проверенным содержимым, а Ruff автоматически удаляет безопасные
-неиспользуемые импорты. Неизвестные или изменённые `.pth` и небезопасные
-исправления остаются запрещены; startup-код не запускается, публичные re-export
-в `__init__.py` сохраняются.
+Добавлено узкое разрешение для точного Dependabot auto-merge workflow: только
+нечерновые PR бота в `main`, без обновлений с security alerts и только для
+semver-patch. Gate отклоняет изменённый шаблон, лишние права и выполнение кода
+из PR. Потребителям нужно отдельно обновить immutable pin и предоставить secret
+`DEPENDABOT_ALERTS_TOKEN` с доступом на чтение Dependabot alerts и pull requests.

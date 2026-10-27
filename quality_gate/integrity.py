@@ -125,12 +125,20 @@ def _unchecked(
 
 
 def _failed_or_waived(
-	check_id: str, summary: str, findings: list[Finding], manifest: Manifest
+	check_id: str,
+	summary: str,
+	findings: list[Finding],
+	manifest: Manifest,
+	*,
+	non_waivable_targets: frozenset[str] = frozenset(),
 ) -> CheckResult:
 	if not findings:
 		return CheckResult(check_id, Status.PASSED, summary)
 	remaining = [
-		finding for finding in findings if manifest.resolve_waiver(check_id, finding.path) is None
+		finding
+		for finding in findings
+		if finding.path in non_waivable_targets
+		or manifest.resolve_waiver(check_id, finding.path) is None
 	]
 	if not remaining:
 		return CheckResult(
@@ -924,6 +932,7 @@ def _workflow_permission_findings(
 ) -> list[Finding]:
 	findings: list[Finding] = []
 	metadata_review = _approved_dependabot_review_workflow(workflow)
+	dependabot_auto_merge = _approved_dependabot_auto_merge_workflow(workflow)
 	if not workflow.permissions:
 		findings.append(
 			_workflow_finding(
@@ -955,6 +964,7 @@ def _workflow_permission_findings(
 		and not _approved_release_writer_route(workflow, is_quality_gate_provider)
 		and not provider_internal
 		and not metadata_review
+		and not dependabot_auto_merge
 	):
 		findings.append(
 			_workflow_finding(
@@ -968,6 +978,7 @@ def _workflow_permission_findings(
 		and not _approved_release_writer_route(workflow, is_quality_gate_provider)
 		and not provider_internal
 		and not metadata_review
+		and not dependabot_auto_merge
 	):
 		unrelated_scopes = sorted(
 			{scope or "write-all" for scope, _job_id in write_permissions}
@@ -1048,6 +1059,75 @@ def _approved_dependabot_review_workflow(workflow: _Workflow) -> bool:
 	"""Allow only the exact metadata-only Dependabot owner-review workflow template."""
 	return workflow.path == ".github/workflows/dependabot-review.yml" and (
 		workflow.source.rstrip("\r\n") == _DEPENDABOT_REVIEW_WORKFLOW.rstrip("\r\n")
+	)
+
+
+_DEPENDABOT_AUTO_MERGE_WORKFLOW_PATH = ".github/workflows/dependabot-auto-merge.yml"
+
+_DEPENDABOT_AUTO_MERGE_WORKFLOW = """name: Dependabot patch auto-merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  enable-patch-auto-merge:
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Read Dependabot update metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          alert-lookup: true
+          github-token: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
+
+      - name: Check every grouped update for security alerts
+        id: security
+        env:
+          UPDATED_DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+        run: |
+          if jq --exit-status '
+            type == "array"
+            and length > 0
+            and all(.[]; type == "object" and has("ghsaId") and .ghsaId == "")
+          ' <<< "$UPDATED_DEPENDENCIES" > /dev/null; then
+            echo "security-free=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "security-free=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Enable auto-merge for patch version updates
+        if: >-
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' &&
+          steps.security.outputs.security-free == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PULL_REQUEST_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PULL_REQUEST_URL"
+"""
+
+
+def _approved_dependabot_auto_merge_workflow(workflow: _Workflow) -> bool:
+	"""Allow only the exact Dependabot patch auto-merge workflow template."""
+	normalized_source = workflow.source.replace("\r\n", "\n")
+	return workflow.path == _DEPENDABOT_AUTO_MERGE_WORKFLOW_PATH and (
+		normalized_source == _DEPENDABOT_AUTO_MERGE_WORKFLOW
 	)
 
 
@@ -1663,6 +1743,7 @@ def workflow_result(
 		"workflow hygiene requirements are not satisfied",
 		findings,
 		manifest,
+		non_waivable_targets=frozenset({_DEPENDABOT_AUTO_MERGE_WORKFLOW_PATH}),
 	)
 
 
