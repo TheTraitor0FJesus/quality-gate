@@ -123,8 +123,10 @@ The published v4.1.0 engine retains the exact supported pins above and supports 
 own policy. Older engines do not support newer policy releases or the new `phase`
 request field.
 
-The v4.2.0 engine retains these exact supported pins, including v4.1.0 after publication,
-and adds its own v4.2.0 policy after immutable publication. Other versions remain unsupported.
+The v4.2.1 engine retains these exact supported pins, including v4.2.0, and adds
+its own v4.2.1 policy after immutable publication. The v4.3.0 candidate retains
+those pins and adds its own v4.3.0 policy after immutable publication. Other
+versions remain unsupported.
 
 The compatibility adapter uses schema 2 and the same component path membership and
 released Ruff configuration as these releases. Their Python manifest/runtime/Ruff
