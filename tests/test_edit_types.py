@@ -187,7 +187,7 @@ def test_background_cancellation_reaps_active_public_worker(
 
 	def cancel() -> None:
 		while not stop.wait(0.01):
-			if any(tmp_path.glob(".quality-gate-edit-*/source/source.py")):
+			if any(tmp_path.glob("temp/qg-*/source/source.py")):
 				signal.write_bytes(b"")
 				signalled.set()
 				return
@@ -199,7 +199,7 @@ def test_background_cancellation_reaps_active_public_worker(
 		assert signalled.is_set(), "Cancellation must reach an active worker."
 		assert (code, result["status"], result["reason"]) == (2, "unchecked", "cancelled"), result
 		assert result["event_id"] == payload["event_id"]
-		assert not list(tmp_path.glob(".quality-gate-edit-*"))
+		assert not list(tmp_path.glob("temp/qg-*"))
 	finally:
 		stop.set()
 		thread.join(timeout=3)
@@ -259,7 +259,7 @@ def test_existing_background_signal_cancels_before_runtime_inspection(
 			"cancelled",
 		), result
 		assert result["event_id"] == payload["event_id"]
-		assert not list(tmp_path.glob(".quality-gate-edit-*"))
+		assert not list(tmp_path.glob("temp/qg-*"))
 	finally:
 		signal.unlink(missing_ok=True)
 		if created_parent and not any(signal.parent.iterdir()):
@@ -286,7 +286,7 @@ def test_changed_signature_reports_unchanged_consumer_with_real_mypy(
 	assert result["selections"][0]["policy_release"] == typing_policy.name
 	assert result["selections"][0]["mypy_version"] == "2.3.1"
 	assert component["diagnostics"] == full_component_diagnostics(tmp_path, typing_policy, ".")
-	assert not list(tmp_path.glob(".quality-gate-edit-*"))
+	assert not list(tmp_path.glob("temp/qg-*"))
 
 
 def test_typing_does_not_require_unrelated_released_pytest_dependencies(
@@ -335,7 +335,7 @@ def test_standard_managed_runtime_pth_reaches_component_inventory_and_mypy(
 	assert (code, result["status"]) == (0, "passed"), result
 	assert result["components"][0]["inventory"] == [{"path": "source.py", "sha256": digest(source)}]
 	assert result["selections"][0]["mypy_version"] == "2.3.1"
-	assert not list(tmp_path.glob(".quality-gate-edit-*"))
+	assert not list(tmp_path.glob("temp/qg-*"))
 
 
 def full_component_diagnostics(
@@ -776,7 +776,7 @@ def test_concurrent_mutation_invalidates_whole_real_analysis(
 	def mutate() -> None:
 		end = time.monotonic() + 25
 		while time.monotonic() < end:
-			if any(tmp_path.glob(".quality-gate-edit-*/source/source.py")):
+			if any(tmp_path.glob("temp/qg-*/source/source.py")):
 				if mutation == "source-addition":
 					(tmp_path / "added.py").write_bytes(b"other: int = 2\n")
 				elif mutation == "configuration":
@@ -988,7 +988,9 @@ def test_typing_measurements(tmp_path: Path, typing_policy: Path, typing_environ
 	startup_ms = round((time.monotonic() - startup) * 1000)
 	graph: dict[str, int] = {}
 	assert full_component_diagnostics(tmp_path, typing_policy, ".", metrics=graph) == []
-	with tempfile.TemporaryDirectory(prefix=".quality-gate-edit-", dir=tmp_path) as directory:
+	from quality_gate.temp_workspace import temporary_workspace
+
+	with temporary_workspace(tmp_path) as directory:
 		profiler = cProfile.Profile()
 		profiled = profiler.runcall(
 			execute,

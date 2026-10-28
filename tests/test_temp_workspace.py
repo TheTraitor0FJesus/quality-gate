@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import stat
 import subprocess
@@ -13,13 +14,60 @@ from typing import BinaryIO
 import pytest
 
 import quality_gate.distribution as distribution
+import quality_gate.edit_cli as edit_cli
 import quality_gate.temp_workspace as temp_workspace
+from quality_gate.edit_protocol import EditError
 from quality_gate.release import _workspace_parents
 from quality_gate.temp_workspace import (
 	SYSTEM_TEMP_DIRECTORY,
 	TemporaryWorkspaceError,
 	temporary_workspace,
 )
+
+
+@pytest.mark.parametrize("mode", ["ruff", "validate", "secrets", "integrity", "types"])
+@pytest.mark.parametrize("worker_raises", [False, True])
+def test_edit_worker_uses_and_cleans_managed_project_temp(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, worker_raises: bool
+) -> None:
+	project = tmp_path / "project"
+	project.mkdir()
+	workspaces: list[Path] = []
+
+	def run_worker(
+		*_arguments: object, root: Path, environment: dict[str, str], **_options: object
+	) -> tuple[int, bytes, bytes]:
+		workspaces.append(root)
+		assert root.parent == project / "temp"
+		assert root.name.startswith("qg-")
+		assert environment["TEMP"] == str(root)
+		(root / "source").mkdir()
+		(root / "source" / "owned.py").write_text("VALUE = 1\n", encoding="utf-8")
+		if worker_raises:
+			raise EditError("deadline")
+		response = {"schema": 1, "status": "unchecked", "reason": "deadline", "files": []}
+		if mode == "validate":
+			response.update(phase="validate", writes_may_have_occurred=False)
+		return 2, json.dumps(response).encode(), b""
+
+	monkeypatch.setattr(edit_cli, "run_process", run_worker)
+	request = {"root": str(project), "schema": 1}
+	if mode == "validate":
+		request["phase"] = "validate"
+	arguments = {
+		"secrets": mode == "secrets",
+		"types": mode == "types",
+		"integrity": mode == "integrity",
+	}
+	if worker_raises:
+		with pytest.raises(EditError, match="deadline"):
+			edit_cli._run_worker(request, b"{}", time.monotonic() + 10, **arguments)
+	else:
+		result = edit_cli._run_worker(request, b"{}", time.monotonic() + 10, **arguments)
+		assert result["reason"] == "deadline"
+	assert len(workspaces) == 1
+	assert not workspaces[0].exists()
+	assert not list(project.glob(".quality-gate-edit-*"))
 
 
 def test_temporary_workspace_routes_and_restores_temp_state(

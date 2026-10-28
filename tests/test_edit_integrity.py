@@ -110,7 +110,7 @@ def test_public_result_matches_gate_for_text_and_gate_defined_nontext(
 	} == {(item.path, item.line) for item in reference.findings}
 	assert result["writes_may_have_occurred"] is False
 	assert {item["path"] for item in result["files"]} == set(files)
-	assert not list(root.glob(".quality-gate-edit-*"))
+	assert not list(root.glob("temp/qg-*"))
 
 
 def test_unmanaged_baseline_and_exact_waiver_match_gate(tmp_path: Path, policy_cache: Path) -> None:
@@ -355,7 +355,7 @@ def test_corrupt_release_discards_public_batch(tmp_path: Path, policy_cache: Pat
 	assert result["files"] == result["selections"] == result["inputs"] == []
 	assert not result.get("findings")
 	assert result["writes_may_have_occurred"] is False
-	assert not list(root.glob(".quality-gate-edit-*"))
+	assert not list(root.glob("temp/qg-*"))
 
 
 def test_release_change_before_delivery_discards_worker_batch(

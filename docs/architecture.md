@@ -32,8 +32,10 @@ Use this map before non-trivial codebase questions, design work, or code changes
   This path uses schema validation through `contracts.parse_manifest` without expanding
   supplemental test targets. It creates no Git-index candidate and runs no full checks or setup.
   The supervisor imports the explicit engine directory or wheel and starts the writer in
-  its private same-volume workspace; read-only validation uses a temporary workspace outside
-  the project. An archive path is never used as a working directory.
+  its private workspace through `temp_workspace.temporary_workspace`, shared by all edit
+  modes under the explicit root's `temp/qg-*`, with a system-temp fallback for read-only
+  roots. Active locks protect concurrent runs and allow later stale-run reclamation.
+  An archive path is never used as a working directory.
   See [the public protocol and compatibility contract](edit-check.md).
 
 - **Working-tree secret checking** — public `edit-secrets` shares `edit_cli.py`,

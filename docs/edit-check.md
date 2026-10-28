@@ -189,12 +189,16 @@ does. Released per-file test exceptions, inline `noqa` and file-level Ruff suppr
 remain active. Typed Gate waivers do not suppress Ruff or formatting in these policies.
 
 Eligible files are batched by selected release and runtime. Work happens on isolated
-copies with the same relative names in a supervisor-owned `.quality-gate-edit-*` directory
-under the explicit root. Keeping this workspace on the same volume permits atomic file
-replacement. The supervisor removes it after stopping the worker, including on timeout.
-For `phase: "validate"`, the temporary workspace is outside the project and the provider
-never publishes staged bytes back to the project. It rechecks current file, configuration,
-release and runtime identities before returning.
+copies with the same relative names in a supervisor-owned `temp/qg-*` directory
+under the explicit root. This uses the shared temporary-workspace manager, including its
+active-run locks, cleanup and system-temp fallback for read-only roots. Keeping a writable
+project's workspace on the same volume permits atomic file replacement. The supervisor
+removes it after stopping the worker, including on timeout; later invocations reclaim
+inactive runs left by abrupt termination while preserving locked active runs.
+The same workspace policy applies to read-only edit commands. For `phase: "validate"`,
+the provider never publishes staged bytes back to the project. It rechecks current file,
+configuration, release and runtime identities before returning. Published engines retain
+their own behavior until consumers explicitly install a release containing this change.
 
 With `phase` omitted, the legacy synchronous writer-and-diagnostics pipeline is:
 

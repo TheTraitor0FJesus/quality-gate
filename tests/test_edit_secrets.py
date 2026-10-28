@@ -9,7 +9,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,11 +84,10 @@ def invoke(request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
 def invoke_worker(request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
 	"""Exercise the public worker with real scanner IO; CLI transport has separate cases."""
 	from quality_gate.edit_worker import main
+	from quality_gate.temp_workspace import temporary_workspace
 
 	stdout = io.BytesIO()
-	with tempfile.TemporaryDirectory(
-		prefix=".quality-gate-edit-", dir=request["root"]
-	) as directory:
+	with temporary_workspace(Path(request["root"])) as directory:
 		with pytest.MonkeyPatch.context() as patch:
 			patch.setattr(
 				sys, "stdin", SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))
@@ -175,7 +173,7 @@ def test_public_touched_tree_preserves_paths_actual_hashes_and_clean_siblings(
 		".gitleaksignore",
 	}
 	assert not result["writes_may_have_occurred"]
-	assert not list(tmp_path.glob(".quality-gate-edit-*"))
+	assert not list(tmp_path.glob("temp/qg-*"))
 
 
 def test_managed_repository_scope_and_exact_actual_secret_waiver(
@@ -492,7 +490,7 @@ def test_corrupt_release_is_not_repaired_or_quarantined(tmp_path: Path, policy_r
 	assert (code, result["status"], result["reason"]) == (2, "unchecked", "release")
 	assert release.is_dir()
 	assert not (cache / "quarantine").exists()
-	assert not list(project.glob(".quality-gate-edit-*"))
+	assert not list(project.glob("temp/qg-*"))
 
 
 def test_native_ignore_identity_is_established_from_real_scanner(

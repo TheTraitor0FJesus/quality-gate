@@ -8,7 +8,6 @@ import queue
 import re
 import stat
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -28,6 +27,7 @@ from .edit_protocol import (
 	encode,
 	unchecked,
 )
+from .temp_workspace import temporary_workspace
 
 
 def _request() -> bytes:
@@ -266,12 +266,7 @@ def _run_worker(
 		from .edit_type_inputs import CancellationSignal
 
 		cancellation = CancellationSignal(request)
-	workspace_parent = (
-		None if request.get("phase") == "validate" and not (secrets or types or integrity) else root
-	)
-	with tempfile.TemporaryDirectory(
-		prefix=".quality-gate-edit-", dir=workspace_parent
-	) as directory:
+	with temporary_workspace(root) as directory:
 		entry = (
 			f"import sys; sys.path.insert(0, {str(package_root)!r}); "
 			"from pathlib import Path; from quality_gate.edit_worker import main; "
@@ -293,6 +288,7 @@ def _run_worker(
 					"TMP",
 					"LOCALAPPDATA",
 					"XDG_CACHE_HOME",
+					"QUALITY_GATE_SYSTEM_TEMP",
 					"HOME",
 					"USERPROFILE",
 				}
