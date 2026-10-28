@@ -53,7 +53,9 @@ read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnos
 
 For this provider, the Python test stage has a 30-minute limit, the complete Gate has a 40-minute
 limit, and the reusable CI job has a 50-minute outer limit. The job limit includes bootstrap and
-cleanup. Local verification requires an explicit 50-minute aggregate executor budget as well.
+cleanup. Local full-suite and Quality Gate requests use the test runner's fixed 25-minute aggregate
+budget, including all command stages and process-tree cleanup. This aggregate budget is the
+effective local limit when an inner stage has a longer timeout.
 
 The native pre-commit wrapper reads the staged manifest, resolves `quality.policy_release`, verifies
 that exact cached release, and calls the Gate without importing mutable repository source. The

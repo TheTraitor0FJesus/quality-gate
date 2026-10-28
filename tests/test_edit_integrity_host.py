@@ -225,7 +225,7 @@ def test_host_json_boundary_runs_candidate_public_cli(
 	assert clean_code == 0
 	assert clean_report == {"check": "integrity", "status": "passed", "findings": []}
 	assert host.cli_calls == len((failed, clean_report))
-	assert not list(host.project.glob(".quality-gate-edit-*"))
+	assert not list(host.project.glob("temp/qg-*"))
 
 
 def _host_request(project: Path, *paths: str) -> bytes:

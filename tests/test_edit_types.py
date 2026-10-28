@@ -19,17 +19,26 @@ from collections.abc import Iterator
 from dataclasses import asdict
 from importlib.util import cache_from_source
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from test_typing_optout import manifest_text
 
-from quality_gate.contracts import load_manifest
+from quality_gate.contracts import PythonComponent, ValidationError, load_manifest, parse_manifest
 from quality_gate.distribution import default_cache_root, verify_release
+from quality_gate.edit_inputs import Configuration, SourceFile
 from quality_gate.edit_protocol import EditError
 from quality_gate.edit_type_environment import _MANAGED_RUNTIME_PTH_SHA256, _validate_site
 from quality_gate.edit_type_inputs import environment_tree, inventory, request_files
-from quality_gate.edit_types import execute
+from quality_gate.edit_types import (
+	_import_context,
+	_local_stub_roots,
+	_local_typed_dependency,
+	_mypy_environment,
+	_typed_dependency,
+	_TypingInvocation,
+	execute,
+)
 from quality_gate.runtime import RuntimeManager, runtime_fingerprint, runtime_identity
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -178,7 +187,7 @@ def test_background_cancellation_reaps_active_public_worker(
 
 	def cancel() -> None:
 		while not stop.wait(0.01):
-			if any(tmp_path.glob(".quality-gate-edit-*/source/source.py")):
+			if any(tmp_path.glob("temp/qg-*/source/source.py")):
 				signal.write_bytes(b"")
 				signalled.set()
 				return
@@ -190,7 +199,7 @@ def test_background_cancellation_reaps_active_public_worker(
 		assert signalled.is_set(), "Cancellation must reach an active worker."
 		assert (code, result["status"], result["reason"]) == (2, "unchecked", "cancelled"), result
 		assert result["event_id"] == payload["event_id"]
-		assert not list(tmp_path.glob(".quality-gate-edit-*"))
+		assert not list(tmp_path.glob("temp/qg-*"))
 	finally:
 		stop.set()
 		thread.join(timeout=3)
@@ -250,7 +259,7 @@ def test_existing_background_signal_cancels_before_runtime_inspection(
 			"cancelled",
 		), result
 		assert result["event_id"] == payload["event_id"]
-		assert not list(tmp_path.glob(".quality-gate-edit-*"))
+		assert not list(tmp_path.glob("temp/qg-*"))
 	finally:
 		signal.unlink(missing_ok=True)
 		if created_parent and not any(signal.parent.iterdir()):
@@ -277,7 +286,7 @@ def test_changed_signature_reports_unchanged_consumer_with_real_mypy(
 	assert result["selections"][0]["policy_release"] == typing_policy.name
 	assert result["selections"][0]["mypy_version"] == "2.3.1"
 	assert component["diagnostics"] == full_component_diagnostics(tmp_path, typing_policy, ".")
-	assert not list(tmp_path.glob(".quality-gate-edit-*"))
+	assert not list(tmp_path.glob("temp/qg-*"))
 
 
 def test_typing_does_not_require_unrelated_released_pytest_dependencies(
@@ -326,7 +335,7 @@ def test_standard_managed_runtime_pth_reaches_component_inventory_and_mypy(
 	assert (code, result["status"]) == (0, "passed"), result
 	assert result["components"][0]["inventory"] == [{"path": "source.py", "sha256": digest(source)}]
 	assert result["selections"][0]["mypy_version"] == "2.3.1"
-	assert not list(tmp_path.glob(".quality-gate-edit-*"))
+	assert not list(tmp_path.glob("temp/qg-*"))
 
 
 def full_component_diagnostics(
@@ -435,6 +444,99 @@ def test_unmanaged_dependency_evidence_is_path_ordered(
 		{"path": ".mypy.ini", "sha256": digest(b"[mypy]\n")},
 		{"path": "pyproject.toml", "sha256": digest(b"[project]\nname = 'fixture'\n")},
 	]
+
+
+def test_component_local_stubs_resolve_and_are_included_in_freshness(tmp_path: Path) -> None:
+	(tmp_path / "app/stubs").mkdir(parents=True)
+	stub = tmp_path / "app/stubs/vendor.pyi"
+	stub.write_text("class Value: ...\n", encoding="utf-8")
+	component = PythonComponent(
+		"app", "app", "3.12", (), (), False, "unused", 300, True, ("stubs",)
+	)
+	directories = [
+		{"path": "app", "entries": [{"name": "stubs", "kind": "directory"}]},
+		{"path": "app/stubs", "entries": [{"name": "vendor.pyi", "kind": "file"}]},
+	]
+	roots = _local_stub_roots(tmp_path, component, directories)
+	assert roots == ("app/stubs",)
+	assert _local_typed_dependency(tmp_path / roots[0], "vendor")
+	sources, captured_directories = inventory(
+		tmp_path, "app", managed=True, deadline=time.monotonic() + 5
+	)
+	invocation = object.__new__(_TypingInvocation)
+	invocation.snapshot = tmp_path / "snapshot"
+	invocation.snapshot.mkdir()
+	invocation.configuration = Configuration(tmp_path)
+	invocation._snapshot_sources(sources, "app")
+	assert (invocation.snapshot / "app/stubs/vendor.pyi").read_bytes() == stub.read_bytes()
+	assert (
+		_import_context(
+			[SourceFile("app/main.py", b"import vendor\n", digest(b"import vendor\n"))],
+			"app",
+			_StubSelection(),
+			tuple(str(tmp_path / root) for root in roots),
+		)
+		== 1
+	)
+	before = sources, captured_directories
+	stub.write_text("class Value: ...\nchanged: int\n", encoding="utf-8")
+	after = inventory(tmp_path, "app", managed=True, deadline=time.monotonic() + 5)
+	assert before != after
+	environment = _mypy_environment(tmp_path, tmp_path / "snapshot", roots)
+	assert environment["MYPYPATH"] == str(tmp_path / "snapshot/app/stubs")
+	environment = _mypy_environment(tmp_path, tmp_path / "snapshot", (*roots, "app/extra-stubs"))
+	assert environment["MYPYPATH"].split(os.pathsep) == [
+		str(tmp_path / "snapshot/app/stubs"),
+		str(tmp_path / "snapshot/app/extra-stubs"),
+	]
+
+
+class _StubSelection:
+	stdlib: ClassVar[set[str]] = set()
+	site = Path("/missing/site")
+
+
+def test_missing_local_stub_root_is_unchecked_by_preflight(tmp_path: Path) -> None:
+	with pytest.raises(EditError) as error:
+		_local_stub_roots(
+			tmp_path,
+			PythonComponent("app", "app", "3.12", (), (), False, "unused", 300, True, ("stubs",)),
+			[{"path": "app"}],
+		)
+	assert error.value.reason == "dependencies"
+
+
+def test_local_stub_root_cannot_escape_component(tmp_path: Path) -> None:
+	with pytest.raises(EditError) as error:
+		_local_stub_roots(
+			tmp_path,
+			PythonComponent(
+				"app", "app", "3.12", (), (), False, "unused", 300, True, ("../shared-stubs",)
+			),
+			[{"path": "app"}],
+		)
+	assert error.value.reason == "unsafe_path"
+
+
+def test_installed_site_stub_is_accepted_without_local_root(tmp_path: Path) -> None:
+	site = tmp_path / "site"
+	(site / "vendor-stubs").mkdir(parents=True)
+	(site / "vendor-stubs/__init__.pyi").write_text("class Value: ...\n", encoding="utf-8")
+	assert _typed_dependency(site, "vendor")
+
+
+def test_manifest_declares_component_local_stub_roots_only_on_supported_policy() -> None:
+	manifest = manifest_text("v3.2.0").replace(
+		"typecheck = false\n", 'typecheck = false\nstub_roots = ["stubs"]\n'
+	)
+	assert parse_manifest(manifest).python[0].stub_roots == ("stubs",)
+	with pytest.raises(ValidationError, match="stub_roots"):
+		parse_manifest(manifest.replace("v3.2.0", "v3.1.0"))
+	for path in ["../stubs", "stubs/../shared", "D:/outside/stubs"]:
+		with pytest.raises(ValidationError, match="stub_roots"):
+			parse_manifest(manifest.replace('"stubs"', f'"{path}"'))
+	with pytest.raises(ValidationError, match="stub_roots"):
+		parse_manifest(manifest.replace('["stubs"]', "['stubs\\\\nested']"))
 
 
 @pytest.mark.parametrize(
@@ -674,7 +776,7 @@ def test_concurrent_mutation_invalidates_whole_real_analysis(
 	def mutate() -> None:
 		end = time.monotonic() + 25
 		while time.monotonic() < end:
-			if any(tmp_path.glob(".quality-gate-edit-*/source/source.py")):
+			if any(tmp_path.glob("temp/qg-*/source/source.py")):
 				if mutation == "source-addition":
 					(tmp_path / "added.py").write_bytes(b"other: int = 2\n")
 				elif mutation == "configuration":
@@ -886,7 +988,9 @@ def test_typing_measurements(tmp_path: Path, typing_policy: Path, typing_environ
 	startup_ms = round((time.monotonic() - startup) * 1000)
 	graph: dict[str, int] = {}
 	assert full_component_diagnostics(tmp_path, typing_policy, ".", metrics=graph) == []
-	with tempfile.TemporaryDirectory(prefix=".quality-gate-edit-", dir=tmp_path) as directory:
+	from quality_gate.temp_workspace import temporary_workspace
+
+	with temporary_workspace(tmp_path) as directory:
 		profiler = cProfile.Profile()
 		profiled = profiler.runcall(
 			execute,

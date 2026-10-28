@@ -32,8 +32,10 @@ Use this map before non-trivial codebase questions, design work, or code changes
   This path uses schema validation through `contracts.parse_manifest` without expanding
   supplemental test targets. It creates no Git-index candidate and runs no full checks or setup.
   The supervisor imports the explicit engine directory or wheel and starts the writer in
-  its private same-volume workspace; read-only validation uses a temporary workspace outside
-  the project. An archive path is never used as a working directory.
+  its private workspace through `temp_workspace.temporary_workspace`, shared by all edit
+  modes under the explicit root's `temp/qg-*`, with a system-temp fallback for read-only
+  roots. Active locks protect concurrent runs and allow later stale-run reclamation.
+  An archive path is never used as a working directory.
   See [the public protocol and compatibility contract](edit-check.md).
 
 - **Working-tree secret checking** — public `edit-secrets` shares `edit_cli.py`,
@@ -56,9 +58,10 @@ Use this map before non-trivial codebase questions, design work, or code changes
   environment inventories and host-owned cancellation signals. Schema 1 consumes
   the remaining synchronous deadline; schema 2 binds one supervised background
   invocation to an event and cancellation path. The host owns scheduling,
-  replacement, active-turn delivery and Stop/drain. `contracts.py`, `runner.py`
-  and `runtime.py` share the new policy's optional `typecheck` opt-out while
-  retaining default-true older runtime identities. See the [wire contract](edit-types.md)
+  replacement, active-turn delivery and Stop/drain. `contracts.py` validates the
+  optional `typecheck` opt-out and the policy-gated `stub_roots` component paths;
+  the provider resolves the latter only from the captured component tree.
+  See the [wire contract](edit-types.md)
   and [interface verification requirements](release.md#working-tree-interface-verification).
 
 - **Dependabot review and patch auto-merge.** `.github/workflows/dependabot-review.yml` handles

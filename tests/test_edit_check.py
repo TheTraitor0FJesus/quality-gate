@@ -63,12 +63,18 @@ RELEASED_EDIT_POLICIES = frozenset(
 		"v4.1.0",
 		"v4.2.0",
 		"v4.2.1",
+		"v4.3.0",
 	}
 )
 
 
 def test_supported_policy_matrix_keeps_all_released_pins() -> None:
 	assert EDIT_SUPPORTED_POLICIES == RELEASED_EDIT_POLICIES | {f"v{__version__}"}
+
+
+def assert_project_files_after_cleanup(root: Path, *names: str) -> None:
+	assert {item.name for item in root.iterdir()} == {*names, "temp"}
+	assert {item.name for item in (root / "temp").iterdir()} == {".quality-gate.lock"}
 
 
 @pytest.mark.parametrize(
@@ -274,7 +280,7 @@ def test_wheel_exposes_read_only_edits_without_extraction(
 		"not_applicable",
 	), result
 	assert result["writes_may_have_occurred"] is False
-	assert not list(project.iterdir())
+	assert_project_files_after_cleanup(project)
 	assert digest(engine_wheel.read_bytes()) == wheel_hash
 
 
@@ -331,7 +337,7 @@ def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 		assert result["selections"][0]["policy_release"] == policy
 		assert result["process_count"] == expected_processes
 	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = (os.name, sys.version)\n"
-	assert {item.name for item in project.iterdir()} == {"example.py"}
+	assert_project_files_after_cleanup(project, "example.py")
 	assert list(launcher.iterdir()) == []
 	assert digest(engine_wheel.read_bytes()) == wheel_hash
 
@@ -663,7 +669,7 @@ def test_read_only_validation_reports_final_ruff_findings_without_writing(
 	assert file["format"] == "failed"
 	assert path.read_bytes() == original
 	assert path.stat().st_mtime_ns == original_mtime
-	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+	assert_project_files_after_cleanup(tmp_path, "example.py")
 
 
 @pytest.mark.parametrize("policy", sorted(EDIT_SUPPORTED_POLICIES))
@@ -692,7 +698,7 @@ def test_read_only_validation_supports_every_policy_pin(
 	assert file["changed"] is False
 	assert path.read_bytes() == original
 	assert path.stat().st_mtime_ns == original_mtime
-	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+	assert_project_files_after_cleanup(tmp_path, "example.py")
 
 
 @pytest.mark.parametrize("changed_input", ["source", "configuration"])
@@ -764,7 +770,7 @@ def test_write_phase_applies_only_safe_fixes_and_formatting(
 	assert file["format"] == "passed"
 	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = (os.name, sys.version)\n"
 	assert "F401" not in json.dumps(result)
-	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+	assert_project_files_after_cleanup(tmp_path, "example.py")
 
 
 def test_read_only_validation_keeps_unchecked_prerequisites_incomplete(
@@ -784,7 +790,7 @@ def test_read_only_validation_keeps_unchecked_prerequisites_incomplete(
 	assert result["phase"] == "validate"
 	assert result["writes_may_have_occurred"] is False
 	assert path.read_bytes() == original
-	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+	assert_project_files_after_cleanup(tmp_path, "example.py")
 
 
 def test_unknown_edit_phase_is_rejected_without_falling_back_to_writer(
@@ -1235,7 +1241,7 @@ time.sleep(30)
 		assert time.monotonic() - started < deadline_seconds + TIMEOUT_WITH_CLEANUP_SECONDS
 		assert not process_alive(pid)
 		assert (tmp_path / "example.py").read_bytes() == b"value=  1\n"
-		assert not list(tmp_path.glob(".quality-gate-edit-*"))
+		assert not list(tmp_path.glob("temp/qg-*"))
 	finally:
 		if process_alive(pid):
 			os.kill(pid, signal.SIGTERM)
@@ -1381,7 +1387,7 @@ def test_result_delivery_obeys_the_same_deadline(tmp_path: Path, edit_cache: Pat
 		except subprocess.TimeoutExpired:
 			pytest.fail("Result delivery blocked beyond the invocation deadline")
 		assert exit_code == EXIT_UNCHECKED
-		assert not list(tmp_path.glob(".quality-gate-edit-*"))
+		assert not list(tmp_path.glob("temp/qg-*"))
 	finally:
 		if process.poll() is None:
 			process.kill()

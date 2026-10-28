@@ -66,8 +66,9 @@ is not a general checkout-length limit for consumers.
 
 Provider verification budgets are nested: the Python test stage is limited to 30 minutes, the
 complete Quality Gate to 40 minutes, and the reusable CI job to 50 minutes including bootstrap and
-cleanup. Local provider verification requires an explicit 50-minute aggregate executor budget;
-the ordinary 25-minute test-runner budget is insufficient for these inner limits.
+cleanup. Local full-suite and Quality Gate requests use the test runner's fixed 25-minute aggregate
+budget, including all command stages and process-tree cleanup. This aggregate budget is the
+effective local limit when an inner stage has a longer timeout.
 
 The `Verify package` step and artifact upload must succeed for each platform before publication.
 The artifact audit streams its redacted report to the job log, including when it fails.
