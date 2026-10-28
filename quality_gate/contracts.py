@@ -31,6 +31,7 @@ MAX_SUPPLEMENTAL_TARGET_MATCHES = 1024
 MAX_SUPPLEMENTAL_TARGET_BYTES = 64 * 1024
 MAX_SUPPLEMENTAL_TOTAL_MATCHES = 4096
 MAX_SUPPLEMENTAL_TOTAL_BYTES = 256 * 1024
+MAX_COMPONENT_STUB_ROOTS = 32
 _CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 _FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 _WILDCARD = re.compile(r"[*?\[\]{}]")
@@ -123,6 +124,19 @@ def _date(value: object, path: str) -> date:
 		raise ValidationError(path, "must use YYYY-MM-DD") from exc
 
 
+def _component_stub_roots(value: object, path: str) -> tuple[str, ...]:
+	roots = tuple(
+		_string(item, f"{path}[{index}]") for index, item in enumerate(_list(value, path))
+	)
+	if len(roots) > MAX_COMPONENT_STUB_ROOTS:
+		raise ValidationError(path, f"must contain at most {MAX_COMPONENT_STUB_ROOTS} paths")
+	_ensure_unique(roots, path, "must contain unique paths")
+	for index, root in enumerate(roots):
+		if "\\" in root or ":" in root or any(part in {"", ".", ".."} for part in root.split("/")):
+			raise ValidationError(f"{path}[{index}]", "must be a component-relative POSIX path")
+	return roots
+
+
 @dataclass(frozen=True, slots=True)
 class RepositoryContract:
 	name: str
@@ -145,6 +159,7 @@ class PythonComponent:
 	tests_reason: str | None
 	timeout_seconds: int
 	typecheck: bool = True
+	stub_roots: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +307,7 @@ def _parse_component(value: object, index: int) -> PythonComponent:
 			"tests_reason",
 			"timeout_seconds",
 			"typecheck",
+			"stub_roots",
 		},
 		path,
 	)
@@ -333,6 +349,7 @@ def _parse_component(value: object, index: int) -> PythonComponent:
 		else None,
 		timeout_seconds=_positive_int(table.get("timeout_seconds", 300), f"{path}.timeout_seconds"),
 		typecheck=cast(bool, _type(table.get("typecheck", True), bool, f"{path}.typecheck")),
+		stub_roots=_component_stub_roots(table.get("stub_roots", []), f"{path}.stub_roots"),
 	)
 
 
@@ -634,8 +651,11 @@ def _load_table(raw: Mapping[str, object]) -> Manifest:
 def _validate_typing_policy(root: Mapping[str, object], policy_release: str) -> None:
 	version = tuple(int(part) for part in policy_release[1:].split("."))
 	for index, component in enumerate(_list(root.get("python", []), "python")):
-		if "typecheck" in _table(component, f"python[{index}]") and version < (3, 1, 0):
+		table = _table(component, f"python[{index}]")
+		if "typecheck" in table and version < (3, 1, 0):
 			raise ValidationError(f"python[{index}].typecheck", "requires policy v3.1.0 or newer")
+		if "stub_roots" in table and version < (3, 2, 0):
+			raise ValidationError(f"python[{index}].stub_roots", "requires policy v3.2.0 or newer")
 
 
 def _validate_supplemental_match(match: Path, root: Path, path: str) -> int:

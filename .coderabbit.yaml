@@ -3,6 +3,8 @@ tone_instructions: >-
   Write concise reviews in Russian. Explain concrete failure modes and avoid style-only findings.
 reviews:
   profile: chill
+  high_level_summary: false
+  high_level_summary_in_walkthrough: true
   review_progress: false
   review_status: false
   commit_status: false

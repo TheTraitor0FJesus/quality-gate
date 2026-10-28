@@ -17,13 +17,24 @@ This repository is the source of truth for shared Python quality checks.
 - `quality-gate.toml` in each consumer repository is the schema 2 contract: repository obligations,
   component metadata, limits, defaults, policy release identity, and typed waivers.
 
-Workflow permission checks allow `pull-requests: write` only for the exact approved
-`.github/workflows/dependabot-review.yml` owner-review template. Changes to its trigger, bot guard,
-permissions, environment, command, or steps require a separately reviewed policy change. Publish
-the permission exception before enabling a changed template, including in the provider repository.
-Then synchronize each repository to that published policy and its compatible full workflow SHA
-before staging the review workflow. Older policies reject the pull-request write permission; do
-not bypass that rejection with a waiver or mutate a cached release.
+For Dependabot review and patch auto-merge flows, the `repository.workflow` check accepts only these
+two exact templates:
+the existing `.github/workflows/dependabot-review.yml` owner-review template and
+`.github/workflows/dependabot-auto-merge.yml` Dependabot patch auto-merge template. The owner-review
+template keeps its request-review behavior. The auto-merge template accepts only non-draft
+Dependabot bot pull requests targeting `main`. It uses a full-SHA-pinned metadata action and checks
+every entry in `updated-dependencies-json`. Each entry must be an object with `ghsaId` exactly equal
+to the empty string. Missing, null, malformed, or nonempty values block auto-merge. The merge step
+also requires the action's highest `update-type` output for the PR to be
+`version-update:semver-patch`, so a grouped PR with a larger update remains manual.
+`alert-lookup: true` uses `DEPENDABOT_ALERTS_TOKEN`, which needs read access to Dependabot alerts
+and pull requests. It does not need write access. The workflow passes it only to the pinned
+metadata action and reads metadata without checking out or executing pull-request code. Its only
+write permissions are job-scoped
+`contents: write` and `pull-requests: write`. Findings for this auto-merge path cannot be waived.
+Any change to the trigger, guard, metadata check, patch condition, permissions, environment, action,
+command, secret, or steps requires a separately reviewed policy change. Do not add a broad
+exception or modify a cached release to bypass this template rule.
 
 Release validation also accepts an absent `## Release` section as an implicit no-release decision
 only when the PR author is `dependabot[bot]` with type `Bot` and the complete, stable GitHub API file
@@ -61,6 +72,9 @@ release. It must not import mutable source from this repository or depend on Cod
 ## Project-specific behavior
 
 Each project may declare Python component paths, existing test directories, and dependency files in `quality-gate.toml`.
+For working-tree typing, a Python component may also declare `stub_roots` as unique component-relative directories
+inside its captured tree. This field requires policy v3.2.0 or newer; the edit-types provider hashes their `.pyi`
+contents and passes the approved roots to isolated mypy.
 It may also declare repository-owned supplemental tests with `[[supplemental_tests]]` entries using
 the `node-test` runner and repository-relative targets. The manifest validator checks their
 identities, matches, and bounded expansion size; the Quality Gate never executes them. The typed

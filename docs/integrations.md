@@ -9,6 +9,11 @@ CodeRabbit автоматически просматривает pull request, �
 комментарии на русском языке. Он пропускает черновики. Настройки отключают одобрение и запрос
 изменений, статусы и слияние. Замечания CodeRabbit не влияют на обязательную проверку Quality Gate.
 
+Генерация сводки отключена через `reviews.high_level_summary: false`. Параметр
+`reviews.high_level_summary_in_walkthrough: true` оставляет сводку вне описания PR даже при наличии
+маркера `@coderabbitai summary`. Комментарии ревью остаются включены. См.
+[настройки сводки CodeRabbit](https://docs.coderabbit.ai/pr-reviews/summaries).
+
 При установке CodeRabbit выберите только публичный репозиторий Quality Gate. Не устанавливайте
 приложение в приватные репозитории-потребители.
 
@@ -72,3 +77,26 @@ workflow. В настройках `quality-gate` хранятся repository var
 В приватном репозитории на GitHub Free невозможно сделать статус CI обязательным условием слияния.
 Поэтому rollout PR там всё равно откроется, но владелец должен проверить результаты Actions вручную
 перед слиянием ([документация GitHub о доступности required checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)).
+
+## Граница установленной приёмки #137
+
+На 28 октября 2026 года CodeRabbit установлен и, по сообщению владельца, комментирует PR.
+На проверенном `main` с SHA `c193c3b8123b83e6d5142a47441fb3f4bb21bf33` ещё отсутствуют
+`.coderabbit.yaml`, `dependabot-auto-merge.yml`, `release-rollout.yml` и
+`consumer-release-rollout.yml`. Эти workflows находятся в `.github/workflows` текущей feature-ветки.
+Активный ruleset для `main` требует только статус `Quality Gate`. Repository variable
+`QUALITY_GATE_ROLLOUT_APP_CLIENT_ID` и secrets `QUALITY_GATE_ROLLOUT_APP_PRIVATE_KEY` и
+`DEPENDABOT_ALERTS_TOKEN` существуют. Наличие secrets не подтверждает их работоспособность
+или область установки приложения.
+
+Codecov исключён владельцем из текущей реализации из-за ошибки входа GitHub 403.
+Решение записано в [обсуждении #133](https://github.com/TheTraitor0FJesus/quality-gate/issues/133).
+Конфигурация и загрузка покрытия отсутствуют, поэтому критерий Codecov из
+[#137](https://github.com/TheTraitor0FJesus/quality-gate/issues/137) не выполнен.
+
+После интеграции workflows остаётся подтвердить реальными событиями русский обзор CodeRabbit
+без изменения описания PR, ожидание Quality Gate для Dependabot patch и ручное слияние остальных
+обновлений, rollout провайдера и шести потребителей, обновление открытого rollout PR следующим
+релизом, сохранение закрытого PR закрытым, отсутствие rollout при провале публикации и изоляцию
+ошибки отдельного потребителя. Установленная приёмка остаётся незавершённой. Production rollout PR
+и релизы специально ради получения тестового результата не создаются.

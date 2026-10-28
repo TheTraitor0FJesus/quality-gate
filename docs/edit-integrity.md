@@ -105,9 +105,10 @@ the manifest, selected immutable release and all raw file bytes before
 publishing.
 
 The published v4.0.0 engine supports exact policy releases through v4.0.0. The
-published v4.1.0 engine retains those releases and adds v4.1.0. The v4.2.0
-candidate retains supported releases through v4.1.0 and adds its own v4.2.0 pin
-after immutable publication. These engine versions do not change policy contents
+published v4.1.0 engine retains those releases and adds v4.1.0. The published
+v4.2.1 engine retains the supported releases through v4.1.0 and adds v4.2.0 and
+v4.2.1. The v4.3.0 candidate retains those supported releases and adds its own
+v4.3.0 pin after immutable publication. These engine versions do not change policy contents
 selected by an existing older pin or alter Ruff, secret, or security checks.
 They do not install Codex hooks or enable host settings. Actual event delivery,
 rollback, and aggregate latency remain host acceptance work after owner merge

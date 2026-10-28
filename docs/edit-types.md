@@ -277,7 +277,7 @@ The provider checks it before launch, at most every 50 ms while waiting for its
 worker, and before delivery. Cancellation terminates/reaps the owned worker and
 descendant tree before returning `unchecked`, `reason: "cancelled"`, exit 2.
 Work has one absolute deadline at most 30 seconds ahead, including startup and
-provider evidence; owned cleanup has the same separate maximum three seconds.
+freshness evidence; owned cleanup has the same separate maximum three seconds.
 Neither this allowance nor a later delivery event grants schema 1 more time.
 
 Every valid schema 2 response has all schema 1 result fields, `schema: 2`, and
@@ -312,9 +312,10 @@ supported; overflow is unchecked, never truncated success.
 ## Scope, prerequisites and compatibility
 
 The published v4.0.0 engine supports exact policies through v4.0.0. The
-published v4.1.0 engine retains those policies and adds v4.1.0. The v4.2.0
-candidate retains supported exact policies through v4.1.0 and adds its own
-v4.2.0 policy after immutable publication.
+published v4.1.0 engine retains those policies and adds v4.1.0. The published
+v4.2.1 engine retains supported exact policies through v4.1.0 and adds v4.2.0
+and v4.2.1. The v4.3.0 candidate retains those policies and adds its own v4.3.0
+policy after immutable publication.
 
 Managed: use the working-tree manifest's exact release, each affected component's
 declared Python and already prepared Gate runtime/dependencies. Analyze the whole
@@ -328,8 +329,8 @@ Policy v3.1.0 added optional schema 2 `python[].typecheck: boolean` (default
 true). Full Gate and edits honor false. Policies through v3.0.0 do not support
 this field: explicitly using it with an older selected policy is unchecked,
 including explicit true. Existing manifests without it retain their exact
-v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2/v3.0.0 policy selection. The provider manifest
-selects v4.1.0. Host activation remains a separate operation.
+v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2/v3.0.0 policy selection. Host activation
+remains a separate operation.
 
 Managed discovery matches the pinned mypy directory discovery: skip names starting
 `.` and names `__pycache__`, `site-packages`, `node_modules`; include `build`,
@@ -350,12 +351,32 @@ The exact released `mypy.ini` is used, including `follow_imports=skip` and
 `ignore_missing_imports=True`; no typing waivers are added. An import prerequisite
 preflight statically checks available source/stub/dependency context without
 executing project imports or plugins. Missing/ambiguous context is unchecked.
-This preflight does not tighten the released checker flags. External implementation
-bodies skipped by the policy, untyped functions allowed by it, dynamic imports and
-runtime-dependent typing remain policy limits, not demonstrated correctness.
+Before mypy runs, the import-context preflight requires imported modules to be
+available from captured component sources, the standard library, typeshed, an
+installed typed package, an installed `*-stubs` package, or a declared local stub
+root. Missing typing context returns `dependencies`, even when the selected mypy
+flags use `ignore_missing_imports = true`. The preflight does not change the flags
+passed to mypy. External implementation bodies skipped by the policy, untyped
+functions allowed by it, dynamic imports and runtime-dependent typing remain policy
+limits, not demonstrated correctness.
+
+Managed components may declare local stubs with `stub_roots` in their `python[]`
+manifest table. Each entry is a unique POSIX-relative directory path from the
+component root, such as `stub_roots = ["stubs"]`. The directory must exist and be
+inside the component tree captured by the provider. Absolute paths, traversal,
+missing directories, and paths outside the component make the result unchecked.
+The provider passes these roots from its captured component snapshot to isolated
+mypy through `MYPYPATH`, separated with the platform's path separator. Stub `.pyi`
+files are part of component inventory and directory evidence, so
+content or membership changes invalidate freshness. Unmanaged projects do not accept
+local stub roots. Installed typed dependencies and `*-stubs` packages continue to
+resolve from the selected environment. The setting requires policy v3.2.0 or newer.
 
 Setup is explicit: sync the exact immutable policy, run managed `setup` and
 `doctor`; unmanaged users prepare `.venv` and its declared dependencies/stubs
 explicitly. Editing uses no global Python fallback. Corrupt installed tools or
-changed dependencies require explicit repair/setup. Analysis caches and measured
-cold/warm behavior are documented in the provider evidence before release.
+changed dependencies require explicit repair/setup. Mypy analysis caches are private
+to one invocation and removed with its workspace; there is no persistent typing-result
+cache, incremental database or daemon. Warm filesystem pages do not reuse prior analysis.
+Follow the [interface verification requirements](release.md#working-tree-interface-verification)
+for same-release parity, cold/warm measurements and host activation.

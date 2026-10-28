@@ -34,8 +34,10 @@ Use this map before non-trivial codebase questions, design work, or code changes
   This path uses schema validation through `contracts.parse_manifest` without expanding
   supplemental test targets. It creates no Git-index candidate and runs no full checks or setup.
   The supervisor imports the explicit engine directory or wheel and starts the writer in
-  its private same-volume workspace; read-only validation uses a temporary workspace outside
-  the project. An archive path is never used as a working directory.
+  its private workspace through `temp_workspace.temporary_workspace`, shared by all edit
+  modes under the explicit root's `temp/qg-*`, with a system-temp fallback for read-only
+  roots. Active locks protect concurrent runs and allow later stale-run reclamation.
+  An archive path is never used as a working directory.
   See [the public protocol and compatibility contract](edit-check.md).
 
 - **Working-tree secret checking** — public `edit-secrets` shares `edit_cli.py`,
@@ -58,26 +60,31 @@ Use this map before non-trivial codebase questions, design work, or code changes
   environment inventories and host-owned cancellation signals. Schema 1 consumes
   the remaining synchronous deadline; schema 2 binds one supervised background
   invocation to an event and cancellation path. The host owns scheduling,
-  replacement, active-turn delivery and Stop/drain. `contracts.py`, `runner.py`
-  and `runtime.py` share the new policy's optional `typecheck` opt-out while
-  retaining default-true older runtime identities. See the [wire contract](edit-types.md)
-  and [provider preparation evidence](audits/edit-types-provider.md).
+  replacement, active-turn delivery and Stop/drain. `contracts.py` validates the
+  optional `typecheck` opt-out and the policy-gated `stub_roots` component paths;
+  the provider resolves the latter only from the captured component tree.
+  See the [wire contract](edit-types.md)
+  and [interface verification requirements](release.md#working-tree-interface-verification).
 
-- **Dependabot owner review** — `.github/workflows/dependabot-review.yml` handles non-draft
-  Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
+- **Dependabot review and patch auto-merge.** `.github/workflows/dependabot-review.yml` handles
+  non-draft Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
   `pull-requests: write`, requests the repository owner's review, and skips duplicate requests
   when the owner is already requested or has reviewed. It checks out and executes no PR code.
-  `.github/workflows/dependabot-auto-merge.yml` uses Dependabot alert metadata to exclude security
-  updates, then requests squash auto-merge only for semver patch version updates targeting `main`;
-  the required `Quality Gate` check must pass before GitHub merges the pull request.
+  The exact `.github/workflows/dependabot-auto-merge.yml` template is the only other
+  Dependabot-specific PR-triggered write exception in `quality_gate/integrity.py`. It checks
+  non-draft Dependabot bot PRs targeting `main`, obtains metadata with a full-SHA-pinned action,
+  and fails closed unless
+  every grouped update is an object whose `ghsaId` is exactly the empty string. It requests
+  auto-merge only when the action reports the PR's highest update type as semver-patch. Workflow
+  findings at that path cannot be waived. It has job-scoped write permissions and does not check
+  out or execute PR code. See
+  [the quality policy change guide](quality-policy-changes.md) for its required conditions.
   The v2.5.0 rule in `quality_gate/publication_flow.py` interprets a missing `## Release` section as
   `No release` only for Dependabot bot PRs whose complete, stable API file list contains workflow
   YAML files directly under `.github/workflows/`; it checks old names on renames and skips mixed or
   incomplete changes. This read-only path leaves the generated PR description untouched.
   `.github/dependabot.yml` assigns issues separately; provider calls here use same-repository
   references, so external-provider update grouping is unnecessary.
-  [The v2.4.2 acceptance audit](audits/provider-v2.4.2-acceptance.md) records the immutable
-  provider handoff, activation reruns and remaining consumer/live-event acceptance.
 
 - **Working-tree integrity checking** — public `edit-integrity` shares the bounded
   `edit_cli.py`, `edit_protocol.py`, `edit_worker.py` and `edit_process.py` transport.
