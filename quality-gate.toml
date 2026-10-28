@@ -47,6 +47,8 @@ required_documents = [
     "docs/release.md",
     "docs/publication.md",
     ".github/dependabot.yml",
+    ".github/quality-gate-consumers.json",
+    ".github/workflows/consumer-release-rollout.yml",
     ".github/workflows/dependabot-auto-merge.yml",
     ".github/workflows/release-rollout.yml",
     ".github/workflows/release.yml",
@@ -59,6 +61,7 @@ required_documents = [
     "scripts/release_build.py",
     "scripts/release_metadata.py",
     "quality_gate/release_rollout.py",
+    "quality_gate/consumer_rollout.py",
     "quality-gate.toml",
 ]
 

@@ -1,6 +1,7 @@
 # Интеграции и автоматические обновления
 
-Документ описывает настройки CodeRabbit и Dependabot в публичном репозитории Quality Gate.
+Документ описывает, что делают CodeRabbit, Dependabot и release rollout в публичном
+репозитории Quality Gate и в зарегистрированных приватных репозиториях-потребителях.
 
 ## CodeRabbit: комментарии к pull request
 
@@ -26,3 +27,48 @@ GitHub может слить pull request. Исправления безопас
 Для проверки alert workflow использует secret `DEPENDABOT_ALERTS_TOKEN`. Это fine-grained token с
 правом `Dependabot alerts: read`, ограниченный публичным репозиторием Quality Gate. Workflow читает
 метаданные через GitHub API, но не checkout-ит и не запускает код pull request.
+
+## Rollout после выпуска Quality Gate
+
+После успешной публикации и проверки релиза release workflow отправляет событие с версией и точным
+SHA переиспользуемого workflow. В
+[публичном реестре потребителей](../.github/quality-gate-consumers.json) перечислены семь репозиториев:
+
+- `quality-gate` использует `activation: "provider"`. Workflow `release-rollout.yml` создаёт один PR
+  с обновлением policy, parity-фикстуры и связанных проверок;
+- шесть приватных потребителей обрабатываются через `consumer-release-rollout.yml`. Для каждого
+  создаётся или обновляется один PR, без второго PR в `quality-gate`.
+
+В потребителях бот обновляет `quality-gate.toml`, если он есть, и все активные вызовы Quality Gate
+workflows в `.github/workflows`. Для репозитория `skills` он также обновляет шаблон
+`skills/setup-repo/assets/quality-workflow.yml`. Если выходит новый релиз, пока такой pull request
+открыт, бот обновляет его до новой версии. Закрытый pull request того же релиза бот не открывает
+снова; следующий релиз создаёт новый.
+
+Все rollout pull request требуют решения человека и не сливаются автоматически. Бот не меняет
+ветки по умолчанию. Если обновление одного потребителя не удалось, workflow сообщает об ошибке и
+продолжает обработку остальных. Каждая задача получает отдельный токен для провайдера и одного
+потребителя. Ошибка выдачи токена также не отменяет остальные задачи.
+
+Перед изменениями бот проверяет версию и SHA по опубликованному релизу. Динамические ссылки вида
+`@${{ vars.SHA }}`, отсутствующие настроенные ссылки и ветки без управляемого PR требуют
+вмешательства владельца. Бот завершает обработку такого потребителя с ошибкой.
+
+При потере события восстановите consumer rollout ручным запуском `consumer-release-rollout.yml`
+с версией и SHA из записи успешной публикации. Для активации самого `quality-gate` отдельно запустите
+`release-rollout.yml` с теми же данными.
+
+Реестр находится в публичном репозитории, поэтому в нём видны имена всех зарегистрированных
+репозиториев. Сами репозитории могут оставаться приватными.
+
+## Доступы для GitHub App
+
+Для создания pull request release workflow использует GitHub App, установленный только на
+`quality-gate` и перечисленные в реестре репозитории. Ему требуются права `Contents: write` и
+`Pull requests: write`; для потребителей добавляется `Workflows: write`, чтобы обновлять файлы
+workflow. В настройках `quality-gate` хранятся repository variable
+`QUALITY_GATE_ROLLOUT_APP_CLIENT_ID` и secret `QUALITY_GATE_ROLLOUT_APP_PRIVATE_KEY`.
+
+В приватном репозитории на GitHub Free невозможно сделать статус CI обязательным условием слияния.
+Поэтому rollout PR там всё равно откроется, но владелец должен проверить результаты Actions вручную
+перед слиянием ([документация GitHub о доступности required checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)).

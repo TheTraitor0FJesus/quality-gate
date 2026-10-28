@@ -221,6 +221,23 @@ event cannot downgrade it. A closed PR stays closed for its last selected releas
 can create a new PR. Rollout executions are serialized without cancelling an active update. Human
 review and merge complete activation. Never make the provider depend on an unpublished policy asset.
 
+The consumer registry is `.github/quality-gate-consumers.json`. It includes `quality-gate` with
+`activation: "provider"`, handled only by `release-rollout.yml` as described above. The separate
+`consumer-release-rollout.yml` opens or refreshes one pull request for every other registered
+consumer, updating each policy manifest and all active Quality Gate workflow references to the
+verified helper SHA. It updates both the root manifest and active workflow in `skills` as well as
+`skills/setup-repo/assets/quality-workflow.yml`. Each matrix job obtains a provider/consumer-scoped
+token and validates the published receipt/tag before mutations. Failed targets do not cancel others.
+No bot job writes to a default branch or merges a rollout pull request. A newer release updates the
+existing open pull request; a closed pull request is not reopened for that same version. Human review
+and merge complete activation.
+
+Recover missed consumer rollouts separately with the same verified release identity:
+
+```shell
+gh workflow run consumer-release-rollout.yml --ref <default-branch> -f version=<MAJOR.MINOR.PATCH> -f provider_sha=<verified-full-sha>
+```
+
 If publication succeeds but event dispatch or rollout is unavailable, run `release-rollout.yml`
 manually only with the version and helper SHA from the verified publication record. This recovers the
 same release and does not start a new publication.

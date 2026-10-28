@@ -155,21 +155,44 @@ Never treat an `unchecked` result as a pass.
 
 ## Consumer release update
 
-Keep the consumer on its current release while downloading the target immutable asset:
+After verified publication, `consumer-release-rollout.yml` opens or refreshes consumer pull requests
+from `.github/quality-gate-consumers.json`. The registry also lists `quality-gate` with
+`activation: "provider"`; `release-rollout.yml` handles that entry through the existing provider
+activation route, so the generic consumer job creates no duplicate provider PR.
+Consumer PRs update the manifest policy release and every active
+Quality Gate reusable-workflow reference together. They also update setup templates such as
+`skills/setup-repo/assets/quality-workflow.yml`. Review the complete diff and merge it only after the
+consumer checks pass. Rollout PRs are never auto-merged, and the bot never pushes to a default branch.
+
+For a private GitHub Free consumer, required status checks cannot be enforced by branch protection.
+Inspect its Actions results manually before merge. See [integration behavior](integrations.md) for the
+private-repository limitation and service setup.
+
+If the bot misses a release event, first confirm the release was fully published and verified. Then
+run `consumer-release-rollout.yml` manually with the published version and verified helper SHA.
+This recovers the rollout for that release and does not publish another release.
+
+Each matrix job obtains a token scoped to the provider and one consumer. Token creation or rollout
+failure affects only that target; other jobs still run. Each target validates the publication receipt
+and tag before writes, then rejects dynamic or malformed workflow references and missing configured
+pins. An existing branch without its managed open PR requires owner recovery and is never overwritten.
+
+Use the following manual procedure only when rollout automation cannot update a consumer. Keep the
+consumer on its current release while downloading the target immutable asset:
 
 ```text
 quality-gate sync --url <target-release-asset-url> --version <target-version>
 ```
 
-Then change these two independent pins in one feature-branch candidate:
+Then change the policy pin and all active caller references in one feature-branch candidate:
 
 1. Set `quality.policy_release` in `quality-gate.toml` to the target release. This selects the
    local wheel, policy files, scanner, and component tools.
-2. Set the caller workflow `uses` value to the full commit SHA that contains the compatible
-   reusable `.github/workflows/quality.yml`. This selects the CI implementation. Obtain the SHA
-   from the verified release tag or publication record; do not use a tag or branch in the caller.
+2. Set every caller `uses` value for Quality Gate reusable workflows to the same full provider
+   commit SHA that contains the compatible workflow implementation. Obtain the SHA from the verified
+   release record; do not use a tag or branch in a caller.
 
-Run `validate`, `setup`, and `doctor`, then stage the manifest and workflow together. Use one
+Run `validate`, `setup`, and `doctor`, then stage every changed manifest and workflow together. Use one
 typed test-runner `scope: full` request: it runs every declared supplemental test and then the
 staged `quality-gate check`, while a repository without a manifest keeps ordinary complete-suite
 discovery. Commit only after it passes; the native commit hook repeats the staged gate. Push the

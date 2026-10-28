@@ -347,12 +347,11 @@ def _publish_branch(
 	commit_sha: str,
 	*,
 	existing_branch: bool,
-	open_pull: bool,
 ) -> None:
-	if open_pull or existing_branch:
+	if existing_branch:
 		client.patch(
 			f"/git/refs/heads/{quote(branch, safe='')}",
-			{"sha": commit_sha, "force": existing_branch and not open_pull},
+			{"sha": commit_sha, "force": False},
 		)
 	else:
 		client.post("/git/refs", {"ref": f"refs/heads/{branch}", "sha": commit_sha})
@@ -403,9 +402,8 @@ def _update_rollout(
 	if base_sha is None:
 		raise RolloutError("default branch ref is missing")
 	open_pull = _managed_open_pull(client, owner, repository, base_branch)
-	if open_pull is not None:
-		if _pull_version(open_pull) > tuple(map(int, version.split("."))):
-			return "skipped older rollout event"
+	if open_pull is not None and _pull_version(open_pull) > tuple(map(int, version.split("."))):
+		return "skipped older rollout event"
 	if open_pull is None:
 		branch = _new_branch(version, repository)
 		closed = _pull_requests(client, "closed", base_branch)
@@ -418,12 +416,17 @@ def _update_rollout(
 		parent_sha = base_sha
 		working_tree = _tree(client, parent_sha)
 		existing_branch = _branch_sha(client, branch) is not None
+		if existing_branch:
+			raise RolloutError("existing rollout branch has no managed open pull request")
 	else:
 		head = _mapping(open_pull.get("head"), "rollout PR head")
 		branch = _text(head.get("ref"), "rollout PR branch")
 		if branch == base_branch:
 			raise RolloutError("rollout branch must differ from the default branch")
 		parent_sha = _sha(head.get("sha"))
+		# Validate both inputs before a merge can mutate the managed PR branch.
+		updates_for_tree(client, _tree(client, base_sha))
+		updates_for_tree(client, _tree(client, parent_sha))
 		parent_sha = _sync_branch_with_base(client, branch, base_branch, base_sha, parent_sha)
 		working_tree = _tree(client, parent_sha)
 		existing_branch = True
@@ -448,7 +451,6 @@ def _update_rollout(
 		branch,
 		commit_sha,
 		existing_branch=existing_branch,
-		open_pull=open_pull is not None,
 	)
 	return _ensure_pull_request(
 		client,
