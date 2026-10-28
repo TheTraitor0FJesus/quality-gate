@@ -72,6 +72,9 @@ release. It must not import mutable source from this repository or depend on Cod
 ## Project-specific behavior
 
 Each project may declare Python component paths, existing test directories, and dependency files in `quality-gate.toml`.
+For working-tree typing, a Python component may also declare `stub_roots` as unique component-relative directories
+inside its captured tree. This field requires policy v3.2.0 or newer; the edit-types provider hashes their `.pyi`
+contents and passes the approved roots to isolated mypy.
 It may also declare repository-owned supplemental tests with `[[supplemental_tests]]` entries using
 the `node-test` runner and repository-relative targets. The manifest validator checks their
 identities, matches, and bounded expansion size; the Quality Gate never executes them. The typed

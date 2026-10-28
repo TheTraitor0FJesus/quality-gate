@@ -351,9 +351,26 @@ The exact released `mypy.ini` is used, including `follow_imports=skip` and
 `ignore_missing_imports=True`; no typing waivers are added. An import prerequisite
 preflight statically checks available source/stub/dependency context without
 executing project imports or plugins. Missing/ambiguous context is unchecked.
-This preflight does not tighten the released checker flags. External implementation
-bodies skipped by the policy, untyped functions allowed by it, dynamic imports and
-runtime-dependent typing remain policy limits, not demonstrated correctness.
+Before mypy runs, the import-context preflight requires imported modules to be
+available from captured component sources, the standard library, typeshed, an
+installed typed package, an installed `*-stubs` package, or a declared local stub
+root. Missing typing context returns `dependencies`, even when the selected mypy
+flags use `ignore_missing_imports = true`. The preflight does not change the flags
+passed to mypy. External implementation bodies skipped by the policy, untyped
+functions allowed by it, dynamic imports and runtime-dependent typing remain policy
+limits, not demonstrated correctness.
+
+Managed components may declare local stubs with `stub_roots` in their `python[]`
+manifest table. Each entry is a unique POSIX-relative directory path from the
+component root, such as `stub_roots = ["stubs"]`. The directory must exist and be
+inside the component tree captured by the provider. Absolute paths, traversal,
+missing directories, and paths outside the component make the result unchecked.
+The provider passes these roots from its captured component snapshot to isolated
+mypy through `MYPYPATH`, separated with the platform's path separator. Stub `.pyi`
+files are part of component inventory and directory evidence, so
+content or membership changes invalidate freshness. Unmanaged projects do not accept
+local stub roots. Installed typed dependencies and `*-stubs` packages continue to
+resolve from the selected environment. The setting requires policy v3.2.0 or newer.
 
 Setup is explicit: sync the exact immutable policy, run managed `setup` and
 `doctor`; unmanaged users prepare `.venv` and its declared dependencies/stubs

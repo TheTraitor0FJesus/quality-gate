@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import configparser
 import json
+import os
 import re
 import time
 import tomllib
@@ -231,6 +232,7 @@ class _TypingInvocation:
 		if not sources:
 			raise EditError("configuration")
 		_capture_configuration(self.configuration, directories, path, managed)
+		stub_roots = _local_stub_roots(self.root, component, directories)
 		selection = select_environment(
 			self.root,
 			self.cache,
@@ -244,10 +246,21 @@ class _TypingInvocation:
 		self.result["process_count"] += 1
 		record.update(self._selection_record(component, sources, directories, selection))
 		self._snapshot_sources(sources, path)
-		record["import_count"] = _import_context(sources, path, selection)
+		record["import_count"] = _import_context(
+			sources,
+			path,
+			selection,
+			tuple(str(self.root / root) for root in stub_roots),
+		)
 		started = time.monotonic()
 		record["diagnostics"] = _analyze(
-			self.snapshot, path, record["inventory"], selection, self.workspace, self.deadline
+			self.snapshot,
+			path,
+			record["inventory"],
+			selection,
+			self.workspace,
+			self.deadline,
+			stub_roots,
 		)
 		record["analysis_ms"] = round((time.monotonic() - started) * 1000)
 		self.result["process_count"] += 1
@@ -412,7 +425,12 @@ def _copy_ancestors(configuration: Configuration, snapshot: Path, path: str) -> 
 				target.write_bytes(content)
 
 
-def _import_context(sources: list[SourceFile], scope: str, selection: TypingEnvironment) -> int:
+def _import_context(
+	sources: list[SourceFile],
+	scope: str,
+	selection: TypingEnvironment,
+	stub_roots: tuple[str, ...] = (),
+) -> int:
 	local_modules = _local_modules(sources, scope)
 	count = 0
 	for source in sources:
@@ -424,6 +442,7 @@ def _import_context(sources: list[SourceFile], scope: str, selection: TypingEnvi
 					and name not in selection.stdlib
 					and name != "os.path"  # The stdlib re-exports the platform path module.
 					and not _typed_dependency(selection.site, name)
+					and not any(_local_typed_dependency(Path(root), name) for root in stub_roots)
 				):
 					raise EditError("dependencies")
 	return count
@@ -490,6 +509,42 @@ def _typed_dependency(site: Path, name: str) -> bool:
 	)
 
 
+def _local_typed_dependency(root: Path, name: str) -> bool:
+	module = root.joinpath(*name.split("."))
+	return (
+		module.with_suffix(".pyi").is_file()
+		or (module / "__init__.pyi").is_file()
+		or (module / "py.typed").is_file()
+	)
+
+
+def _local_stub_roots(
+	root: Path, component: PythonComponent | None, directories: list[dict[str, Any]]
+) -> tuple[str, ...]:
+	"""Resolve manifest stub roots inside the captured component tree."""
+	if component is None:
+		return ()
+	component_path = Path(component.path)
+	captured_directories = {record["path"] for record in directories}
+	roots: list[str] = []
+	for value in component.stub_roots:
+		candidate = Path(value)
+		if (
+			candidate.is_absolute()
+			or "\\" in value
+			or ":" in value
+			or any(part in {"", ".", ".."} for part in value.split("/"))
+		):
+			raise EditError("unsafe_path")
+		relative = (component_path / candidate).as_posix()
+		if not Path(relative).is_relative_to(component_path):
+			raise EditError("unsafe_path")
+		if relative not in captured_directories or not (root / relative).is_dir():
+			raise EditError("dependencies")
+		roots.append(relative)
+	return tuple(sorted(set(roots)))
+
+
 def _analyze(
 	snapshot: Path,
 	path: str,
@@ -497,6 +552,7 @@ def _analyze(
 	selection: TypingEnvironment,
 	workspace: Path,
 	deadline: float,
+	stub_roots: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
 	runtime = (
 		selection.site.parent.parent
@@ -518,6 +574,7 @@ def _analyze(
 		"sys.meta_path.insert(0,ToolImports())\nsys.path.append(str(site))\n"
 		"sys.argv=['mypy',*sys.argv[1:]]\nrunpy.run_module('mypy',run_name='__main__')"
 	)
+	environment = _mypy_environment(workspace, snapshot, stub_roots)
 	code, output, stderr = run_process(
 		[
 			str(selection.python),
@@ -539,7 +596,7 @@ def _analyze(
 			path,
 		],
 		root=snapshot,
-		environment=process_environment(workspace),
+		environment=environment,
 		deadline=deadline,
 	)
 	if stderr or code not in {0, 1}:
@@ -571,3 +628,12 @@ def _analyze(
 			diagnostic["code"],
 		),
 	)
+
+
+def _mypy_environment(
+	workspace: Path, snapshot: Path, stub_roots: tuple[str, ...]
+) -> dict[str, str]:
+	environment = process_environment(workspace)
+	if stub_roots:
+		environment["MYPYPATH"] = os.pathsep.join(str(snapshot / root) for root in stub_roots)
+	return environment

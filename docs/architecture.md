@@ -56,9 +56,10 @@ Use this map before non-trivial codebase questions, design work, or code changes
   environment inventories and host-owned cancellation signals. Schema 1 consumes
   the remaining synchronous deadline; schema 2 binds one supervised background
   invocation to an event and cancellation path. The host owns scheduling,
-  replacement, active-turn delivery and Stop/drain. `contracts.py`, `runner.py`
-  and `runtime.py` share the new policy's optional `typecheck` opt-out while
-  retaining default-true older runtime identities. See the [wire contract](edit-types.md)
+  replacement, active-turn delivery and Stop/drain. `contracts.py` validates the
+  optional `typecheck` opt-out and the policy-gated `stub_roots` component paths;
+  the provider resolves the latter only from the captured component tree.
+  See the [wire contract](edit-types.md)
   and [interface verification requirements](release.md#working-tree-interface-verification).
 
 - **Dependabot review and patch auto-merge.** `.github/workflows/dependabot-review.yml` handles
