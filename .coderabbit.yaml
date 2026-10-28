@@ -1,0 +1,15 @@
+language: ru-RU
+tone_instructions: >-
+  Write concise reviews in Russian. Explain concrete failure modes and avoid style-only findings.
+reviews:
+  profile: chill
+  review_progress: false
+  review_status: false
+  commit_status: false
+  auto_approvals:
+    enabled: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - ^main$

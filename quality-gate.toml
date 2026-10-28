@@ -11,7 +11,7 @@ expires_on = "2027-08-26"
 
 [quality]
 schema = 2
-policy_release = "v4.2.0"
+policy_release = "v4.3.0"
 
 [repository]
 name = "quality-gate"
@@ -28,8 +28,10 @@ required_documents = [
     ".release/version.toml",
     ".release/notes.md",
     ".release/publisher.toml",
+    ".coderabbit.yaml",
     "README.md",
     "docs/agent-reference.md",
+    "docs/integrations.md",
     "docs/edit-check.md",
     "docs/edit-secrets.md",
     "docs/edit-integrity.md",
@@ -44,6 +46,8 @@ required_documents = [
     "docs/quality-policy-changes.md",
     "docs/release.md",
     "docs/publication.md",
+    ".github/dependabot.yml",
+    ".github/workflows/dependabot-auto-merge.yml",
     ".github/workflows/release-rollout.yml",
     ".github/workflows/release.yml",
     ".github/workflows/release-prepare.yml",

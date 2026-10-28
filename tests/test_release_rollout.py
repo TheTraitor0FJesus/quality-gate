@@ -213,6 +213,8 @@ def _provider_client() -> FakeGitHub:
 			"tests/test_integrity.py",
 		)
 	}
+	for path in ("quality-gate.toml", "tests/fixtures/release-parity/quality-gate.toml"):
+		files[path] = update_policy_release(files[path], "4.2.0")
 	files["quality-gate.toml"] = files["quality-gate.toml"].replace(
 		"\n[[waivers]]",
 		"\n" + WAIVER_MARKER + '\n[[waivers]]\nkind = "standard"\n'
