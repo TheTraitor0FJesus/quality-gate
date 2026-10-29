@@ -1053,6 +1053,8 @@ class GitHubCLI:
 	) -> object:
 		content = json.dumps(payload).encode("utf-8") if payload is not None else None
 		raw = self.command(self._arguments(path, method), content=content, limit=JSON_LIMIT)
+		if path == "/dispatches" and method == "POST" and raw == b"":
+			return {}
 		try:
 			value = json.loads(raw)
 		except (UnicodeError, json.JSONDecodeError) as error:

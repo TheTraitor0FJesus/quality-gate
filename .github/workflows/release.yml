@@ -99,3 +99,35 @@ jobs:
     with:
       pr-number: ${{ format('{0}', github.event.pull_request.number || inputs.pr_number) }}
       candidate-id: ${{ needs.prepare.outputs.candidate-id }}
+
+  dispatch-rollout:
+    name: Dispatch verified release rollout
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.status == 'build-required' && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the executed release dispatcher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Create provider-scoped dispatch token
+        id: dispatch-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.QUALITY_GATE_ROLLOUT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.QUALITY_GATE_ROLLOUT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: quality-gate
+          permission-contents: write
+
+      - name: Send published release event
+        env:
+          GH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          QUALITY_GATE_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          QUALITY_GATE_PROVIDER_SHA: ${{ needs.prepare.outputs.provider-sha }}
+        shell: bash
+        run: python -B -m quality_gate.release_rollout dispatch
