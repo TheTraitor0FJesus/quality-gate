@@ -26,6 +26,18 @@ PROVIDER_SHA = "b" * 40
 NEXT_PROVIDER_SHA = "c" * 40
 
 
+class JsonCommand:
+	def __init__(self, responses: Sequence[object]) -> None:
+		self.responses = [json.dumps(response).encode("utf-8") for response in responses]
+		self.calls: list[list[str]] = []
+
+	def __call__(
+		self, arguments: Sequence[str], *, content: bytes | None = None, limit: int
+	) -> bytes:
+		self.calls.append(list(arguments))
+		return self.responses.pop(0)
+
+
 class FakeGitHub:
 	"""In-memory Git and pull-request API for the public rollout behavior."""
 
@@ -223,6 +235,57 @@ def test_workflow_symlink_is_rejected_before_entry_type(
 	monkeypatch.setattr(client, "get", get)
 	with pytest.raises(RolloutError, match="symbolic link"):
 		release_rollout._tree(client, client.refs["main"])
+
+
+def test_git_commit_messages_are_data_for_rollout_reads_and_writes() -> None:
+	parent_sha = "a" * 40
+	parent_tree_sha = "b" * 40
+	file_sha = "c" * 40
+	updated_blob_sha = "d" * 40
+	updated_tree_sha = "e" * 40
+	updated_commit_sha = "f" * 40
+	parent_commit = {
+		"sha": parent_sha,
+		"message": "fix: восстановить публикацию и автоматизацию Dependabot (#147)",
+		"tree": {"sha": parent_tree_sha},
+		"parents": [{"sha": "0" * 40}],
+	}
+	command = JsonCommand(
+		[
+			parent_commit,
+			{
+				"truncated": False,
+				"tree": [
+					{
+						"path": "quality-gate.toml",
+						"mode": "100644",
+						"type": "blob",
+						"sha": file_sha,
+					}
+				],
+			},
+			{"sha": updated_blob_sha},
+			parent_commit,
+			{"sha": updated_tree_sha},
+			{
+				"sha": updated_commit_sha,
+				"message": "chore: update Quality Gate to v4.5.0",
+				"tree": {"sha": updated_tree_sha},
+				"parents": [{"sha": parent_sha}],
+			},
+		]
+	)
+	client = GitHubCLI(PROVIDER, timeout_seconds=60, command=command)
+
+	assert release_rollout._tree(client, parent_sha) == {"quality-gate.toml": file_sha}
+	assert (
+		release_rollout._commit_updates(
+			client, parent_sha, {"quality-gate.toml": "updated"}, "4.5.0"
+		)
+		== updated_commit_sha
+	)
+	assert command.calls[0][2] == f"repos/{PROVIDER}/git/commits/{parent_sha}"
+	assert command.calls[5][2] == f"repos/{PROVIDER}/git/commits"
 
 
 def test_foreign_rollout_branch_is_ignored_before_marker_validation(

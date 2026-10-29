@@ -1060,7 +1060,26 @@ class GitHubCLI:
 		except (UnicodeError, json.JSONDecodeError) as error:
 			raise PublicationError("GitHub returned invalid JSON") from error
 		if isinstance(value, dict) and "message" in value:
-			raise PublicationError("GitHub returned an API error object")
+			commit_sha = value.get("sha")
+			commit_tree = value.get("tree")
+			commit_tree_sha = commit_tree.get("sha") if isinstance(commit_tree, dict) else None
+			commit_path = (method == "POST" and path == "/git/commits") or (
+				method == "GET" and re.fullmatch(r"/git/commits/[0-9a-f]{40}", path) is not None
+			)
+			is_commit = (
+				commit_path
+				and isinstance(value.get("message"), str)
+				and isinstance(commit_sha, str)
+				and re.fullmatch(r"[0-9a-f]{40}", commit_sha) is not None
+				and isinstance(commit_tree_sha, str)
+				and re.fullmatch(r"[0-9a-f]{40}", commit_tree_sha) is not None
+				and isinstance(value.get("parents"), list)
+				and not any(key in value for key in ("documentation_url", "errors", "status"))
+			)
+			# Git Data commit resources have a top-level commit message; BoundedCommand
+			# already rejects unsuccessful GitHub CLI invocations before parsing stdout.
+			if not is_commit:
+				raise PublicationError("GitHub returned an API error object")
 		return value
 
 	def get(self, path: str) -> object:
