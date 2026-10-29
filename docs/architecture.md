@@ -70,8 +70,8 @@ Use this map before non-trivial codebase questions, design work, or code changes
   non-draft Dependabot PRs targeting `main` from trusted base metadata. Its only job grants
   `pull-requests: write`, requests the repository owner's review, and skips duplicate requests
   when the owner is already requested or has reviewed. It checks out and executes no PR code.
-  The exact `.github/workflows/dependabot-auto-merge.yml` template is the only other
-  Dependabot-specific PR-triggered write exception in `quality_gate/integrity.py`. It checks
+  The exact `.github/workflows/dependabot-auto-merge.yml` template is the other
+  Dependabot-specific PR-triggered GitHub token write exception in `quality_gate/integrity.py`. It checks
   non-draft Dependabot bot PRs targeting `main`, obtains metadata with a full-SHA-pinned action,
   and fails closed unless
   every grouped update is an object whose `ghsaId` is exactly the empty string. It requests
@@ -83,6 +83,11 @@ Use this map before non-trivial codebase questions, design work, or code changes
   `No release` only for Dependabot bot PRs whose complete, stable API file list contains workflow
   YAML files directly under `.github/workflows/`; it checks old names on renames and skips mixed or
   incomplete changes. This read-only path leaves the generated PR description untouched.
+  `.github/workflows/dependabot-release-decision.yml` checks out the trusted base revision and
+  uses a repository-scoped App token to add an explicit no-release section to Dependabot PRs;
+  `scripts/dependabot_release.py` preserves existing decisions and validates current PR metadata.
+  The App-originated edit triggers release validation again. The integrity check requires the exact
+  approved workflow before a pull-request-target workflow can access the rollout App key.
   `.github/dependabot.yml` assigns issues separately; provider calls here use same-repository
   references, so external-provider update grouping is unnecessary.
 

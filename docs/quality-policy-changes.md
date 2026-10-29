@@ -36,6 +36,12 @@ Any change to the trigger, guard, metadata check, patch condition, permissions, 
 command, secret, or steps requires a separately reviewed policy change. Do not add a broad
 exception or modify a cached release to bypass this template rule.
 
+The provider's `dependabot-release-decision.yml` uses the rollout App key on `pull_request_target`
+to write a no-release decision. The integrity check accepts only the exact approved workflow and
+provider repository for that use of the App key. It checks out the trusted base, verifies the PR
+author, and scopes the App token to pull-request writes. Its App-originated edit allows the existing
+release validation workflow to run again.
+
 Release validation also accepts an absent `## Release` section as an implicit no-release decision
 only when the PR author is `dependabot[bot]` with type `Bot` and the complete, stable GitHub API file
 list contains only `.yml` or `.yaml` files directly under `.github/workflows/`. Both current and

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -880,9 +881,30 @@ def _workflow_paths(root: Path) -> list[Path]:
 	)
 
 
+def _dependabot_app_findings(workflow: _Workflow, is_quality_gate_provider: bool) -> list[Finding]:
+	if workflow.path == _DEPENDABOT_DECISION_PATH or (
+		"pull_request_target" in workflow.events
+		and "QUALITY_GATE_ROLLOUT_APP_PRIVATE_KEY" in workflow.source
+	):
+		fingerprint = hashlib.sha256(workflow.source.rstrip("\r\n").encode("utf-8")).hexdigest()
+		if (
+			not is_quality_gate_provider
+			or workflow.path != _DEPENDABOT_DECISION_PATH
+			or fingerprint != _DEPENDABOT_DECISION_FINGERPRINT
+		):
+			return [
+				_workflow_finding(
+					workflow.path,
+					"Dependabot decision App workflow differs from the approved template",
+					"restore the exact trusted metadata-only workflow",
+				)
+			]
+	return []
+
+
 def _single_workflow_findings(workflow: _Workflow, is_quality_gate_provider: bool) -> list[Finding]:
-	findings: list[Finding] = []
-	findings.extend(_workflow_reference_findings(workflow))
+	findings = _workflow_reference_findings(workflow)
+	findings.extend(_dependabot_app_findings(workflow, is_quality_gate_provider))
 	is_pull_request = bool({"pull_request", "pull_request_target"} & workflow.events)
 	findings.extend(
 		_workflow_permission_findings(workflow, is_pull_request, is_quality_gate_provider)
@@ -925,6 +947,12 @@ def _single_workflow_findings(workflow: _Workflow, is_quality_gate_provider: boo
 			)
 		)
 	return findings
+
+
+_DEPENDABOT_DECISION_PATH = ".github/workflows/dependabot-release-decision.yml"
+_DEPENDABOT_DECISION_FINGERPRINT = (
+	"b004e8341772415f2c0b225ff70e06cb35eaa16ac8d25d159669d88f9ae22499"
+)
 
 
 def _workflow_permission_findings(
