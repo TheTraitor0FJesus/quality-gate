@@ -202,6 +202,45 @@ def test_only_marked_temporary_waiver_is_removed() -> None:
 		remove_marked_waivers(WAIVER_MARKER + "\n[quality]\n")
 
 
+@pytest.mark.parametrize("entry_type", ["blob", "tree"])
+def test_workflow_symlink_is_rejected_before_entry_type(
+	monkeypatch: pytest.MonkeyPatch, entry_type: str
+) -> None:
+	client = FakeGitHub({".github/workflows/quality.yml": "content"})
+	original_get = client.get
+
+	def get(path: str) -> object:
+		response = original_get(path)
+		if path.startswith("/git/trees/"):
+			return {
+				"truncated": False,
+				"tree": [
+					{"path": ".github/workflows/quality.yml", "type": entry_type, "mode": "120000"}
+				],
+			}
+		return response
+
+	monkeypatch.setattr(client, "get", get)
+	with pytest.raises(RolloutError, match="symbolic link"):
+		release_rollout._tree(client, client.refs["main"])
+
+
+def test_foreign_rollout_branch_is_ignored_before_marker_validation(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	client = FakeGitHub({})
+	pull = {
+		"head": {"ref": "quality-gate-rollout/v1", "repo": {"full_name": "other/fork"}},
+		"body": None,
+	}
+	monkeypatch.setattr(release_rollout, "_pull_requests", lambda *args, **kwargs: [pull])
+	assert release_rollout._managed_open_pull(client, "owner", "repository", "main") is None
+
+	pull["head"] = {"ref": "quality-gate-rollout/v1", "repo": {"full_name": "OWNER/repository"}}
+	with pytest.raises(RolloutError, match="no marker body"):
+		release_rollout._managed_open_pull(client, "owner", "repository", "main")
+
+
 def _provider_client() -> FakeGitHub:
 	root = Path(__file__).resolve().parents[1]
 	files = {
