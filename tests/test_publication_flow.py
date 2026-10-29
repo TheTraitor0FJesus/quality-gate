@@ -9,6 +9,7 @@ import json
 import zipfile
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -113,6 +114,7 @@ class GitHub:
 		}
 		job = {
 			"id": job_id,
+			"runner_id": 1234,
 			"run_id": 100,
 			"run_attempt": attempt,
 			"head_sha": PR_HEAD,
@@ -997,6 +999,35 @@ def test_rerun_accepts_reused_successful_jobs_with_their_attempt_one_evidence() 
 	assert '"artifact_attempt":1' in str(api.releases[-1]["body"])
 	assert '"attempt":1' in str(api.releases[-1]["body"])
 	assert '"latest_attempt":2' in str(api.releases[-1]["body"])
+
+
+def test_rerun_accepts_reused_job_with_a_new_github_job_id() -> None:
+	api = GitHub()
+	_, candidate_artifact_id = _ready(api, evidence_wait_seconds=0.05, evidence_poll_seconds=0.001)
+	api.run_overrides["run_attempt"] = 2
+	for job in api.jobs:
+		if job.get("name") in {"Build linux", "Build windows"}:
+			job["id"] = cast(int, job["id"]) + 1000
+			job["run_attempt"] = 2
+	publisher = _publisher(api, attempt=2, evidence_wait_seconds=0.05, evidence_poll_seconds=0.001)
+
+	assert publisher.publish(7, candidate_artifact_id)["status"] == "published"
+	assert '"artifact_attempt":1' in str(api.releases[-1]["body"])
+
+
+@pytest.mark.parametrize("runner_id", [None, 4321])
+def test_rerun_rejects_new_job_id_without_matching_runner(runner_id: int | None) -> None:
+	api = GitHub()
+	_, candidate_artifact_id = _ready(api, evidence_wait_seconds=0.05, evidence_poll_seconds=0.001)
+	api.run_overrides["run_attempt"] = 2
+	for job in api.jobs:
+		if job.get("name") == "Build linux":
+			job.update({"id": 999, "run_attempt": 2, "runner_id": runner_id})
+	publisher = _publisher(api, attempt=2, evidence_wait_seconds=0.05, evidence_poll_seconds=0.001)
+
+	with pytest.raises(PublicationError, match="evidence artifact for producer linux attempt 2"):
+		publisher.publish(7, candidate_artifact_id)
+	assert api.writes == []
 
 
 @pytest.mark.parametrize(
