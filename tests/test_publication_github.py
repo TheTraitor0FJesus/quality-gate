@@ -169,6 +169,24 @@ def test_api_errors_are_not_interpreted_as_absent_resources() -> None:
 	("method", "path"),
 	[("GET", "/git/commits/" + "a" * 40), ("POST", "/git/commits")],
 )
+def test_commit_api_error_objects_remain_fail_closed(method: str, path: str) -> None:
+	command = Command([b'{"message":"forbidden"}'])
+	api = GitHubCLI("o/r", timeout_seconds=120, command=command)
+
+	with pytest.raises(PublicationError, match="GitHub returned an API error object") as error:
+		if method == "GET":
+			api.get(path)
+		else:
+			api.post(path, {"message": "update", "tree": "b" * 40, "parents": ["a" * 40]})
+
+	assert not isinstance(error.value, MissingResourceError)
+	assert command.calls[0][2] == f"repos/o/r{path}"
+
+
+@pytest.mark.parametrize(
+	("method", "path"),
+	[("GET", "/git/commits/" + "a" * 40), ("POST", "/git/commits")],
+)
 def test_github_http_errors_remain_fail_closed_for_commit_endpoints(
 	monkeypatch: pytest.MonkeyPatch, method: str, path: str
 ) -> None:
