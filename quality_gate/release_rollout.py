@@ -204,10 +204,10 @@ def _tree(client: GitHub, commit_sha: str) -> dict[str, str]:
 	for index, raw_entry in enumerate(_sequence(response.get("tree"), "Git tree entries"), 1):
 		entry = _mapping(raw_entry, f"tree entry {index}")
 		path = _text(entry.get("path"), f"tree entry {index} path")
+		if path.startswith(".github/workflows/") and entry.get("mode") == "120000":
+			raise RolloutError(f"workflow file is a symbolic link: {path}")
 		if entry.get("type") == "blob":
 			result[path] = _sha(entry.get("sha"))
-		elif path.startswith(".github/workflows/") and entry.get("mode") == "120000":
-			raise RolloutError(f"workflow file is a symbolic link: {path}")
 	return result
 
 
@@ -299,16 +299,16 @@ def _managed_open_pull(
 		if not isinstance(head_repo, dict):
 			continue
 		branch = head.get("ref")
-		body = pull.get("body")
 		if not isinstance(branch, str) or not branch.startswith(ROLLOUT_PREFIX):
 			continue
+		head_name = head_repo.get("full_name")
+		if not isinstance(head_name, str) or head_name.casefold() != target.casefold():
+			continue
+		body = pull.get("body")
 		if not isinstance(body, str):
 			raise RolloutError("managed rollout pull request has no marker body")
 		if _target_marker(target) not in body:
 			raise RolloutError("managed rollout branch has an unexpected target marker")
-		head_name = _mapping(head_repo, "pull request head repository").get("full_name")
-		if not isinstance(head_name, str) or head_name.casefold() != target.casefold():
-			raise RolloutError("managed rollout pull request head is outside its target repository")
 		managed.append(pull)
 	if len(managed) > 1:
 		raise RolloutError("multiple open rollout pull requests exist for this repository")
