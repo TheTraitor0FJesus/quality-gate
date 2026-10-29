@@ -11,7 +11,7 @@ expires_on = "2027-08-26"
 
 [quality]
 schema = 2
-policy_release = "v4.4.0"
+policy_release = "v4.5.0"
 
 [repository]
 name = "quality-gate"
