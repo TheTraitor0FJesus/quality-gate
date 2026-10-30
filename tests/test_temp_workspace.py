@@ -366,6 +366,85 @@ def test_reclamation_preserves_a_directory_replaced_after_ownership_check(
 	assert (displaced / ".quality-gate-workspace").is_file()
 
 
+def test_stale_reclamation_keeps_root_controls_when_child_removal_fails(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	temp_root = tmp_path / "temp"
+	stale = temp_root / "qg-stale-owned"
+	stale.mkdir(parents=True)
+	active_lock = stale / ".active.lock"
+	active_lock.write_bytes(b"\0")
+	marker = stale / ".quality-gate-workspace"
+	marker.write_bytes(temp_workspace._ownership_marker(temp_root, stale))
+	blocked = stale / "blocked-content"
+	blocked.write_text("owned", encoding="utf-8")
+	identity = stale.lstat()
+	owner_record = temp_workspace._ownership_record_path(temp_root, stale)
+	temp_workspace._write_ownership_record(temp_root, stale, identity)
+
+	original_entries = temp_workspace._directory_entries_for_removal
+	original_remove_file = temp_workspace._remove_file
+
+	def put_root_controls_first(
+		directory: Path, expected: os.stat_result
+	) -> list[tuple[Path, os.stat_result]] | None:
+		entries = original_entries(directory, expected)
+		if directory != stale or entries is None:
+			return entries
+		controls = [
+			item for item in entries if item[0].name in {".active.lock", ".quality-gate-workspace"}
+		]
+		return [*controls, *(item for item in entries if item not in controls)]
+
+	def fail_on_blocked_file(path: Path, expected: os.stat_result) -> None:
+		if path == blocked:
+			raise PermissionError(errno.EACCES, "simulated child cleanup failure", path)
+		original_remove_file(path, expected)
+
+	monkeypatch.setattr(temp_workspace, "_directory_entries_for_removal", put_root_controls_first)
+	monkeypatch.setattr(temp_workspace, "_remove_file", fail_on_blocked_file)
+	temp_workspace._reclaim_stale_workspace(temp_root, stale)
+
+	assert stale.is_dir()
+	assert active_lock.is_file()
+	assert marker.is_file()
+	assert owner_record.is_file()
+	assert blocked.read_text(encoding="utf-8") == "owned"
+
+	monkeypatch.setattr(temp_workspace, "_directory_entries_for_removal", original_entries)
+	monkeypatch.setattr(temp_workspace, "_remove_file", original_remove_file)
+	temp_workspace._reclaim_stale_workspace(temp_root, stale)
+	assert not stale.exists()
+	assert not owner_record.exists()
+
+
+@pytest.mark.parametrize("valid_record", [True, False])
+def test_stale_reclamation_removes_only_a_valid_orphan_owner_record(
+	tmp_path: Path,
+	valid_record: bool,
+) -> None:
+	temp_root = tmp_path / "temp"
+	run_directory = temp_root / "qg-orphan"
+	run_directory.mkdir(parents=True)
+	identity = run_directory.lstat()
+	owner_record = temp_workspace._ownership_record_path(temp_root, run_directory)
+	if valid_record:
+		temp_workspace._write_ownership_record(temp_root, run_directory, identity)
+	else:
+		record = json.loads(temp_workspace._ownership_record(temp_root, run_directory, identity))
+		record["root"] = os.path.normcase(os.path.abspath(tmp_path / "foreign-root"))
+		owner_record.write_text(
+			json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n",
+			encoding="utf-8",
+		)
+	run_directory.rmdir()
+
+	temp_workspace._reclaim_stale_workspace(temp_root, run_directory)
+
+	assert owner_record.exists() is not valid_record
+
+
 @pytest.mark.parametrize("replacement_kind", ["file", "link"])
 def test_recursive_removal_preserves_a_nested_directory_replaced_before_reclamation(
 	tmp_path: Path,

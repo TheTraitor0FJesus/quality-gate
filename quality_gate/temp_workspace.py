@@ -24,6 +24,7 @@ SYSTEM_TEMP_DIRECTORY = Path(os.environ.get(_SYSTEM_TEMP_ENVIRONMENT) or tempfil
 _ROOT_LOCK_NAME = ".quality-gate.lock"
 _ACTIVE_LOCK_NAME = ".active.lock"
 _OWNERSHIP_MARKER_NAME = ".quality-gate-workspace"
+_ROOT_CONTROL_FILE_NAMES = frozenset({_ACTIVE_LOCK_NAME, _OWNERSHIP_MARKER_NAME})
 _OWNERSHIP_MARKER_MAX_BYTES = 4096
 _OWNERSHIP_RECORD_PREFIX = ".quality-gate-owner-"
 _OWNERSHIP_RECORD_MAX_BYTES = 4096
@@ -154,6 +155,7 @@ def _remove_entry(path: Path, *, expected_identity: os.stat_result | None = None
 
 def _remove_tree(path: Path, identity: os.stat_result) -> None:
 	directories: list[tuple[Path, os.stat_result]] = []
+	deferred_root_controls: list[tuple[Path, os.stat_result]] = []
 	pending = [(path, identity)]
 	while pending:
 		directory, expected = pending.pop()
@@ -162,9 +164,27 @@ def _remove_tree(path: Path, identity: os.stat_result) -> None:
 			continue
 		directories.append((directory, expected))
 		for child_path, scanned_identity in entries:
-			_remove_scanned_child(directory, expected, child_path, scanned_identity, pending)
-	for directory, expected in reversed(directories):
+			_remove_scanned_child(
+				directory,
+				expected,
+				child_path,
+				scanned_identity,
+				pending,
+				deferred_root_controls=(deferred_root_controls if directory == path else None),
+			)
+	for directory, expected in reversed(directories[1:]):
 		_remove_collected_directory(directory, expected)
+	for child_path, child_identity in deferred_root_controls:
+		_remove_scanned_child(
+			path,
+			identity,
+			child_path,
+			child_identity,
+			pending,
+			root_control=True,
+		)
+	if directories:
+		_remove_collected_directory(*directories[0])
 
 
 def _directory_entries_for_removal(
@@ -199,6 +219,9 @@ def _remove_scanned_child(
 	path: Path,
 	scanned_identity: os.stat_result,
 	pending: list[tuple[Path, os.stat_result]],
+	*,
+	deferred_root_controls: list[tuple[Path, os.stat_result]] | None = None,
+	root_control: bool = False,
 ) -> None:
 	parent_now = parent.lstat()
 	if is_link_or_reparse(parent_now) or not _same_file_identity(parent_identity, parent_now):
@@ -209,6 +232,13 @@ def _remove_scanned_child(
 		return
 	if not _same_file_identity(scanned_identity, metadata):
 		raise OSError(f"temporary workspace entry changed during removal: {path}")
+	if root_control and not _plain_lock_file(path, metadata):
+		raise OSError(f"temporary workspace control file changed during removal: {path}")
+	if deferred_root_controls is not None and path.name in _ROOT_CONTROL_FILE_NAMES:
+		if not _plain_lock_file(path, metadata):
+			raise OSError(f"temporary workspace control file changed during removal: {path}")
+		deferred_root_controls.append((path, scanned_identity))
+		return
 	if is_link_or_reparse(metadata):
 		_remove_link(path, metadata)
 	elif stat.S_ISDIR(metadata.st_mode):
@@ -322,6 +352,7 @@ def _reclaim_stale_workspace(temp_root: Path, entry: Path) -> None:
 	try:
 		metadata = entry.lstat()
 	except FileNotFoundError:
+		_remove_orphan_ownership_record(temp_root, entry)
 		return
 	if not _is_owned_workspace(temp_root, entry, metadata):
 		return
@@ -335,6 +366,60 @@ def _reclaim_stale_workspace(temp_root: Path, entry: Path) -> None:
 	except OSError:
 		return
 	_remove_ownership_record(temp_root, entry, metadata, expected_record=owner_identity)
+
+
+def _remove_orphan_ownership_record(temp_root: Path, run_directory: Path) -> None:
+	path = _ownership_record_path(temp_root, run_directory)
+	try:
+		metadata = path.lstat()
+		if not _plain_lock_file(path, metadata) or metadata.st_size > _OWNERSHIP_RECORD_MAX_BYTES:
+			return
+		with path.open("rb") as stream:
+			opened = os.fstat(stream.fileno())
+			if not _same_file_identity(metadata, opened) or not _plain_lock_file(path, opened):
+				return
+			content = stream.read(_OWNERSHIP_RECORD_MAX_BYTES + 1)
+		current = path.lstat()
+	except OSError:
+		return
+	if (
+		len(content) > _OWNERSHIP_RECORD_MAX_BYTES
+		or not _same_file_identity(metadata, current)
+		or not _plain_lock_file(path, current)
+	):
+		return
+	try:
+		record = json.loads(content)
+	except (json.JSONDecodeError, UnicodeDecodeError):
+		return
+	if not isinstance(record, dict) or set(record) != {
+		"device",
+		"format",
+		"inode",
+		"root",
+		"run",
+		"schema",
+	}:
+		return
+	if (
+		type(record["device"]) is not int
+		or record["device"] < 0
+		or type(record["inode"]) is not int
+		or record["inode"] < 0
+		or type(record["schema"]) is not int
+		or record["schema"] != 1
+		or record["format"] != "quality-gate-temp-workspace-owner"
+		or record["root"] != os.path.normcase(os.path.abspath(temp_root))
+		or record["run"] != run_directory.name
+	):
+		return
+	canonical = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+	if content != canonical:
+		return
+	try:
+		_remove_file(path, metadata)
+	except OSError:
+		return
 
 
 def _is_owned_workspace(temp_root: Path, entry: Path, metadata: os.stat_result) -> bool:
