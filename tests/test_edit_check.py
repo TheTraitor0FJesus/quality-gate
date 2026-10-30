@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import importlib.metadata
 import json
 import os
 import shutil
@@ -15,14 +13,25 @@ import tempfile
 import time
 import zipfile
 from collections.abc import Iterator
+from functools import lru_cache
+from importlib.metadata import Distribution
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from quality_gate import __version__
 from quality_gate.contracts import load_manifest
-from quality_gate.distribution import default_cache_root
+from quality_gate.distribution import (
+	DistributionError,
+	ExternalTool,
+	ReleaseManifest,
+	default_cache_root,
+	verify_release,
+)
+from quality_gate.distribution import (
+	verify_release as verify_release_cache,
+)
 from quality_gate.edit_check import Invocation
 from quality_gate.edit_check import execute as execute_edit_check
 from quality_gate.edit_inputs import Configuration
@@ -103,9 +112,31 @@ def digest(content: bytes) -> str:
 	return hashlib.sha256(content).hexdigest()
 
 
+@lru_cache(maxsize=8)
+def _selected_ruff_artifact(release_path: Path, policy_release: str) -> tuple[ExternalTool, bytes]:
+	try:
+		manifest = verify_release(release_path)
+		if manifest.version != policy_release:
+			raise DistributionError(
+				f"selected release {policy_release} contains manifest {manifest.version}"
+			)
+		ruff = next((tool for tool in manifest.tools if tool.name == "ruff"), None)
+		if ruff is None:
+			raise DistributionError(f"selected release {policy_release} does not declare Ruff")
+		content = (release_path / ruff.path).read_bytes()
+		if digest(content) != ruff.sha256:
+			raise DistributionError(f"release checksum mismatch: {ruff.path}")
+	except (DistributionError, OSError) as error:
+		raise AssertionError(
+			f"Prepare the selected policy release {policy_release} in the local cache with "
+			f"quality-gate sync and quality-gate setup before running this suite: {error}"
+		) from error
+	return ruff, content
+
+
 @pytest.fixture(scope="module")
 def edit_cache() -> Iterator[Path]:
-	"""Immutable test infrastructure: real pinned Ruff, synthetic other inventory."""
+	"""Immutable test infrastructure: selected release Ruff, synthetic other inventory."""
 	# Avoid ensurepip's Windows path limit inside Gate's nested temporary workspace.
 	parent = Path(os.environ["SYSTEMROOT"]) / "Temp" if os.name == "nt" else None
 	with tempfile.TemporaryDirectory(prefix="quality-gate-edit-", dir=parent) as directory:
@@ -113,6 +144,14 @@ def edit_cache() -> Iterator[Path]:
 
 
 def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
+	selected_release = load_manifest(REPOSITORY).policy_release
+	configured_policy_root = os.environ.get("QUALITY_GATE_POLICY_ROOT")
+	selected_root = (
+		Path(configured_policy_root)
+		if configured_policy_root
+		else default_cache_root() / "releases" / selected_release
+	)
+	ruff_tool, ruff_content = _selected_ruff_artifact(selected_root, selected_release)
 	release = cache / "releases" / version
 	release.mkdir(parents=True)
 	files = {
@@ -148,35 +187,19 @@ def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
 		)
 	platform = "windows" if os.name == "nt" else "linux"
 	for name, tool_version in UNIFIED_RELEASE_TOOLS.items():
-		path = UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform].get(
-			name, f"{name}-{tool_version}-py3-none-any.whl"
+		source_tool = ruff_tool if name == "ruff" else None
+		path = (
+			source_tool.path
+			if source_tool is not None
+			else UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform].get(
+				name, f"{name}-{tool_version}-py3-none-any.whl"
+			)
 		)
-		content = b"tool fixture"
-		if name == "ruff":
-			wheel = next((default_cache_root() / "releases" / "v2.4.2").glob("ruff-*.whl"), None)
-			if wheel is not None:
-				content = wheel.read_bytes()
-			else:
-				distribution = importlib.metadata.distribution("ruff")
-				assert distribution.version == "0.16.4", (
-					"Prepare the release-pinned Ruff before running this suite"
-				)
-				binary = next(
-					item for item in distribution.files or [] if item.name in {"ruff", "ruff.exe"}
-				)
-				with zipfile.ZipFile(release / path, "w") as archive:
-					binary_content = Path(str(distribution.locate_file(binary))).read_bytes()
-					archive.writestr(f"ruff/{binary.name}", binary_content)
-					encoded_digest = (
-						base64.urlsafe_b64encode(hashlib.sha256(binary_content).digest())
-						.decode()
-						.rstrip("=")
-					)
-					archive.writestr(
-						f"ruff-{tool_version}.dist-info/RECORD",
-						f"ruff/{binary.name},sha256={encoded_digest},{len(binary_content)}\n",
-					)
-				content = (release / path).read_bytes()
+		if source_tool is not None:
+			tool_version = source_tool.version
+			content = ruff_content
+		else:
+			content = b"tool fixture"
 		(release / path).write_bytes(content)
 		manifest.extend(
 			[
@@ -206,6 +229,89 @@ def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
 	)
 	assert result.returncode == 0, result.stdout + result.stderr
 	return cache
+
+
+def test_prepare_edit_cache_uses_selected_release_ruff_not_dev_distribution(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+	import importlib.metadata
+
+	selected_release = load_manifest(REPOSITORY).policy_release
+	isolated_cache = tmp_path / "default-cache"
+	platform = "windows" if os.name == "nt" else "linux"
+	tool_version = UNIFIED_RELEASE_TOOLS["ruff"]
+	tool_path = UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform].get(
+		"ruff", f"ruff-{tool_version}-py3-none-any.whl"
+	)
+	source_content = b"verified selected-release Ruff artifact"
+	source_tool = ExternalTool("ruff", tool_version, tool_path, digest(source_content))
+	source_manifest = ReleaseManifest(selected_release, (), (source_tool,))
+	source_root = tmp_path / "selected-release" / selected_release
+	(source_root / source_tool.path).parent.mkdir(parents=True)
+	(source_root / source_tool.path).write_bytes(source_content)
+	verified_paths: list[Path] = []
+
+	def verify_selected_release(path: Path) -> ReleaseManifest:
+		verified_paths.append(path)
+		assert path == source_root
+		return source_manifest
+
+	monkeypatch.setattr(sys.modules[__name__], "default_cache_root", lambda: isolated_cache)
+	monkeypatch.setenv("QUALITY_GATE_POLICY_ROOT", str(source_root))
+	monkeypatch.setattr(sys.modules[__name__], "verify_release", verify_selected_release)
+
+	looked_up_distributions: list[str] = []
+	dev_ruff = cast(Distribution, type("DevRuff", (), {"version": "0.17.2"})())
+	original_distribution = importlib.metadata.distribution
+
+	def distribution(name: str) -> Distribution:
+		looked_up_distributions.append(name)
+		if name == "ruff":
+			return dev_ruff
+		return original_distribution(name)
+
+	monkeypatch.setattr(importlib.metadata, "distribution", distribution)
+	monkeypatch.setattr(
+		subprocess,
+		"run",
+		lambda command, **kwargs: subprocess.CompletedProcess(command, 0, b"", b""),
+	)
+
+	cache = prepare_edit_cache(tmp_path / "fixture", "v3.1.0")
+	generated = verify_release_cache(cache / "releases" / "v3.1.0")
+	generated_tool = next(tool for tool in generated.tools if tool.name == "ruff")
+
+	assert generated.version == "v3.1.0"
+	assert generated_tool.version == source_tool.version
+	assert generated_tool.path == source_tool.path
+	assert (cache / "releases" / "v3.1.0" / generated_tool.path).read_bytes() == source_content
+	assert "ruff" not in looked_up_distributions
+	assert verified_paths == [source_root]
+
+
+@pytest.mark.parametrize("release_state", ["missing", "corrupt"])
+def test_prepare_edit_cache_requires_selected_verified_release(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path, release_state: str
+) -> None:
+	selected_release = load_manifest(REPOSITORY).policy_release
+	cache_root = tmp_path / "policy-cache"
+	manifest_path = cache_root / "releases" / selected_release / "release.toml"
+	corrupt_manifest = '[release]\nversion = "invalid"\n'
+	if release_state == "corrupt":
+		manifest_path.parent.mkdir(parents=True)
+		manifest_path.write_text(corrupt_manifest, encoding="utf-8")
+	monkeypatch.delenv("QUALITY_GATE_POLICY_ROOT", raising=False)
+	monkeypatch.setattr(sys.modules[__name__], "default_cache_root", lambda: cache_root)
+
+	with pytest.raises(AssertionError, match=r"quality-gate sync.*quality-gate setup"):
+		prepare_edit_cache(tmp_path / "fixture", "v3.1.0")
+
+	assert not (tmp_path / "fixture").exists()
+	if release_state == "corrupt":
+		assert manifest_path.read_text(encoding="utf-8") == corrupt_manifest
+		assert not (cache_root / "quarantine").exists()
+	else:
+		assert not cache_root.exists()
 
 
 @pytest.fixture(scope="module")
