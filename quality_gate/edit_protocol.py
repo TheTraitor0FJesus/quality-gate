@@ -41,6 +41,7 @@ SUPPORTED_POLICIES = frozenset(
 		"v4.3.0",
 		"v4.4.0",
 		"v4.5.0",
+		"v4.6.0",
 	}
 )
 SAFE_FIXES = ("I001", "F401")

@@ -17,7 +17,7 @@ from typing import Any, BinaryIO, Literal, cast
 import pytest
 from test_edit_check import prepare_edit_cache
 
-from quality_gate import edit_cli, edit_inputs, edit_integrity, edit_worker, integrity
+from quality_gate import edit_cli, edit_integrity, edit_worker, integrity, path_safety
 from quality_gate.contracts import parse_manifest
 from quality_gate.edit_inputs import SourceFile
 from quality_gate.edit_protocol import EditError, encode
@@ -172,7 +172,7 @@ def test_integrity_public_cli_does_not_require_windows_reparse_flag(
 	stat_without_reparse_flag = SimpleNamespace(**vars(stat))
 	if hasattr(stat_without_reparse_flag, "FILE_ATTRIBUTE_REPARSE_POINT"):
 		delattr(stat_without_reparse_flag, "FILE_ATTRIBUTE_REPARSE_POINT")
-	for module in (edit_cli, edit_inputs, edit_integrity):
+	for module in (edit_cli, path_safety, edit_integrity):
 		monkeypatch.setattr(module, "stat", stat_without_reparse_flag)
 	assert edit_integrity.execute(payload, time.monotonic() + 5, tmp_path)["status"] == "passed"
 

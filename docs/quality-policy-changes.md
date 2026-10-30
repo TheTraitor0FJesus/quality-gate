@@ -81,6 +81,11 @@ Each project may declare Python component paths, existing test directories, and 
 For working-tree typing, a Python component may also declare `stub_roots` as unique component-relative directories
 inside its captured tree. This field requires policy v3.2.0 or newer; the edit-types provider hashes their `.pyi`
 contents and passes the approved roots to isolated mypy.
+It may also declare `source_roots` as unique repository-root-relative directories outside the component path.
+This field requires policy v4.6.0 or newer. The provider captures only those declared trees alongside the component,
+includes them in import preflight, isolated mypy search paths and source/directory freshness evidence, and rechecks
+them before returning a result. The strict host verifier derives roots from the verified manifest and validates the
+exact union closure; the provider result schema does not add a `source_roots` key.
 It may also declare repository-owned supplemental tests with `[[supplemental_tests]]` entries using
 the `node-test` runner and repository-relative targets. The manifest validator checks their
 identities, matches, and bounded expansion size; the Quality Gate never executes them. The typed

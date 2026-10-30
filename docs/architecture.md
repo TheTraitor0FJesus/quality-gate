@@ -8,7 +8,8 @@ Use this map before non-trivial codebase questions, design work, or code changes
 - **Verdict reporting** — `quality_gate/reporting.py` summarizes every observed status, keeps every failed/unchecked result visible, and bounds per-check and overall redacted finding details; `quality_gate/contracts.py` carries known and unknown upstream finding-omission metadata.
 - **Policy distribution** — `quality_gate/release_contract.py` defines the exact unified-release inventory; `quality_gate/distribution.py` validates release manifests, that inventory, and SHA-256 digests, installs releases through a locked same-volume replacement, quarantines corrupt entries, and retains active/previous selections.
 - **Local admission** — `quality_gate/admission.py` owns two user-local OS-locked slots for independent full Gate runs. `runner._run_snapshot` acquires admission before snapshot construction; descendants reuse only a lease confirmed by a live slot lock and matching token. CI skips local admission. See [the local queue contract](local-gate-queue.md) for waiting, Ruff workers, and activation limits.
-- **Temporary workspace** — `quality_gate/temp_workspace.py` clears stale inactive run directories under the checked repository's ignored `temp/`, routes Python and child-process temporary files into a per-run subdirectory, and removes that subdirectory at exit. Read-only checkouts and candidate snapshots use a private hashed workspace per repository under user-local system temp. Staging beside persistent caches and atomic replacement targets stays beside those targets.
+- **Temporary workspace.** `quality_gate/temp_workspace.py` reclaims an inactive `qg-` directory only when a root-level ownership record matches its file identity, its in-directory marker is valid, and Gate acquires the run lock. A name prefix or marker alone does not authorize deletion. The module preserves foreign files and directories, unrecognized entries, legacy `.quality-gate-edit-*` directories, active runs and the root lock. It routes Python and child-process temporary files into a per-run directory and removes owned workspaces at exit. Read-only checkouts and candidate snapshots use a private hashed workspace per repository under user-local system temp. Staging beside persistent caches and atomic replacement targets stays beside those targets.
+- **Path safety** — `quality_gate/path_safety.py` centralizes symlink and Windows reparse-point predicates shared by edit-input validation, source inventory and temporary-workspace cleanup.
 - **Local runtime** — the stable native wrapper reads the staged schema 2 manifest, verifies the declared wheel in the immutable user cache, and launches that exact release without importing mutable repository source; `quality_gate/runtime.py` creates a separate component runtime per repository and fingerprint of policy, component, Python, and dependency inputs.
 - **CI integration** — `.github/workflows/quality.yml` is the reusable GitHub workflow boundary; it checks out `job.workflow_repository` at `job.workflow_sha`, bootstraps Python before reading component versions, selects a platform-specific immutable release asset, and uses `quality_gate/ci_release.py` plus `quality_gate/release_contract.py` to verify GitHub release immutability, the GitHub-reported asset digest, the exact unified inventory, every declared release file, and safe extraction paths; `.github/workflows/parity.yml` runs the release-backed Python/web/supplemental fixture on Windows and Linux from dispatch or schedule, uploads machine-readable results, and compares them in a separate job; every external Action is pinned to a full commit SHA, and pull requests pass explicit range refs to the same CLI gate.
 - **Project contract** — `quality_gate/contracts.py` is the source of truth for schema 2 repository, Python/web component, supplemental-test, verdict, and waiver models; `quality_gate/policy/biome.json` and `quality_gate/policy/biome.toml` are the pinned web-tool policy and platform inventory; `templates/quality-gate.toml` is the manifest shape and `templates/quality.yml` plus `templates/dependabot.yml` are the consumer CI shapes generated for a project by `$setup-repo`.
@@ -57,12 +58,14 @@ Use this map before non-trivial codebase questions, design work, or code changes
   isolated whole-component analysis and source-free diagnostics;
   `edit_type_environment.py` owns declared runtime selection and exact released
   mypy/installed-tool verification; `edit_type_inputs.py` owns bounded source and
-  environment inventories and host-owned cancellation signals. Schema 1 consumes
+  environment inventories and host-owned cancellation signals; `path_safety.py`
+  supplies their shared symlink/reparse checks. Schema 1 consumes
   the remaining synchronous deadline; schema 2 binds one supervised background
   invocation to an event and cancellation path. The host owns scheduling,
   replacement, active-turn delivery and Stop/drain. `contracts.py` validates the
-  optional `typecheck` opt-out and the policy-gated `stub_roots` component paths;
-  the provider resolves the latter only from the captured component tree.
+  optional `typecheck` opt-out, component-relative `stub_roots`, and policy-gated
+  repository-relative `source_roots`; the provider resolves both path sets only
+  from captured sources.
   See the [wire contract](edit-types.md)
   and [interface verification requirements](release.md#working-tree-interface-verification).
 
