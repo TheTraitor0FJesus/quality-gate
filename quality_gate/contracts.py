@@ -32,6 +32,9 @@ MAX_SUPPLEMENTAL_TARGET_BYTES = 64 * 1024
 MAX_SUPPLEMENTAL_TOTAL_MATCHES = 4096
 MAX_SUPPLEMENTAL_TOTAL_BYTES = 256 * 1024
 MAX_COMPONENT_STUB_ROOTS = 32
+MAX_COMPONENT_SOURCE_ROOTS = 32
+ASCII_C0_END = 32
+ASCII_DELETE = 127
 _CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 _FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 _WILDCARD = re.compile(r"[*?\[\]{}]")
@@ -137,6 +140,47 @@ def _component_stub_roots(value: object, path: str) -> tuple[str, ...]:
 	return roots
 
 
+def _component_source_roots(value: object, path: str, component_path: str) -> tuple[str, ...]:
+	roots = tuple(
+		_string(item, f"{path}[{index}]") for index, item in enumerate(_list(value, path))
+	)
+	if len(roots) > MAX_COMPONENT_SOURCE_ROOTS:
+		raise ValidationError(path, f"must contain at most {MAX_COMPONENT_SOURCE_ROOTS} paths")
+	_ensure_unique(roots, path, "must contain unique paths")
+	if len({root.casefold() for root in roots}) != len(roots):
+		raise ValidationError(path, "must contain unique paths")
+	if component_path == "." and roots:
+		raise ValidationError(
+			path, "source roots cannot be declared for a repository-root component"
+		)
+	paths = [component_path, *roots]
+	for index, root in enumerate(roots):
+		if (
+			"\\" in root
+			or ":" in root
+			or any(
+				ord(character) < ASCII_C0_END or ord(character) == ASCII_DELETE
+				for character in root
+			)
+			or any(part in {"", ".", ".."} for part in root.split("/"))
+		):
+			raise ValidationError(
+				f"{path}[{index}]", "must be a repository-relative POSIX directory"
+			)
+	for index, root in enumerate(roots):
+		canonical = root.casefold()
+		if any(
+			canonical == other.casefold()
+			or canonical.startswith(f"{other.casefold()}/")
+			or other.casefold().startswith(f"{canonical}/")
+			for other in paths[: index + 1]
+		):
+			raise ValidationError(
+				path, "source roots must not overlap each other or the component path"
+			)
+	return tuple(sorted(roots))
+
+
 @dataclass(frozen=True, slots=True)
 class RepositoryContract:
 	name: str
@@ -160,6 +204,7 @@ class PythonComponent:
 	timeout_seconds: int
 	typecheck: bool = True
 	stub_roots: tuple[str, ...] = ()
+	source_roots: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +353,7 @@ def _parse_component(value: object, index: int) -> PythonComponent:
 			"timeout_seconds",
 			"typecheck",
 			"stub_roots",
+			"source_roots",
 		},
 		path,
 	)
@@ -329,9 +375,10 @@ def _parse_component(value: object, index: int) -> PythonComponent:
 		)
 	if not tests_applicable and test_paths:
 		raise ValidationError(f"{path}.test_paths", "must be empty when tests do not apply")
+	component_path = _relative_path(table.get("path"), f"{path}.path")
 	return PythonComponent(
 		name=_string(table.get("name"), f"{path}.name"),
-		path=_relative_path(table.get("path"), f"{path}.path"),
+		path=component_path,
 		python_version=_string(table.get("python_version"), f"{path}.python_version"),
 		dependency_inputs=tuple(
 			_relative_path(item, f"{path}.dependency_inputs[{item_index}]")
@@ -350,6 +397,9 @@ def _parse_component(value: object, index: int) -> PythonComponent:
 		timeout_seconds=_positive_int(table.get("timeout_seconds", 300), f"{path}.timeout_seconds"),
 		typecheck=cast(bool, _type(table.get("typecheck", True), bool, f"{path}.typecheck")),
 		stub_roots=_component_stub_roots(table.get("stub_roots", []), f"{path}.stub_roots"),
+		source_roots=_component_source_roots(
+			table.get("source_roots", []), f"{path}.source_roots", component_path
+		),
 	)
 
 
@@ -656,6 +706,10 @@ def _validate_typing_policy(root: Mapping[str, object], policy_release: str) -> 
 			raise ValidationError(f"python[{index}].typecheck", "requires policy v3.1.0 or newer")
 		if "stub_roots" in table and version < (3, 2, 0):
 			raise ValidationError(f"python[{index}].stub_roots", "requires policy v3.2.0 or newer")
+		if "source_roots" in table and version < (4, 6, 0):
+			raise ValidationError(
+				f"python[{index}].source_roots", "requires policy v4.6.0 or newer"
+			)
 
 
 def _validate_supplemental_match(match: Path, root: Path, path: str) -> int:

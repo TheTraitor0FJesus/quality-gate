@@ -51,6 +51,124 @@ def test_source_directory_membership_detects_added_deleted_and_empty_directories
 	assert last_directories != second_directories
 
 
+def test_inventory_unions_declared_source_roots_and_tracks_their_membership(
+	tmp_path: Path,
+) -> None:
+	(tmp_path / "bot").mkdir()
+	(tmp_path / "bot/main.py").write_bytes(b"from scripts.api import value\n")
+	(tmp_path / "scripts").mkdir()
+	(tmp_path / "scripts/api.py").write_bytes(b"value: int = 1\n")
+	(tmp_path / "stubs/apscheduler").mkdir(parents=True)
+	(tmp_path / "stubs/apscheduler/py.typed").write_bytes(b"\n")
+	(tmp_path / "stubs/apscheduler/api.pyi").write_bytes(b"class Scheduler: ...\n")
+
+	before = inventory(
+		tmp_path,
+		"bot",
+		managed=True,
+		deadline=time.monotonic() + 5,
+		source_roots=("stubs", "scripts"),
+	)
+	reordered = inventory(
+		tmp_path,
+		"bot",
+		managed=True,
+		deadline=time.monotonic() + 5,
+		source_roots=("scripts", "stubs"),
+	)
+	assert before == reordered
+	assert {source.path for source in before[0]} == {
+		"bot/main.py",
+		"scripts/api.py",
+		"stubs/apscheduler/api.pyi",
+	}
+	assert {directory["path"] for directory in before[1]} == {
+		"bot",
+		"scripts",
+		"stubs",
+		"stubs/apscheduler",
+	}
+
+	(tmp_path / "scripts/api.py").write_bytes(b"value: str = 'changed'\n")
+	after_mutation = inventory(
+		tmp_path,
+		"bot",
+		managed=True,
+		deadline=time.monotonic() + 5,
+		source_roots=("scripts", "stubs"),
+	)
+	assert after_mutation[0] != before[0]
+	(tmp_path / "stubs/apscheduler/extra.pyi").write_bytes(b"class Extra: ...\n")
+	after_addition = inventory(
+		tmp_path,
+		"bot",
+		managed=True,
+		deadline=time.monotonic() + 5,
+		source_roots=("scripts", "stubs"),
+	)
+	assert after_addition[0] != after_mutation[0]
+	assert after_addition[1] != after_mutation[1]
+	(tmp_path / "stubs/apscheduler/extra.pyi").unlink()
+	after_deletion = inventory(
+		tmp_path,
+		"bot",
+		managed=True,
+		deadline=time.monotonic() + 5,
+		source_roots=("scripts", "stubs"),
+	)
+	assert after_deletion == after_mutation
+
+
+def test_inventory_rejects_missing_overlapping_and_linked_source_roots(tmp_path: Path) -> None:
+	(tmp_path / "bot/shared").mkdir(parents=True)
+	(tmp_path / "bot/main.py").write_bytes(b"value: int = 1\n")
+	with pytest.raises(EditError, match=r"^configuration$"):
+		inventory(
+			tmp_path,
+			"bot",
+			managed=True,
+			deadline=time.monotonic() + 3,
+			source_roots=("bot/shared",),
+		)
+	with pytest.raises(EditError, match=r"^dependencies$"):
+		inventory(
+			tmp_path,
+			"bot",
+			managed=True,
+			deadline=time.monotonic() + 3,
+			source_roots=("missing",),
+		)
+	with pytest.raises(EditError, match=r"^configuration$"):
+		inventory(
+			tmp_path,
+			"bot",
+			managed=True,
+			deadline=time.monotonic() + 3,
+			source_roots=(".",),
+		)
+	with pytest.raises(EditError, match=r"^configuration$"):
+		inventory(
+			tmp_path,
+			".",
+			managed=True,
+			deadline=time.monotonic() + 3,
+			source_roots=("shared",),
+		)
+	(tmp_path / "outside").mkdir()
+	try:
+		(tmp_path / "linked").symlink_to(tmp_path / "outside", target_is_directory=True)
+	except OSError as error:
+		pytest.skip(f"Directory symlinks are unavailable: {error}")
+	with pytest.raises(EditError, match=r"^unsafe_path$"):
+		inventory(
+			tmp_path,
+			"bot",
+			managed=True,
+			deadline=time.monotonic() + 3,
+			source_roots=("linked",),
+		)
+
+
 def test_deleted_request_is_invalidated_by_recreation(tmp_path: Path) -> None:
 	entries = [{"path": "deleted.py", "sha256": None}]
 	assert request_files(tmp_path, entries) == [

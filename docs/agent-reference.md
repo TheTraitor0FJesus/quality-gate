@@ -22,8 +22,18 @@ test paths, dependency inputs, required documents, workflows, waivers, or supple
 
 Run commands from the repository root. `check`, `audit`, `validate`, `doctor`, and `version` do
 not change tracked project files. Quality Gate puts temporary work under the checked repository's
-ignored `temp/` directory, removes stale inactive runs when it starts, and removes its own run
-directory when it exits. Read-only checkouts and candidate snapshots use a private hashed workspace
+ignored `temp/` directory. At startup it reclaims an inactive `qg-` workspace only when a user-local
+HMAC key validates the root-level owner record and directory identity, the in-directory marker and
+active-lock identities match, and Gate acquires the run lock. A signed cleanup record permits a later
+run to resume after partial removal. A name prefix or marker alone does not authorize deletion.
+Quality Gate preserves foreign entries, ambiguous directories, legacy `.quality-gate-edit-*`
+directories, active runs and the root lock. Each invocation removes only its own workspace when it
+exits. On POSIX, `temp/` also retains a private, authenticated `.quality-gate-cleanup-<key-id>`
+directory for deletion journals. Separate user-state keys use separate areas. A previous authenticated
+area and its journals remain available when that key is restored; untrusted areas are preserved.
+An incomplete older key file is preserved alongside a separate recovery key, so restoring the older
+key permits its signed records to be checked again.
+Read-only checkouts and candidate snapshots use a private hashed workspace
 per repository under the user-local system temporary directory. Every consumer repository must ignore its root
 `temp/` directory in `.gitignore` (for example, with `/temp/`). Cache staging and atomic replacement
 files remain beside their persistent targets. `sync`, `setup`, rollback, confirmed prune,

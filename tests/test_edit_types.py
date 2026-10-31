@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from collections.abc import Iterator
 from dataclasses import asdict
 from importlib.util import cache_from_source
@@ -25,10 +26,14 @@ import pytest
 from test_typing_optout import manifest_text
 
 from quality_gate.contracts import PythonComponent, ValidationError, load_manifest, parse_manifest
-from quality_gate.distribution import default_cache_root, verify_release
+from quality_gate.distribution import ReleaseManifest, default_cache_root, verify_release
 from quality_gate.edit_inputs import Configuration, SourceFile
 from quality_gate.edit_protocol import EditError
-from quality_gate.edit_type_environment import _MANAGED_RUNTIME_PTH_SHA256, _validate_site
+from quality_gate.edit_type_environment import (
+	_MANAGED_RUNTIME_PTH_SHA256,
+	MYPY_DEPENDENCIES,
+	_validate_site,
+)
 from quality_gate.edit_type_inputs import environment_tree, inventory, request_files
 from quality_gate.edit_types import (
 	_import_context,
@@ -39,6 +44,7 @@ from quality_gate.edit_types import (
 	_TypingInvocation,
 	execute,
 )
+from quality_gate.path_safety import is_link_or_reparse
 from quality_gate.runtime import RuntimeManager, runtime_fingerprint, runtime_identity
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -122,6 +128,175 @@ def typing_environment(typing_policy: Path) -> Iterator[Path]:
 		yield root
 
 
+@pytest.fixture(scope="module")
+def candidate_engine_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+	root = tmp_path_factory.mktemp("candidate-engine-wheel")
+	source = root / "source"
+	source.mkdir()
+	shutil.copy2(REPOSITORY / "pyproject.toml", source)
+	shutil.copytree(
+		REPOSITORY / "quality_gate",
+		source / "quality_gate",
+		ignore=shutil.ignore_patterns("__pycache__"),
+	)
+	build_python = Path(sys.base_prefix) / ("python.exe" if os.name == "nt" else "bin/python3")
+	completed = subprocess.run(
+		[
+			str(build_python),
+			"-B",
+			"-m",
+			"pip",
+			"wheel",
+			"--no-deps",
+			"--no-build-isolation",
+			"--no-cache-dir",
+			"--wheel-dir",
+			str(root),
+			str(source),
+		],
+		capture_output=True,
+		check=False,
+		timeout=45,
+	)
+	assert completed.returncode == 0, completed.stdout + completed.stderr
+	wheels = list(root.glob("quality_gate-*.whl"))
+	assert len(wheels) == 1
+	with zipfile.ZipFile(wheels[0]) as archive:
+		version_source = archive.read("quality_gate/__init__.py").decode("utf-8")
+	assert f'__version__ = "{wheels[0].name.split("-")[1]}"' in version_source
+	return wheels[0]
+
+
+@pytest.fixture(scope="module")
+def candidate_typing_cache(
+	typing_policy: Path,
+	candidate_engine_wheel: Path,
+) -> Iterator[Path]:
+	from test_edit_check import prepare_edit_cache
+
+	cache_parent = typing_policy.parent.parent
+	if is_link_or_reparse(cache_parent.lstat()) or not cache_parent.is_dir():
+		raise AssertionError("Candidate typing cache requires an ordinary policy cache root.")
+	# Gate redirects TEMP into its nested workspace. Keep disposable runtimes beside
+	# the verified user-local policy cache to avoid overlong Windows paths.
+	with tempfile.TemporaryDirectory(prefix="qg-candidate-", dir=cache_parent) as directory:
+		cache = Path(directory).resolve()
+		prepare_edit_cache(cache, "v4.6.0")
+		candidate_root = cache / "releases/v4.6.0"
+		candidate = verify_release(candidate_root)
+		published = verify_release(typing_policy)
+		replacements: dict[str, Path] = {}
+		product = next(item for item in candidate.files if item.kind == "artifact")
+		assert Path(product.path).name == candidate_engine_wheel.name
+		replacements[product.path] = candidate_engine_wheel
+		old_mypy = next(item for item in published.tools if item.name == "mypy")
+		new_mypy = next(item for item in candidate.tools if item.name == "mypy")
+		if new_mypy.path != old_mypy.path:
+			(candidate_root / new_mypy.path).unlink()
+			manifest_path = candidate_root / "release.toml"
+			manifest_text = manifest_path.read_text(encoding="utf-8")
+			old_path = f'path = "{new_mypy.path}"'
+			assert manifest_text.count(old_path) == 1
+			manifest_path.write_text(
+				manifest_text.replace(old_path, f'path = "{old_mypy.path}"', 1),
+				encoding="utf-8",
+			)
+			destination = candidate_root / old_mypy.path
+			destination.parent.mkdir(parents=True, exist_ok=True)
+			shutil.copy2(typing_policy / old_mypy.path, destination)
+			replacements[old_mypy.path] = typing_policy / old_mypy.path
+		else:
+			replacements[new_mypy.path] = typing_policy / old_mypy.path
+		replacements.update(
+			_candidate_mypy_dependency_replacements(candidate, published, typing_policy)
+		)
+		provider_policy_root = typing_policy
+		provider_policy = verify_release(provider_policy_root)
+		old_gitleaks = next(item for item in provider_policy.tools if item.name == "gitleaks")
+		new_gitleaks = next(item for item in candidate.tools if item.name == "gitleaks")
+		assert old_gitleaks.version == new_gitleaks.version
+		replacements[new_gitleaks.path] = provider_policy_root / old_gitleaks.path
+		# The real mypy runtime is seeded from the supported-policy fixture above.
+		# Its dependency wheels must match that copied environment's RECORD files.
+		for relative, source_path in replacements.items():
+			shutil.copy2(source_path, candidate_root / relative)
+		_update_candidate_release_digests(candidate_root, replacements)
+		verified = verify_release(candidate_root)
+		assert verified.version == "v4.6.0"
+		assert (candidate_root / product.path).read_bytes() == candidate_engine_wheel.read_bytes()
+		yield cache
+
+
+def _candidate_mypy_dependency_replacements(
+	candidate: ReleaseManifest, published: ReleaseManifest, typing_policy: Path
+) -> dict[str, Path]:
+	replacements: dict[str, Path] = {}
+	for item in candidate.files:
+		if item.kind != "dependency":
+			continue
+		name, version, *_tags = Path(item.path).name.split("-")
+		if name not in MYPY_DEPENDENCIES:
+			continue
+		source = next(
+			(
+				entry
+				for entry in published.files
+				if entry.kind == "dependency" and Path(entry.path).name.split("-")[0] == name
+			),
+			None,
+		)
+		if source is None:
+			raise AssertionError(f"No supported-policy wheel for mypy dependency {name}")
+		source_version = Path(source.path).name.split("-")[1]
+		assert source_version == version, f"Mypy dependency {name} changed version."
+		replacements[item.path] = typing_policy / source.path
+	return replacements
+
+
+def _candidate_worker_guard() -> str:
+	return (
+		"import socket, subprocess\n"
+		"def deny_network(*args, **kwargs):\n"
+		"    raise RuntimeError('network access is disabled for this edit check')\n"
+		"socket.socket.connect = deny_network\n"
+		"socket.socket.connect_ex = deny_network\n"
+		"socket.create_connection = deny_network\n"
+		"original_popen = subprocess.Popen\n"
+		"def guard_worker_popen(args, *positional, **keywords):\n"
+		"    values = [str(value) for value in args] if not isinstance(args, str) else [args]\n"
+		"    command = ' '.join(values)\n"
+		"    mypy = \"runpy.run_module('mypy'\" in command\n"
+		"    runtime_probe = \"'base_executable'\" in command and \"'stdlib'\" in command\n"
+		"    if not (mypy or runtime_probe):\n"
+		"        raise RuntimeError('unexpected worker child process: ' + command)\n"
+		"    return original_popen(args, *positional, **keywords)\n"
+		"subprocess.Popen = guard_worker_popen\n"
+	)
+
+
+def _update_candidate_release_digests(candidate_root: Path, replacements: dict[str, Path]) -> None:
+	manifest_path = candidate_root / "release.toml"
+	lines = manifest_path.read_text(encoding="utf-8").splitlines()
+	for relative in replacements:
+		declaration = f'path = "{relative}"'
+		try:
+			path_index = next(i for i, line in enumerate(lines) if line.strip() == declaration)
+		except StopIteration:
+			raise AssertionError(f"No release declaration for {relative}") from None
+		section_end = next(
+			(i for i in range(path_index + 1, len(lines)) if lines[i].startswith("[[release.")),
+			len(lines),
+		)
+		digest_index = next(
+			(i for i in range(path_index + 1, section_end) if lines[i].startswith("sha256 = ")),
+			None,
+		)
+		if digest_index is None:
+			raise AssertionError(f"No digest declaration for {relative}")
+		lines[digest_index] = f'sha256 = "{digest((candidate_root / relative).read_bytes())}"'
+	manifest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def request(root: Path, policy: Path, *paths: str, background: bool = False) -> dict[str, Any]:
 	payload: dict[str, Any] = {
 		"schema": 1,
@@ -164,6 +339,65 @@ def invoke(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
 	)
 	assert completed.stderr == b"", "The public typing transport leaked stderr."
 	return completed.returncode, json.loads(completed.stdout)
+
+
+def invoke_candidate_wheel(
+	payload: dict[str, Any],
+	wheel: Path,
+	*,
+	command: str = "edit-types",
+	network_guard: bool = False,
+) -> tuple[int, dict[str, Any]]:
+	project = Path(payload["root"])
+	cache = Path(payload["cache_dir"])
+	launcher = [sys.executable, "-B", "-m", "quality_gate.cli", command]
+	if network_guard:
+		worker_guard = _candidate_worker_guard()
+		guard = (
+			"import runpy, socket, subprocess, sys\n"
+			"def deny_network(*args, **kwargs):\n"
+			"    raise RuntimeError('network access is disabled for this edit check')\n"
+			"socket.socket.connect = deny_network\n"
+			"socket.socket.connect_ex = deny_network\n"
+			"socket.create_connection = deny_network\n"
+			"original_popen = subprocess.Popen\n"
+			"worker_guard = sys.argv[2]\n"
+			"def guard_popen(args, *positional, **keywords):\n"
+			"    values = [str(value) for value in args] if not isinstance(args, str) else [args]\n"
+			"    command = ' '.join(values)\n"
+			"    mypy = \"runpy.run_module('mypy'\" in command\n"
+			"    runtime_probe = \"'base_executable'\" in command and \"'stdlib'\" in command\n"
+			"    worker = 'from quality_gate.edit_worker import main' in command\n"
+			"    if not (mypy or runtime_probe or worker):\n"
+			"        raise RuntimeError('unexpected installer or network process: ' + command)\n"
+			"    if worker:\n"
+			"        code_index = values.index('-c') + 1\n"
+			"        values[code_index] = worker_guard + '\\n' + values[code_index]\n"
+			"        args = values\n"
+			"    return original_popen(args, *positional, **keywords)\n"
+			"subprocess.Popen = guard_popen\n"
+			"sys.argv = ['quality-gate', sys.argv[1]]\n"
+			"runpy.run_module('quality_gate.cli', run_name='__main__')\n"
+		)
+		launcher = [sys.executable, "-B", "-c", guard, command, worker_guard]
+	completed = subprocess.run(
+		launcher,
+		cwd=project.parent,
+		env={
+			**os.environ,
+			"PYTHONPATH": str(wheel),
+			"PYTHONDONTWRITEBYTECODE": "1",
+			"LOCALAPPDATA": str(cache.parent / "cli-user-cache"),
+			"XDG_CACHE_HOME": str(cache.parent / "cli-user-cache"),
+		},
+		input=json.dumps(payload).encode(),
+		capture_output=True,
+		check=False,
+		timeout=33 if payload["schema"] == BACKGROUND_SCHEMA else 13,
+	)
+	assert completed.stderr == b"", completed.stderr.decode("utf-8", errors="replace")
+	result = json.loads(completed.stdout)
+	return completed.returncode, result
 
 
 def test_empty_typing_input_is_explicitly_inapplicable(tmp_path: Path, typing_policy: Path) -> None:
@@ -277,7 +511,7 @@ def test_changed_signature_reports_unchanged_consumer_with_real_mypy(
 		"from api import accept\nresult = accept(123)\n", encoding="utf-8"
 	)
 	code, result = invoke(request(tmp_path, typing_policy, "api.py", background=True))
-	assert (code, result["status"]) == (1, "failed"), result
+	assert (code, result["status"]) == (1, "failed"), json.dumps(result, indent=2)
 	component = result["components"][0]
 	assert component["diagnostics"] == [
 		{"path": "consumer.py", "line": 2, "column": 17, "code": "arg-type"}
@@ -467,7 +701,7 @@ def test_component_local_stubs_resolve_and_are_included_in_freshness(tmp_path: P
 	invocation.snapshot = tmp_path / "snapshot"
 	invocation.snapshot.mkdir()
 	invocation.configuration = Configuration(tmp_path)
-	invocation._snapshot_sources(sources, "app")
+	invocation._snapshot_sources(sources, "app", [])
 	assert (invocation.snapshot / "app/stubs/vendor.pyi").read_bytes() == stub.read_bytes()
 	assert (
 		_import_context(
@@ -537,6 +771,26 @@ def test_manifest_declares_component_local_stub_roots_only_on_supported_policy()
 			parse_manifest(manifest.replace('"stubs"', f'"{path}"'))
 	with pytest.raises(ValidationError, match="stub_roots"):
 		parse_manifest(manifest.replace('["stubs"]', "['stubs\\\\nested']"))
+
+
+def test_manifest_declares_repository_source_roots_only_on_supported_policy() -> None:
+	manifest = manifest_text("v4.6.0").replace(
+		"typecheck = false\n", 'typecheck = false\nsource_roots = ["stubs", "scripts"]\n'
+	)
+	assert parse_manifest(manifest).python[0].source_roots == ("scripts", "stubs")
+	with pytest.raises(ValidationError, match="source_roots"):
+		parse_manifest(manifest.replace("v4.6.0", "v4.5.0"))
+	for roots in [
+		'["../scripts"]',
+		'["D:/outside"]',
+		'["scripts\\\\nested"]',
+		'["scripts", "scripts"]',
+		'["scripts", "scripts/private"]',
+		'["scripts", "Scripts/private"]',
+		'["app/shared"]',
+	]:
+		with pytest.raises(ValidationError, match="source_roots"):
+			parse_manifest(manifest.replace('["stubs", "scripts"]', roots))
 
 
 @pytest.mark.parametrize(
@@ -911,6 +1165,632 @@ tests_reason = "Disposable typing integration."
 	finally:
 		if runtime.exists():
 			shutil.rmtree(runtime)
+
+
+def _argus_typing_manifest() -> str:
+	return f'''[quality]
+schema = 2
+policy_release = "v4.6.0"
+[repository]
+name = "argus-source-roots"
+domains = ["repository", "python"]
+required_documents = ["quality-gate.toml"]
+[[python]]
+name = "bot"
+path = "bot"
+python_version = "{sys.version_info.major}.{sys.version_info.minor}"
+dependency_inputs = ["bot/requirements.txt", "bot/requirements-dev.txt"]
+test_paths = []
+tests_applicable = false
+tests_reason = "Disposable ARGUS layout acceptance fixture."
+source_roots = ["scripts", "apscheduler"]
+stub_roots = ["stubs"]
+[[python]]
+name = "worker"
+path = "worker"
+python_version = "{sys.version_info.major}.{sys.version_info.minor}"
+dependency_inputs = ["requirements.txt"]
+test_paths = []
+tests_applicable = false
+tests_reason = "Opt-out fixture for shared-source selection."
+typecheck = false
+source_roots = ["scripts"]
+'''
+
+
+def _prepare_argus_layout(root: Path, *, signature: str = "str") -> None:
+	(root / "bot").mkdir(parents=True)
+	(root / "bot/__init__.py").write_text("", encoding="utf-8")
+	(root / "bot/stubs").mkdir()
+	(root / "bot/stubs/local_api.pyi").write_text(
+		"def format_label(value: str) -> str: ...\n", encoding="utf-8"
+	)
+	(root / "bot/main.py").write_text(
+		"from apscheduler.schedulers.asyncio import AsyncIOScheduler\n"
+		"from scripts.rendering import render\n"
+		"scheduler = AsyncIOScheduler()\n"
+		"scheduler.start()\n"
+		"label: str = render(1)\n",
+		encoding="utf-8",
+	)
+	(root / "scripts").mkdir()
+	(root / "scripts/__init__.py").write_text("", encoding="utf-8")
+	(root / "scripts/rendering.py").write_text(
+		f"def render(value: {signature}) -> str:\n    return str(value)\n", encoding="utf-8"
+	)
+	(root / "apscheduler/schedulers").mkdir(parents=True)
+	(root / "apscheduler/py.typed").write_bytes(b"\n")
+	(root / "apscheduler/__init__.pyi").write_text("", encoding="utf-8")
+	(root / "apscheduler/schedulers/__init__.pyi").write_text("", encoding="utf-8")
+	(root / "apscheduler/schedulers/asyncio.pyi").write_text(
+		"class AsyncIOScheduler:\n    def start(self) -> None: ...\n",
+		encoding="utf-8",
+	)
+	(root / "bot/requirements.txt").write_text("APScheduler==3.10.4\n", encoding="utf-8")
+	(root / "bot/requirements-dev.txt").write_text(
+		"-r requirements.txt\npytest\n", encoding="utf-8"
+	)
+	(root / "quality-gate.toml").write_text(_argus_typing_manifest(), encoding="utf-8")
+
+
+def _prepare_candidate_runtime(root: Path, cache: Path, environment: Path) -> Path:
+	manifest = load_manifest(root)
+	component = manifest.python[0]
+	identity = runtime_identity(root, manifest, component)
+	runtime = RuntimeManager(cache).path_for(root, identity)
+	runtime.parent.mkdir(parents=True, exist_ok=True)
+	shutil.copytree(environment, runtime, symlinks=True)
+	(runtime / "runtime.json").write_text(
+		json.dumps(asdict(identity) | {"fingerprint": runtime_fingerprint(identity)}),
+		encoding="utf-8",
+	)
+	return runtime
+
+
+@pytest.fixture
+def argus_project(
+	tmp_path: Path, typing_environment: Path, candidate_typing_cache: Path
+) -> Iterator[Path]:
+	project = tmp_path / "argus"
+	project.mkdir()
+	_prepare_argus_layout(project)
+	runtime = _prepare_candidate_runtime(project, candidate_typing_cache, typing_environment)
+	try:
+		yield project
+	finally:
+		if runtime.exists():
+			shutil.rmtree(runtime)
+
+
+def _run_candidate_types(
+	project: Path, cache: Path, wheel: Path, *paths: str, network_guard: bool = True
+) -> tuple[int, dict[str, Any]]:
+	policy = cache / "releases/v4.6.0"
+	return invoke_candidate_wheel(
+		request(project, policy, *paths, background=True), wheel, network_guard=network_guard
+	)
+
+
+def _assert_candidate_stale_mutation(
+	project: Path,
+	cache: Path,
+	wheel: Path,
+	*,
+	relative: str,
+	replacement: bytes | None,
+	snapshot_relative: str | None = None,
+) -> None:
+	path = project / relative
+	before = path.read_bytes() if path.is_file() else None
+	captured = threading.Event()
+	stop = threading.Event()
+
+	def mutate_after_snapshot() -> None:
+		snapshot_path = f"temp/qg-*/source/{snapshot_relative or relative}"
+		while not stop.wait(0.01):
+			if any(project.glob(snapshot_path)):
+				if replacement is None:
+					path.unlink()
+				else:
+					path.write_bytes(replacement)
+				captured.set()
+				return
+
+	thread = threading.Thread(target=mutate_after_snapshot)
+	thread.start()
+	try:
+		try:
+			code, result = _run_candidate_types(project, cache, wheel, "bot/main.py")
+		finally:
+			stop.set()
+			thread.join(timeout=3)
+	finally:
+		if before is None:
+			path.unlink(missing_ok=True)
+		else:
+			path.write_bytes(before)
+	assert captured.is_set(), "Mutation must follow snapshot capture."
+	assert (code, result["status"], result["reason"]) == (2, "unchecked", "stale_input"), result
+	assert result["components"] == []
+
+
+def test_candidate_wheel_checks_argus_sibling_sources_and_local_stubs(
+	argus_project: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+) -> None:
+	code, result = _run_candidate_types(
+		argus_project,
+		candidate_typing_cache,
+		candidate_engine_wheel,
+		"scripts/rendering.py",
+		network_guard=True,
+	)
+	assert (code, result["status"]) == (1, "failed"), json.dumps(result, indent=2)
+	assert result["engine_version"] == "4.6.0"
+	assert [record["name"] for record in result["components"]] == ["bot", "worker"]
+	component = result["components"][0]
+	assert {item["path"] for item in component["inventory"]} == {
+		"bot/__init__.py",
+		"bot/main.py",
+		"bot/stubs/local_api.pyi",
+		"scripts/__init__.py",
+		"scripts/rendering.py",
+		"apscheduler/__init__.pyi",
+		"apscheduler/schedulers/__init__.pyi",
+		"apscheduler/schedulers/asyncio.pyi",
+	}
+	assert component["diagnostics"] == [
+		{"path": "bot/main.py", "line": 5, "column": 21, "code": "arg-type"}
+	]
+	assert result["selections"][0]["mypy_version"] == "2.3.1"
+	policy = candidate_typing_cache / "releases/v4.6.0"
+	candidate = verify_release(policy)
+	mypy = next(item for item in candidate.tools if item.name == "mypy")
+	assert result["selections"][0]["mypy_sha256"] == digest((policy / mypy.path).read_bytes())
+	assert "py.typed" in {
+		entry["name"]
+		for directory in component["directories"]
+		if directory["path"] == "apscheduler"
+		for entry in directory["entries"]
+	}
+	assert result["components"][1]["reason"] == "typecheck_disabled"
+
+	(argus_project / "scripts/rendering.py").write_text(
+		"def render(value: int) -> str:\n    return str(value)\n", encoding="utf-8"
+	)
+	code, result = _run_candidate_types(
+		argus_project,
+		candidate_typing_cache,
+		candidate_engine_wheel,
+		"scripts/rendering.py",
+		network_guard=True,
+	)
+	assert (code, result["status"]) == (0, "passed"), result
+	assert [record["name"] for record in result["components"]] == ["bot", "worker"]
+	assert result["components"][0]["diagnostics"] == []
+	assert result["components"][1]["reason"] == "typecheck_disabled"
+	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
+		"v4.6.0"
+	]
+
+
+def test_candidate_wheel_uses_component_local_stub_with_real_mypy(
+	argus_project: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+) -> None:
+	(argus_project / "bot/main.py").write_text(
+		"from local_api import format_label\nlocal_label: str = format_label(1)\n",
+		encoding="utf-8",
+	)
+	code, result = _run_candidate_types(
+		argus_project, candidate_typing_cache, candidate_engine_wheel, "bot/main.py"
+	)
+	assert (code, result["status"]) == (1, "failed"), (
+		result.get("reason"),
+		[(item["name"], item["status"], item["diagnostics"]) for item in result["components"]],
+	)
+	assert result["components"][0]["diagnostics"][0]["code"] == "arg-type"
+	assert result["components"][0]["diagnostics"][0]["path"] == "bot/main.py"
+
+	(argus_project / "bot/stubs/local_api.pyi").write_text(
+		"def format_label(value: int) -> str: ...\n", encoding="utf-8"
+	)
+	code, result = _run_candidate_types(
+		argus_project, candidate_typing_cache, candidate_engine_wheel, "bot/main.py"
+	)
+	assert (code, result["status"]) == (0, "passed"), result
+	assert result["components"][0]["diagnostics"] == []
+
+
+def test_candidate_wheel_routes_added_and_removed_py_typed_markers(
+	argus_project: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+) -> None:
+	(argus_project / "scripts/rendering.py").write_text(
+		"def render(value: int) -> str:\n    return str(value)\n", encoding="utf-8"
+	)
+	marker = argus_project / "apscheduler/py.typed"
+	marker.unlink()
+	code, result = _run_candidate_types(
+		argus_project, candidate_typing_cache, candidate_engine_wheel, "apscheduler/py.typed"
+	)
+	assert (code, result["status"]) == (0, "passed"), (
+		result.get("reason"),
+		[
+			(item["name"], item["status"], item.get("reason"), item["diagnostics"])
+			for item in result["components"]
+		],
+	)
+	assert [record["name"] for record in result["components"]] == ["bot"]
+	files = {item["path"]: item for item in result["files"]}
+	assert files["apscheduler/py.typed"]["input_sha256"] is None
+	assert files["apscheduler/py.typed"]["final_sha256"] is None
+
+	marker.write_bytes(b"partial\n")
+	code, result = _run_candidate_types(
+		argus_project, candidate_typing_cache, candidate_engine_wheel, "apscheduler/py.typed"
+	)
+	assert (code, result["status"]) == (0, "passed"), result
+	assert [record["name"] for record in result["components"]] == ["bot"]
+	configuration = {item["path"]: item["sha256"] for item in result["configuration"]}
+	assert configuration["apscheduler/py.typed"] == digest(b"partial\n")
+
+	nested_marker = argus_project / "apscheduler/schedulers/py.typed"
+	nested_marker.write_bytes(b"partial\n")
+	code, result = _run_candidate_types(
+		argus_project,
+		candidate_typing_cache,
+		candidate_engine_wheel,
+		"apscheduler/schedulers/py.typed",
+	)
+	assert (code, result["status"]) == (0, "passed"), result
+	assert [record["name"] for record in result["components"]] == ["bot"]
+	configuration = {item["path"]: item["sha256"] for item in result["configuration"]}
+	assert configuration["apscheduler/schedulers/py.typed"] == digest(b"partial\n")
+
+
+@pytest.mark.parametrize("phase", ["write", "validate"])
+def test_candidate_wheel_runs_ruff_writer_and_validator_with_candidate_only_cache(
+	tmp_path: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+	phase: str,
+) -> None:
+	project = tmp_path / "ruff-candidate"
+	project.mkdir()
+	path = project / "example.py"
+	original = b"import os\nimport sys\n\nvalue = (os.name, sys.version)\n"
+	path.write_bytes(original)
+	policy = candidate_typing_cache / "releases/v4.6.0"
+	payload = request(project, policy, "example.py")
+	payload["baseline"] = {
+		"policy_release": "v4.6.0",
+		"python": sys.executable,
+		"python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+	}
+	payload["phase"] = phase
+	code, result = invoke_candidate_wheel(payload, candidate_engine_wheel, command="edit-check")
+	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.6.0"), result
+	assert result["selections"][0]["policy_release"] == "v4.6.0"
+	assert result["files"][0]["format"] == "passed"
+	assert result["files"][0]["sha256"] == digest(original)
+	assert path.read_bytes() == original
+	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
+		"v4.6.0"
+	]
+
+
+def test_candidate_wheel_runs_secrets_with_candidate_only_cache(
+	tmp_path: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+) -> None:
+	project = tmp_path / "secrets-candidate"
+	project.mkdir()
+	(project / "settings.py").write_text("token = 'ordinary value'\n", encoding="utf-8")
+	policy = candidate_typing_cache / "releases/v4.6.0"
+	code, result = invoke_candidate_wheel(
+		request(project, policy, "settings.py"), candidate_engine_wheel, command="edit-secrets"
+	)
+	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.6.0"), result
+	assert result["selections"][0]["policy_release"] == "v4.6.0"
+	assert result["selections"][0]["scanner_version"] == "8.30.1"
+	assert result["files"][0]["findings"] == []
+	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
+		"v4.6.0"
+	]
+
+
+def test_candidate_wheel_runs_integrity_with_candidate_only_cache(
+	tmp_path: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+) -> None:
+	project = tmp_path / "integrity-candidate"
+	project.mkdir()
+	(project / "clean.py").write_text("value: int = 1\n", encoding="utf-8")
+	policy = candidate_typing_cache / "releases/v4.6.0"
+	code, result = invoke_candidate_wheel(
+		request(project, policy, "clean.py"), candidate_engine_wheel, command="edit-integrity"
+	)
+	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.6.0"), result
+	assert result["selections"][0]["policy_release"] == "v4.6.0"
+	assert result["files"][0]["status"] == "passed"
+	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
+		"v4.6.0"
+	]
+
+
+def test_candidate_wheel_routes_shared_tree_additions_renames_and_configuration(
+	argus_project: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+) -> None:
+	(argus_project / "scripts/rendering.py").write_text(
+		"def render(value: int) -> str:\n    return str(value)\n", encoding="utf-8"
+	)
+	added = argus_project / "scripts/temporary.py"
+	added.write_text("value: int = 1\n", encoding="utf-8")
+	code, result = _run_candidate_types(
+		argus_project, candidate_typing_cache, candidate_engine_wheel, "scripts/temporary.py"
+	)
+	assert (code, result["status"]) == (0, "passed"), result
+	assert [record["name"] for record in result["components"]] == ["bot", "worker"]
+	assert "scripts/temporary.py" in {item["path"] for item in result["components"][0]["inventory"]}
+
+	renamed = argus_project / "scripts/renamed.py"
+	added.replace(renamed)
+	code, result = _run_candidate_types(
+		argus_project,
+		candidate_typing_cache,
+		candidate_engine_wheel,
+		"scripts/temporary.py",
+		"scripts/renamed.py",
+	)
+	assert (code, result["status"]) == (0, "passed"), result
+	paths = {item["path"] for item in result["components"][0]["inventory"]}
+	assert "scripts/renamed.py" in paths and "scripts/temporary.py" not in paths
+	renamed.unlink()
+	code, result = _run_candidate_types(
+		argus_project, candidate_typing_cache, candidate_engine_wheel, "scripts/renamed.py"
+	)
+	assert (code, result["status"]) == (0, "passed"), result
+	assert "scripts/renamed.py" not in {
+		item["path"] for item in result["components"][0]["inventory"]
+	}
+
+	initializer = argus_project / "scripts/__init__.py"
+	initializer.write_text("# changed package initializer\n", encoding="utf-8")
+	code, result = _run_candidate_types(
+		argus_project, candidate_typing_cache, candidate_engine_wheel, "scripts/__init__.py"
+	)
+	assert (code, result["status"]) == (0, "passed"), result
+	assert "scripts/__init__.py" in {item["path"] for item in result["components"][0]["inventory"]}
+	configuration = argus_project / "scripts/pyproject.toml"
+	configuration.write_text("[tool.mypy]\n", encoding="utf-8")
+	code, result = _run_candidate_types(
+		argus_project, candidate_typing_cache, candidate_engine_wheel, "scripts/pyproject.toml"
+	)
+	assert (code, result["status"]) == (0, "passed"), result
+	assert "scripts/pyproject.toml" in {item["path"] for item in result["configuration"]}
+
+
+@pytest.mark.parametrize("namespace", [False, True], ids=["package", "namespace"])
+def test_candidate_wheel_checks_import_names_for_nested_source_roots(
+	tmp_path: Path,
+	typing_environment: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+	namespace: bool,
+) -> None:
+	project = tmp_path / "argus-nested-source"
+	project.mkdir()
+	_prepare_argus_layout(project)
+	manifest = project / "quality-gate.toml"
+	manifest.write_text(
+		manifest.read_text(encoding="utf-8").replace(
+			'source_roots = ["scripts", "apscheduler"]',
+			'source_roots = ["shared/scripts", "apscheduler"]',
+		),
+		encoding="utf-8",
+	)
+	shared_scripts = project / "shared/scripts"
+	shared_scripts.parent.mkdir()
+	(project / "scripts").replace(shared_scripts)
+	if namespace:
+		(shared_scripts / "__init__.py").unlink()
+	else:
+		(project / "shared/__init__.py").write_bytes(b"# package parent\n")
+	(project / "bot/main.py").write_text(
+		"from apscheduler.schedulers.asyncio import AsyncIOScheduler\n"
+		"from rendering import render\n"
+		"scheduler = AsyncIOScheduler()\n"
+		"scheduler.start()\n"
+		"label: str = render(1)\n",
+		encoding="utf-8",
+	)
+	runtime = _prepare_candidate_runtime(
+		project,
+		candidate_typing_cache,
+		typing_environment,
+	)
+	try:
+		code, result = _run_candidate_types(
+			project,
+			candidate_typing_cache,
+			candidate_engine_wheel,
+			"shared/scripts/rendering.py",
+		)
+		assert (code, result["status"]) == (1, "failed"), (
+			result.get("reason"),
+			[(item["name"], item["status"], item["diagnostics"]) for item in result["components"]],
+		)
+		assert result["components"][0]["diagnostics"] == [
+			{"path": "bot/main.py", "line": 5, "column": 21, "code": "arg-type"}
+		]
+		(shared_scripts / "rendering.py").write_text(
+			"def render(value: int) -> str:\n    return str(value)\n", encoding="utf-8"
+		)
+		code, result = _run_candidate_types(
+			project,
+			candidate_typing_cache,
+			candidate_engine_wheel,
+			"shared/scripts/rendering.py",
+		)
+	finally:
+		if runtime.exists():
+			shutil.rmtree(runtime)
+	assert (code, result["status"]) == (0, "passed"), (
+		result.get("reason"),
+		[(item["name"], item["status"], item["diagnostics"]) for item in result["components"]],
+	)
+	assert [record["name"] for record in result["components"]] == ["bot"]
+	configuration = {item["path"]: item["sha256"] for item in result["configuration"]}
+	assert configuration["shared/__init__.py"] == (
+		digest(b"# package parent\n") if not namespace else None
+	)
+
+
+@pytest.mark.parametrize(
+	("relative", "replacement", "snapshot_relative"),
+	[
+		(
+			"scripts/rendering.py",
+			b"def render(value: object) -> str:\n    return str(value)\n",
+			None,
+		),
+		(
+			"apscheduler/schedulers/asyncio.pyi",
+			b"class AsyncIOScheduler:\n    def start(self, value: int) -> None: ...\n",
+			None,
+		),
+		(
+			"bot/stubs/local_api.pyi",
+			b"def format_label(value: int) -> str: ...\n",
+			None,
+		),
+		("apscheduler/py.typed", b"partial\n", None),
+		(
+			"apscheduler/schedulers/py.typed",
+			b"partial\n",
+			"apscheduler/py.typed",
+		),
+		(
+			"bot/stubs/added.pyi",
+			b"class Added: ...\n",
+			"bot/stubs/local_api.pyi",
+		),
+		(
+			"apscheduler/schedulers/added.pyi",
+			b"class Added: ...\n",
+			"apscheduler/schedulers/asyncio.pyi",
+		),
+		("apscheduler/schedulers/asyncio.pyi", None, None),
+		("bot/stubs/local_api.pyi", None, None),
+		("apscheduler/py.typed", None, None),
+	],
+)
+def test_candidate_wheel_rejects_in_flight_shared_and_stub_mutations(
+	argus_project: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+	relative: str,
+	replacement: bytes | None,
+	snapshot_relative: str | None,
+) -> None:
+	_assert_candidate_stale_mutation(
+		argus_project,
+		candidate_typing_cache,
+		candidate_engine_wheel,
+		relative=relative,
+		replacement=replacement,
+		snapshot_relative=snapshot_relative,
+	)
+
+
+@pytest.mark.parametrize("unsafe", [False, True])
+def test_candidate_cli_fails_closed_for_missing_or_linked_source_roots(
+	tmp_path: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+	unsafe: bool,
+) -> None:
+	project = tmp_path / "argus-invalid-root"
+	(project / "bot").mkdir(parents=True)
+	(project / "bot/main.py").write_text("value: int = 1\n", encoding="utf-8")
+	(project / "bot/requirements.txt").write_text("APScheduler==3.10.4\n", encoding="utf-8")
+	(project / "bot/requirements-dev.txt").write_text(
+		"-r requirements.txt\npytest\n", encoding="utf-8"
+	)
+	(project / "quality-gate.toml").write_text(_argus_typing_manifest(), encoding="utf-8")
+	if unsafe:
+		(project / "outside").mkdir()
+		try:
+			(project / "scripts").symlink_to(project / "outside", target_is_directory=True)
+		except OSError as error:
+			pytest.skip(f"Directory symlinks are unavailable: {error}")
+		(project / "apscheduler").mkdir()
+	cache_policy = candidate_typing_cache / "releases/v4.6.0"
+	code, result = invoke_candidate_wheel(
+		request(project, cache_policy, "bot/main.py", background=True), candidate_engine_wheel
+	)
+	expected = "unsafe_path" if unsafe else "dependencies"
+	assert (code, result["status"], result["reason"]) == (2, "unchecked", expected), result
+	assert result["components"] == []
+
+
+@pytest.mark.parametrize(
+	("stub_roots", "expected"),
+	[('["missing"]', "dependencies"), ('["../outside"]', "manifest")],
+)
+def test_candidate_cli_fails_closed_for_missing_or_unsafe_component_stub_roots(
+	tmp_path: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+	stub_roots: str,
+	expected: str,
+) -> None:
+	project = tmp_path / "argus-invalid-stub-root"
+	project.mkdir()
+	_prepare_argus_layout(project)
+	manifest = project / "quality-gate.toml"
+	manifest.write_text(
+		manifest.read_text(encoding="utf-8").replace(
+			'stub_roots = ["stubs"]', f"stub_roots = {stub_roots}"
+		),
+		encoding="utf-8",
+	)
+	policy = candidate_typing_cache / "releases/v4.6.0"
+	code, result = invoke_candidate_wheel(
+		request(project, policy, "bot/main.py", background=True), candidate_engine_wheel
+	)
+	assert (code, result["status"], result["reason"]) == (2, "unchecked", expected), result
+	assert result["components"] == []
+
+
+def test_candidate_cli_does_not_import_undeclared_working_tree_modules(
+	argus_project: Path,
+	candidate_typing_cache: Path,
+	candidate_engine_wheel: Path,
+) -> None:
+	(argus_project / "unlisted.py").write_text("def helper() -> int: ...\n", encoding="utf-8")
+	(argus_project / "bot/main.py").write_text(
+		"from unlisted import helper\nvalue: int = helper()\n",
+		encoding="utf-8",
+	)
+	policy = candidate_typing_cache / "releases/v4.6.0"
+	code, result = invoke_candidate_wheel(
+		request(argus_project, policy, "bot/main.py", background=True),
+		candidate_engine_wheel,
+	)
+	assert (code, result["status"], result["reason"]) == (2, "unchecked", "dependencies"), result
+	assert result["components"] == []
+	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
+		"v4.6.0"
+	]
 
 
 def test_typing_measurements(tmp_path: Path, typing_policy: Path, typing_environment: Path) -> None:

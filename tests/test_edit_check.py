@@ -74,6 +74,7 @@ RELEASED_EDIT_POLICIES = frozenset(
 		"v4.2.1",
 		"v4.3.0",
 		"v4.4.0",
+		"v4.5.0",
 	}
 )
 
@@ -84,7 +85,19 @@ def test_supported_policy_matrix_keeps_all_released_pins() -> None:
 
 def assert_project_files_after_cleanup(root: Path, *names: str) -> None:
 	assert {item.name for item in root.iterdir()} == {*names, "temp"}
-	assert {item.name for item in (root / "temp").iterdir()} == {".quality-gate.lock"}
+	temp_root = root / "temp"
+	if os.name == "nt":
+		assert {item.name for item in temp_root.iterdir()} == {".quality-gate.lock"}
+		return
+	entries = list(temp_root.iterdir())
+	areas = [item for item in entries if item.name.startswith(".quality-gate-cleanup-")]
+	assert len(areas) == 1
+	area = areas[0]
+	assert {item.name for item in entries} == {".quality-gate.lock", area.name}
+	assert area.is_dir() and not area.is_symlink()
+	assert area.stat().st_mode & 0o077 == 0
+	assert {item.name for item in area.iterdir()} == {".quality-gate-cleanup-area"}
+	assert (area / ".quality-gate-cleanup-area").is_file()
 
 
 @pytest.mark.parametrize(
