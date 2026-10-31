@@ -175,10 +175,17 @@ def candidate_typing_cache(
 	from test_edit_check import prepare_edit_cache
 
 	cache_parent = typing_policy.parent.parent
+	if os.name == "nt":
+		temp_parent = Path(tempfile.gettempdir()).parent
+		if (
+			temp_parent.is_dir()
+			and os.access(temp_parent, os.W_OK)
+			and len(os.fspath(temp_parent)) < len(os.fspath(cache_parent))
+		):
+			# Keep the candidate runtime short enough for Windows to open mypy's typeshed files.
+			cache_parent = temp_parent
 	if is_link_or_reparse(cache_parent.lstat()) or not cache_parent.is_dir():
-		raise AssertionError("Candidate typing cache requires an ordinary policy cache root.")
-	# Gate redirects TEMP into its nested workspace. Keep disposable runtimes beside
-	# the verified user-local policy cache to avoid overlong Windows paths.
+		raise AssertionError("Candidate typing cache requires an ordinary parent directory.")
 	with tempfile.TemporaryDirectory(prefix="qg-candidate-", dir=cache_parent) as directory:
 		cache = Path(directory).resolve()
 		prepare_edit_cache(cache, "v4.6.0")
