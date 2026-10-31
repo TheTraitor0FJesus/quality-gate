@@ -31,10 +31,12 @@ _ROOT_CONTROL_FILE_NAMES = frozenset({_ACTIVE_LOCK_NAME, _OWNERSHIP_MARKER_NAME}
 _OWNERSHIP_MARKER_MAX_BYTES = 4096
 _OWNERSHIP_RECORD_PREFIX = ".quality-gate-owner-"
 _CLEANUP_RECORD_PREFIX = ".quality-gate-cleanup-record-"
+_CLEANUP_RETRY_PREFIX = ".quality-gate-cleanup-retry-"
 _OWNERSHIP_RECORD_MAX_BYTES = 4096
 _CLEANUP_AREA_NAME = ".quality-gate-cleanup"
 _CLEANUP_AREA_MARKER_NAME = ".quality-gate-cleanup-area"
 _OWNERSHIP_KEY_NAME = "temp-workspace.key"
+_RECOVERY_KEY_NAME = "temp-workspace-recovery.key"
 _OWNERSHIP_KEY_BYTES = 32
 _OWNERSHIP_KEY_MODE = 0o600
 _OWNERSHIP_RECORD_SCHEMA = 2
@@ -438,27 +440,73 @@ def _ownership_key(*, create: bool) -> bytes | None:
 	path = _user_state_directory() / _OWNERSHIP_KEY_NAME
 	if create:
 		_ensure_private_directory(path.parent, restrict_existing=True)
-	key = _read_ownership_key(path)
+	try:
+		key = _read_ownership_key(path)
+	except OSError:
+		if not _incomplete_ownership_key(path):
+			raise
+		path = path.with_name(_RECOVERY_KEY_NAME)
+		key = _read_ownership_key(path)
+	if key is None and path.name == _OWNERSHIP_KEY_NAME:
+		recovery = path.with_name(_RECOVERY_KEY_NAME)
+		recovery_key = _read_ownership_key(recovery)
+		if recovery_key is not None:
+			return recovery_key
 	if key is not None or not create:
 		return key
 	_create_ownership_key_file(path)
 	return _read_ownership_key(path)
 
 
-def _create_ownership_key_file(path: Path) -> None:
-	key = os.urandom(_OWNERSHIP_KEY_BYTES)
+def _incomplete_ownership_key(path: Path) -> bool:
 	try:
-		descriptor = os.open(
-			path,
-			os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-			_OWNERSHIP_KEY_MODE,
-		)
+		metadata = path.lstat()
+	except OSError:
+		return False
+	return (
+		_plain_lock_file(path, metadata)
+		and metadata.st_size < _OWNERSHIP_KEY_BYTES
+		and (os.name == "nt" or metadata.st_uid == _current_user_id())
+		and (os.name == "nt" or stat.S_IMODE(metadata.st_mode) == _OWNERSHIP_KEY_MODE)
+	)
+
+
+def _publish_new_file(path: Path, content: bytes) -> None:
+	"""Publish complete bytes without replacing an existing name."""
+	descriptor, temporary_name = tempfile.mkstemp(prefix=".quality-gate-pending-", dir=path.parent)
+	temporary = Path(temporary_name)
+	identity = os.fstat(descriptor)
+	try:
+		with os.fdopen(descriptor, "wb") as stream:
+			stream.write(content)
+			stream.flush()
+			os.fsync(stream.fileno())
+		if os.name == "nt":
+			os.rename(temporary, path)
+		else:
+			flags = os.O_RDONLY | _optional_os_flag("O_DIRECTORY") | _optional_os_flag("O_NOFOLLOW")
+			parent = os.open(path.parent, flags)
+			try:
+				if not _same_file_identity(os.fstat(parent), path.parent.lstat()):
+					raise OSError(f"temporary publication directory changed: {path.parent}")
+				_rename_without_replacement(temporary.name, path.name, parent, parent)
+				os.fsync(parent)
+			finally:
+				os.close(parent)
+	finally:
+		try:
+			current = temporary.lstat()
+			if _same_file_identity(identity, current):
+				temporary.unlink()
+		except FileNotFoundError:
+			pass
+
+
+def _create_ownership_key_file(path: Path) -> None:
+	try:
+		_publish_new_file(path, os.urandom(_OWNERSHIP_KEY_BYTES))
 	except FileExistsError:
-		return
-	with os.fdopen(descriptor, "wb") as stream:
-		stream.write(key)
-		stream.flush()
-		os.fsync(stream.fileno())
+		pass
 
 
 def _read_ownership_key(path: Path) -> bytes | None:
@@ -513,12 +561,18 @@ def _valid_signed_record(content: bytes) -> dict[str, object] | None:
 		return None
 	payload = {key: value for key, value in record.items() if key != "signature"}
 	key = _ownership_key(create=False)
-	if key is None:
-		return None
-	expected = hmac.new(key, _canonical_json(payload), hashlib.sha256).hexdigest()
-	if not hmac.compare_digest(record["signature"], expected):
-		return None
-	return payload
+	keys = [key] if key is not None else []
+	try:
+		recovery_key = _read_ownership_key(_user_state_directory() / _RECOVERY_KEY_NAME)
+	except OSError:
+		recovery_key = None
+	if recovery_key is not None and recovery_key not in keys:
+		keys.append(recovery_key)
+	for candidate in keys:
+		expected = hmac.new(candidate, _canonical_json(payload), hashlib.sha256).hexdigest()
+		if hmac.compare_digest(record["signature"], expected):
+			return payload
+	return None
 
 
 def _plain_lock_file(path: Path, metadata: os.stat_result) -> bool:
@@ -705,7 +759,9 @@ def _check_ordinary_directory(path: Path, *, allow_missing: bool = False) -> os.
 
 
 def _temporary_root_for_entry(path: Path) -> Path:
-	if path.name.startswith((_OWNERSHIP_RECORD_PREFIX, _CLEANUP_RECORD_PREFIX)):
+	if path.name.startswith(
+		(_OWNERSHIP_RECORD_PREFIX, _CLEANUP_RECORD_PREFIX, _CLEANUP_RETRY_PREFIX)
+	):
 		return path.parent
 	workspace_directories = [
 		candidate for candidate in (path, *path.parents) if candidate.name.startswith("qg-")
@@ -725,15 +781,18 @@ def _temporary_root_for_entry(path: Path) -> Path:
 	raise OSError(f"temporary workspace entry has no managed root: {path}")
 
 
-def _cleanup_area_marker(temp_root: Path, identity: os.stat_result) -> bytes:
-	payload: dict[str, object] = {
+def _cleanup_area_payload(temp_root: Path, identity: os.stat_result) -> dict[str, object]:
+	return {
 		"device": identity.st_dev,
 		"format": "quality-gate-temp-workspace-cleanup-area",
 		"inode": identity.st_ino,
 		"root": os.path.normcase(os.path.abspath(temp_root)),
 		"schema": 1,
 	}
-	marker = _signed_record(payload, create_key=True)
+
+
+def _cleanup_area_marker(temp_root: Path, identity: os.stat_result) -> bytes:
+	marker = _signed_record(_cleanup_area_payload(temp_root, identity), create_key=True)
 	if marker is None:
 		raise OSError(f"temporary workspace signing key is unavailable: {temp_root}")
 	return marker
@@ -741,32 +800,80 @@ def _cleanup_area_marker(temp_root: Path, identity: os.stat_result) -> bytes:
 
 def _open_cleanup_area(temp_root: Path) -> tuple[Path, int]:
 	_check_ordinary_directory(temp_root)
-	area = temp_root / _CLEANUP_AREA_NAME
-	identity = _ensure_private_directory(area)
-	expected_marker = _cleanup_area_marker(temp_root, identity)
-	marker = area / _CLEANUP_AREA_MARKER_NAME
+	key = _ownership_key(create=True)
+	if key is None:
+		raise OSError(f"temporary workspace signing key is unavailable: {temp_root}")
+	legacy = _open_cleanup_area_at(temp_root, temp_root / _CLEANUP_AREA_NAME, create=False)
 	try:
-		with marker.open("xb") as stream:
-			stream.write(expected_marker)
-			stream.flush()
-			os.fsync(stream.fileno())
-	except FileExistsError:
-		pass
-	marker_identity = marker.lstat()
-	if (
-		not _plain_lock_file(marker, marker_identity)
-		or marker_identity.st_size > _OWNERSHIP_RECORD_MAX_BYTES
-	):
-		raise OSError(f"temporary workspace cleanup area marker is unsafe: {marker}")
-	with marker.open("rb") as stream:
-		opened = os.fstat(stream.fileno())
-		if not _same_file_identity(marker_identity, opened) or not _plain_lock_file(marker, opened):
-			raise OSError(f"temporary workspace cleanup area marker changed: {marker}")
-		content = stream.read(_OWNERSHIP_RECORD_MAX_BYTES + 1)
-	if content != expected_marker or not _same_file_identity(marker_identity, marker.lstat()):
-		raise OSError(f"temporary workspace cleanup area marker is not authentic: {marker}")
-	if os.name == "nt":
-		return area, -1
+		recovery_key = _read_ownership_key(_user_state_directory() / _RECOVERY_KEY_NAME)
+	except OSError:
+		recovery_key = None
+	keys = [key]
+	if recovery_key is not None and recovery_key not in keys:
+		keys.append(recovery_key)
+	selected = _open_existing_cleanup_areas(temp_root, keys)
+	if selected is not None:
+		if legacy is not None:
+			os.close(legacy[1])
+		return selected
+	if legacy is not None:
+		return legacy
+	for area in _cleanup_area_candidates(temp_root, key):
+		opened = _open_cleanup_area_at(temp_root, area, create=True)
+		if opened is not None:
+			return opened
+	raise OSError(f"no safe temporary workspace cleanup area available: {temp_root}")
+
+
+def _cleanup_area_candidates(temp_root: Path, key: bytes) -> Iterator[Path]:
+	digest = hmac.new(key, b"quality-gate-cleanup-area", hashlib.sha256).hexdigest()[:32]
+	for index in range(8):
+		suffix = "" if index == 0 else f"-{index}"
+		yield temp_root / f"{_CLEANUP_AREA_NAME}-{digest}{suffix}"
+
+
+def _open_existing_cleanup_areas(temp_root: Path, keys: list[bytes]) -> tuple[Path, int] | None:
+	selected: tuple[Path, int] | None = None
+	for candidate_key in keys:
+		for area in _cleanup_area_candidates(temp_root, candidate_key):
+			opened = _open_cleanup_area_at(temp_root, area, create=False)
+			if opened is None:
+				continue
+			if candidate_key == keys[0] and selected is None:
+				selected = opened
+			else:
+				os.close(opened[1])
+	return selected
+
+
+def _open_cleanup_area_at(temp_root: Path, area: Path, *, create: bool) -> tuple[Path, int] | None:
+	created = False
+	if create:
+		try:
+			area.mkdir(mode=0o700)
+			created = True
+		except FileExistsError:
+			pass
+	try:
+		identity = (
+			_ensure_posix_private_directory(area, restrict_existing=False)
+			if create
+			else area.lstat()
+		)
+		if (
+			is_link_or_reparse(identity)
+			or not stat.S_ISDIR(identity.st_mode)
+			or identity.st_uid != _current_user_id()
+			or stat.S_IMODE(identity.st_mode) & 0o077
+		):
+			return None
+	except OSError:
+		return None
+	marker = area / _CLEANUP_AREA_MARKER_NAME
+	if created:
+		_publish_new_file(marker, _cleanup_area_marker(temp_root, identity))
+	if not _cleanup_area_marker_is_current(temp_root, marker, identity):
+		return None
 	flags = os.O_RDONLY | _optional_os_flag("O_DIRECTORY") | _optional_os_flag("O_NOFOLLOW")
 	descriptor = os.open(area, flags)
 	opened_area = os.fstat(descriptor)
@@ -779,6 +886,34 @@ def _open_cleanup_area(temp_root: Path) -> tuple[Path, int]:
 	os.fsync(descriptor)
 	_recover_quarantined_entries(temp_root, descriptor)
 	return area, descriptor
+
+
+def _cleanup_area_marker_is_current(
+	temp_root: Path, marker: Path, identity: os.stat_result
+) -> bool:
+	try:
+		marker_identity = marker.lstat()
+	except FileNotFoundError:
+		return False
+	if (
+		not _plain_lock_file(marker, marker_identity)
+		or marker_identity.st_size > _OWNERSHIP_RECORD_MAX_BYTES
+	):
+		return False
+	try:
+		with marker.open("rb") as stream:
+			opened = os.fstat(stream.fileno())
+			if not _same_file_identity(marker_identity, opened) or not _plain_lock_file(
+				marker, opened
+			):
+				return False
+			content = stream.read(_OWNERSHIP_RECORD_MAX_BYTES + 1)
+		current_marker = marker.lstat()
+	except (FileNotFoundError, PermissionError):
+		return False
+	return _valid_signed_record(content) == _cleanup_area_payload(
+		temp_root, identity
+	) and _same_file_identity(marker_identity, current_marker)
 
 
 def _recover_quarantined_entries(temp_root: Path, cleanup_descriptor: int) -> None:
@@ -1390,7 +1525,11 @@ def _run_directory_from_owner_record(temp_root: Path, owner_record: Path) -> Pat
 	prefix = next(
 		(
 			candidate
-			for candidate in (_OWNERSHIP_RECORD_PREFIX, _CLEANUP_RECORD_PREFIX)
+			for candidate in (
+				_OWNERSHIP_RECORD_PREFIX,
+				_CLEANUP_RECORD_PREFIX,
+				_CLEANUP_RETRY_PREFIX,
+			)
 			if owner_record.name.startswith(candidate)
 		),
 		None,
@@ -1417,8 +1556,8 @@ def _reclaim_stale_workspace(temp_root: Path, entry: Path) -> None:
 	cleanup_valid, cleanup_identity, active_identity, marker_identity = _has_valid_cleanup_record(
 		temp_root, entry, metadata
 	)
-	if cleanup_identity is not None and not cleanup_valid:
-		return
+	if not cleanup_valid:
+		cleanup_identity = None
 	cleanup_controls = (
 		(active_identity, marker_identity)
 		if active_identity is not None and marker_identity is not None
@@ -1451,6 +1590,11 @@ def _remove_orphan_ownership_record(temp_root: Path, run_directory: Path) -> Non
 		),
 		(
 			_cleanup_record_path(temp_root, run_directory),
+			"quality-gate-temp-workspace-cleanup",
+			_CLEANUP_RECORD_SCHEMA,
+		),
+		(
+			_cleanup_retry_path(temp_root, run_directory),
 			"quality-gate-temp-workspace-cleanup",
 			_CLEANUP_RECORD_SCHEMA,
 		),
@@ -1595,12 +1739,20 @@ def _begin_workspace_cleanup(
 	active_lock: BinaryIO,
 ) -> tuple[bool, os.stat_result | None, tuple[tuple[int, int], tuple[int, int]] | None]:
 	active_file_identity = os.fstat(active_lock.fileno())
-	marker_file_identity = (entry / _OWNERSHIP_MARKER_NAME).lstat()
+	try:
+		marker_file_identity = (entry / _OWNERSHIP_MARKER_NAME).lstat()
+	except FileNotFoundError:
+		return False, None, None
 	if not _workspace_ownership_is_current(temp_root, entry, metadata, owner_identity):
 		return False, None, None
-	if not _same_file_identity(active_file_identity, (entry / _ACTIVE_LOCK_NAME).lstat()):
+	try:
+		active_current = (entry / _ACTIVE_LOCK_NAME).lstat()
+		marker_current = (entry / _OWNERSHIP_MARKER_NAME).lstat()
+	except FileNotFoundError:
 		return False, None, None
-	if not _same_file_identity(marker_file_identity, (entry / _OWNERSHIP_MARKER_NAME).lstat()):
+	if not _same_file_identity(active_file_identity, active_current) or not _same_file_identity(
+		marker_file_identity, marker_current
+	):
 		return False, None, None
 	cleanup_identity = _write_cleanup_record(
 		temp_root, entry, metadata, active_file_identity, marker_file_identity
@@ -1808,6 +1960,10 @@ def _cleanup_record_path(temp_root: Path, run_directory: Path) -> Path:
 	return temp_root / f"{_CLEANUP_RECORD_PREFIX}{run_directory.name}"
 
 
+def _cleanup_retry_path(temp_root: Path, run_directory: Path) -> Path:
+	return temp_root / f"{_CLEANUP_RETRY_PREFIX}{run_directory.name}"
+
+
 def _has_valid_ownership_record(
 	temp_root: Path,
 	run_directory: Path,
@@ -1842,11 +1998,16 @@ def _has_valid_ownership_record(
 			return False, metadata
 		if not _same_file_identity(directory_identity, current_directory):
 			return False, metadata
-	try:
-		expected = _ownership_record(temp_root, run_directory, directory_identity, create_key=False)
-	except OSError:
-		return False, metadata
-	return content == expected, metadata
+	payload = _valid_signed_record(content)
+	expected: dict[str, object] = {
+		"device": directory_identity.st_dev,
+		"format": "quality-gate-temp-workspace-owner",
+		"inode": directory_identity.st_ino,
+		"root": os.path.normcase(os.path.abspath(temp_root)),
+		"run": run_directory.name,
+		"schema": _OWNERSHIP_RECORD_SCHEMA,
+	}
+	return payload is not None and _canonical_json(payload) == _canonical_json(expected), metadata
 
 
 def _has_valid_cleanup_record(
@@ -1862,7 +2023,35 @@ def _has_valid_cleanup_record(
 	tuple[int, int] | None,
 	tuple[int, int] | None,
 ]:
-	path = _cleanup_record_path(temp_root, run_directory)
+	last_identity: os.stat_result | None = None
+	for path in (
+		_cleanup_record_path(temp_root, run_directory),
+		_cleanup_retry_path(temp_root, run_directory),
+	):
+		result = _read_cleanup_record(
+			path,
+			temp_root,
+			run_directory,
+			directory_identity,
+			expected_record=expected_record,
+			verify_directory=verify_directory,
+		)
+		if result[0]:
+			return result
+		if result[1] is not None:
+			last_identity = result[1]
+	return False, last_identity, None, None
+
+
+def _read_cleanup_record(
+	path: Path,
+	temp_root: Path,
+	run_directory: Path,
+	directory_identity: os.stat_result,
+	*,
+	expected_record: os.stat_result | None,
+	verify_directory: bool,
+) -> tuple[bool, os.stat_result | None, tuple[int, int] | None, tuple[int, int] | None]:
 	try:
 		metadata = path.lstat()
 		if (
@@ -1968,29 +2157,31 @@ def _write_cleanup_record(
 	marker_identity: os.stat_result,
 ) -> os.stat_result | None:
 	path = _cleanup_record_path(temp_root, run_directory)
-	created_identity: os.stat_result | None = None
-	try:
-		with path.open("xb") as stream:
-			created_identity = os.fstat(stream.fileno())
-			stream.write(
-				_cleanup_record(
-					temp_root,
-					run_directory,
-					directory_identity,
-					active_lock_identity,
-					marker_identity,
-				)
+	if path.exists():
+		valid, identity, active_identity, marker_file = _has_valid_cleanup_record(
+			temp_root, run_directory, directory_identity
+		)
+		if valid:
+			return (
+				identity
+				if active_identity == (active_lock_identity.st_dev, active_lock_identity.st_ino)
+				and marker_file == (marker_identity.st_dev, marker_identity.st_ino)
+				else None
 			)
-			stream.flush()
-			os.fsync(stream.fileno())
+		path = _cleanup_retry_path(temp_root, run_directory)
+	try:
+		_publish_new_file(
+			path,
+			_cleanup_record(
+				temp_root, run_directory, directory_identity, active_lock_identity, marker_identity
+			),
+		)
 		valid, identity, active_identity, marker_file = _has_valid_cleanup_record(
 			temp_root, run_directory, directory_identity
 		)
 		if (
 			not valid
 			or identity is None
-			or created_identity is None
-			or not _same_file_identity(created_identity, identity)
 			or (active_identity != (active_lock_identity.st_dev, active_lock_identity.st_ino))
 			or (marker_file != (marker_identity.st_dev, marker_identity.st_ino))
 		):
@@ -2008,11 +2199,6 @@ def _write_cleanup_record(
 			else None
 		)
 	except OSError:
-		if created_identity is not None:
-			try:
-				_remove_file(path, created_identity)
-			except OSError:
-				pass
 		return None
 
 
@@ -2049,7 +2235,17 @@ def _remove_cleanup_record(
 		verify_directory=False,
 	)
 	if valid and identity is not None:
-		_remove_file(_cleanup_record_path(temp_root, run_directory), identity)
+		for path in (
+			_cleanup_record_path(temp_root, run_directory),
+			_cleanup_retry_path(temp_root, run_directory),
+		):
+			try:
+				current = path.lstat()
+			except FileNotFoundError:
+				continue
+			if _same_file_identity(identity, current):
+				_remove_file(path, identity)
+				break
 
 
 def _has_valid_ownership_marker(

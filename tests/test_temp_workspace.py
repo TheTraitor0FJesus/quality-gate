@@ -27,6 +27,8 @@ from quality_gate.temp_workspace import (
 )
 
 _SECOND_NESTED_LSTAT_CALL = 2
+_INTERRUPTED_KEY_EXIT = 73
+_INTERRUPTED_CLEANUP_EXIT = 74
 
 
 @pytest.mark.parametrize("mode", ["ruff", "validate", "secrets", "integrity", "types"])
@@ -327,6 +329,275 @@ def test_temporary_workspace_reclaims_owned_run_after_process_interruption(
 	assert not owned_workspace.exists()
 
 
+def test_missing_marker_preserves_ambiguous_workspace_and_allows_next_run(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	monkeypatch.setattr(temp_workspace, "_user_state_directory", lambda: tmp_path / "state")
+	repository = tmp_path / "repository"
+	temp_root = repository / "temp"
+	temp_root.mkdir(parents=True)
+	stale, _, active_lock, _, _ = temp_workspace._create_run_directory(temp_root)
+	(stale / ".quality-gate-workspace").unlink()
+	(stale / "foreign").write_bytes(b"preserve")
+	temp_workspace._unlock(active_lock)
+
+	with temporary_workspace(repository) as workspace:
+		assert workspace != stale
+		(workspace / "usable").write_bytes(b"ok")
+		assert (stale / "foreign").read_bytes() == b"preserve"
+	assert (stale / "foreign").read_bytes() == b"preserve"
+
+
+def test_forged_cleanup_record_cannot_replace_missing_marker(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	monkeypatch.setattr(temp_workspace, "_user_state_directory", lambda: tmp_path / "state")
+	repository = tmp_path / "repository"
+	temp_root = repository / "temp"
+	temp_root.mkdir(parents=True)
+	stale, _, active_lock, _, _ = temp_workspace._create_run_directory(temp_root)
+	(stale / ".quality-gate-workspace").unlink()
+	(stale / "foreign").write_bytes(b"preserve")
+	forged = temp_workspace._cleanup_record_path(temp_root, stale)
+	forged.write_bytes(b'{"signature":"forged"}')
+	temp_workspace._unlock(active_lock)
+	with temporary_workspace(repository) as workspace:
+		assert workspace.is_dir()
+		assert (stale / "foreign").read_bytes() == b"preserve"
+	assert forged.read_bytes() == b'{"signature":"forged"}'
+
+
+def test_partial_cleanup_record_does_not_strand_owned_workspace(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	monkeypatch.setattr(temp_workspace, "_user_state_directory", lambda: tmp_path / "state")
+	repository = tmp_path / "repository"
+	temp_root = repository / "temp"
+	temp_root.mkdir(parents=True)
+	stale, _, active_lock, _, _ = temp_workspace._create_run_directory(temp_root)
+	(stale / "owned").write_bytes(b"owned")
+	partial = temp_workspace._cleanup_record_path(temp_root, stale)
+	partial.write_bytes(b'{"format":')
+	temp_workspace._unlock(active_lock)
+
+	with temporary_workspace(repository) as workspace:
+		assert workspace.is_dir()
+		assert not stale.exists()
+	assert partial.read_bytes() == b'{"format":'
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX cleanup areas only")
+def test_changed_state_key_keeps_previous_cleanup_area_and_allows_cleanup(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state-a"))
+	with temporary_workspace(repository) as first:
+		(first / "a").write_bytes(b"a")
+	areas = list((repository / "temp").glob(".quality-gate-cleanup-*"))
+	assert len(areas) == 1
+	area = areas[0]
+	(area / "foreign-data").write_bytes(b"preserve")
+	previous = {item.name: item.read_bytes() for item in area.iterdir() if item.is_file()}
+	stale, _, active_lock, _, _ = temp_workspace._create_run_directory(repository / "temp")
+	(stale / "owned").write_bytes(b"old key")
+	temp_workspace._unlock(active_lock)
+	monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state-b"))
+	with temporary_workspace(repository) as second:
+		(second / "b").write_bytes(b"b")
+		assert (stale / "owned").read_bytes() == b"old key"
+	assert not second.exists()
+	assert previous == {item.name: item.read_bytes() for item in area.iterdir() if item.is_file()}
+	monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state-a"))
+	with temporary_workspace(repository):
+		assert not stale.exists()
+	assert (area / "foreign-data").read_bytes() == b"preserve"
+
+
+def test_interrupted_key_publication_allows_next_workspace(tmp_path: Path) -> None:
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	environment = os.environ.copy()
+	state_base = tmp_path / "state-base"
+	environment["LOCALAPPDATA" if os.name == "nt" else "XDG_STATE_HOME"] = str(state_base)
+	script = "\n".join(
+		(
+			"import os",
+			"import quality_gate.temp_workspace as workspace",
+			f"def stop(*args, **kwargs): os._exit({_INTERRUPTED_KEY_EXIT})",
+			"workspace.os.rename = stop"
+			if os.name == "nt"
+			else "workspace._rename_without_replacement = stop",
+			"workspace._ownership_key(create=True)",
+		)
+	)
+	process = subprocess.run(
+		[sys.executable, "-c", script],
+		cwd=Path(__file__).resolve().parents[1],
+		env=environment,
+		capture_output=True,
+		timeout=30,
+		check=False,
+	)
+	assert process.returncode == _INTERRUPTED_KEY_EXIT, process.stderr
+	state = state_base / "quality-gate" / "temp-workspace"
+	assert not (state / "temp-workspace.key").exists()
+	script = "\n".join(
+		(
+			"from pathlib import Path",
+			"from quality_gate.temp_workspace import temporary_workspace",
+			f"with temporary_workspace(Path({str(repository)!r})) as work:",
+			"    (work / 'usable').write_bytes(b'ok')",
+		)
+	)
+	process = subprocess.run(
+		[sys.executable, "-c", script],
+		cwd=Path(__file__).resolve().parents[1],
+		env=environment,
+		capture_output=True,
+		timeout=30,
+		check=False,
+	)
+	assert process.returncode == 0, process.stderr
+	assert (state / "temp-workspace.key").stat().st_size == temp_workspace._OWNERSHIP_KEY_BYTES
+
+
+def test_concurrent_first_workspaces_share_one_complete_key(tmp_path: Path) -> None:
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	coordination = tmp_path / "coordination"
+	coordination.mkdir()
+	environment = os.environ.copy()
+	environment["LOCALAPPDATA" if os.name == "nt" else "XDG_STATE_HOME"] = str(tmp_path / "state")
+	script = "\n".join(
+		(
+			"import sys, time",
+			"from pathlib import Path",
+			"from quality_gate.temp_workspace import temporary_workspace, _ownership_key",
+			"root, coordination, name = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]",
+			"(coordination / name).touch()",
+			"while not (coordination / 'start').exists(): time.sleep(0.01)",
+			"with temporary_workspace(root) as work:",
+			"    (work / 'usable').write_bytes(b'ok')",
+			"    print(_ownership_key(create=False).hex(), flush=True)",
+		)
+	)
+	processes = [
+		subprocess.Popen(
+			[sys.executable, "-c", script, str(repository), str(coordination), str(index)],
+			cwd=Path(__file__).resolve().parents[1],
+			env=environment,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.PIPE,
+			text=True,
+		)
+		for index in range(4)
+	]
+	try:
+		deadline = time.monotonic() + 30
+		while len(list(coordination.iterdir())) != len(processes) and time.monotonic() < deadline:
+			time.sleep(0.01)
+		assert len(list(coordination.iterdir())) == len(processes)
+		(coordination / "start").touch()
+		results = [process.communicate(timeout=60) for process in processes]
+		assert all(process.returncode == 0 for process in processes), results
+		keys = [stdout.strip() for stdout, _stderr in results]
+		assert len(set(keys)) == 1 and len(keys[0]) == 2 * temp_workspace._OWNERSHIP_KEY_BYTES
+	finally:
+		for process in processes:
+			if process.poll() is None:
+				process.kill()
+				process.communicate(timeout=15)
+
+
+def test_incomplete_legacy_key_is_preserved_and_restored_key_reclaims_old_workspace(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	state = tmp_path / "state"
+	monkeypatch.setattr(temp_workspace, "_user_state_directory", lambda: state)
+	repository = tmp_path / "repository"
+	temp_root = repository / "temp"
+	temp_root.mkdir(parents=True)
+	old, _, active_lock, _, _ = temp_workspace._create_run_directory(temp_root)
+	(old / "owned").write_bytes(b"old")
+	temp_workspace._unlock(active_lock)
+	key_path = state / "temp-workspace.key"
+	original = key_path.read_bytes()
+	key_path.write_bytes(b"partial")
+
+	with temporary_workspace(repository) as current:
+		assert current.is_dir()
+		assert (old / "owned").read_bytes() == b"old"
+	assert key_path.read_bytes() == b"partial"
+	recovery, _, active_lock, _, _ = temp_workspace._create_run_directory(temp_root)
+	(recovery / "owned").write_bytes(b"recovery key")
+	temp_workspace._unlock(active_lock)
+	key_path.write_bytes(original)
+	with temporary_workspace(repository):
+		assert not old.exists()
+		assert not recovery.exists()
+
+
+def test_interrupted_cleanup_publication_is_retried_on_next_run(tmp_path: Path) -> None:
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	environment = os.environ.copy()
+	environment["LOCALAPPDATA" if os.name == "nt" else "XDG_STATE_HOME"] = str(tmp_path / "state")
+	script = "\n".join(
+		(
+			"import os, sys",
+			"from pathlib import Path",
+			"import quality_gate.temp_workspace as workspace",
+			"real = workspace.os.rename"
+			if os.name == "nt"
+			else "real = workspace._rename_without_replacement",
+			"def stop(source, destination, *args, **kwargs):",
+			"    if Path(destination).name.startswith('.quality-gate-cleanup-record-'):",
+			f"        os._exit({_INTERRUPTED_CLEANUP_EXIT})",
+			"    return real(source, destination, *args, **kwargs)",
+			"workspace.os.rename = stop"
+			if os.name == "nt"
+			else "workspace._rename_without_replacement = stop",
+			"with workspace.temporary_workspace(Path(sys.argv[1])) as work:",
+			"    (work / 'owned').write_bytes(b'owned')",
+			"    print(work, flush=True)",
+		)
+	)
+	process = subprocess.run(
+		[sys.executable, "-c", script, str(repository)],
+		cwd=Path(__file__).resolve().parents[1],
+		env=environment,
+		capture_output=True,
+		text=True,
+		timeout=30,
+		check=False,
+	)
+	assert process.returncode == _INTERRUPTED_CLEANUP_EXIT, process.stderr
+	stale = Path(process.stdout.strip())
+	assert (stale / "owned").read_bytes() == b"owned"
+	script = "\n".join(
+		(
+			"import sys",
+			"from pathlib import Path",
+			"from quality_gate.temp_workspace import temporary_workspace",
+			"with temporary_workspace(Path(sys.argv[1])) as work:",
+			"    (work / 'usable').write_bytes(b'ok')",
+		)
+	)
+	process = subprocess.run(
+		[sys.executable, "-c", script, str(repository)],
+		cwd=Path(__file__).resolve().parents[1],
+		env=environment,
+		capture_output=True,
+		text=True,
+		timeout=30,
+		check=False,
+	)
+	assert process.returncode == 0, process.stderr
+	assert not stale.exists()
+
+
 def test_reclamation_preserves_a_directory_replaced_after_ownership_check(
 	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
@@ -424,11 +695,13 @@ def test_stale_reclamation_keeps_root_controls_when_child_removal_fails(
 	assert not temp_workspace._cleanup_record_path(temp_root, stale).exists()
 
 
+@pytest.mark.parametrize("failure", ["interruption", "second-unlink"])
 @pytest.mark.parametrize("removed_control", [".active.lock", ".quality-gate-workspace"])
 def test_stale_reclamation_resumes_after_control_file_removal_fails(
 	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
 	removed_control: str,
+	failure: str,
 ) -> None:
 	temp_root = tmp_path / "temp"
 	stale = temp_root / "qg-interrupted-control"
@@ -459,8 +732,15 @@ def test_stale_reclamation_resumes_after_control_file_removal_fails(
 		return [first_control, *other_controls, *(item for item in entries if item not in controls)]
 
 	def fail_after_control(path: Path, expected: os.stat_result) -> None:
+		if (
+			failure == "second-unlink"
+			and path.parent == stale
+			and path.name in {".active.lock", ".quality-gate-workspace"}
+			and path.name != removed_control
+		):
+			raise OSError(errno.EIO, "simulated second control failure", path)
 		original_remove_file(path, expected)
-		if path.name == removed_control:
+		if failure == "interruption" and path.name == removed_control:
 			raise OSError(errno.EIO, "simulated interruption after control removal", path)
 
 	monkeypatch.setattr(temp_workspace, "_directory_entries_for_removal", put_root_controls_first)
@@ -477,7 +757,8 @@ def test_stale_reclamation_resumes_after_control_file_removal_fails(
 
 	monkeypatch.setattr(temp_workspace, "_directory_entries_for_removal", original_entries)
 	monkeypatch.setattr(temp_workspace, "_remove_file", original_remove_file)
-	temp_workspace._reclaim_stale_workspace(temp_root, stale)
+	with temporary_workspace(tmp_path) as workspace:
+		assert workspace.is_dir()
 	assert not stale.exists()
 	assert not owner_record.exists()
 	assert not cleanup_record.exists()
@@ -516,7 +797,8 @@ def test_stale_reclamation_resumes_after_final_directory_removal_fails(
 	assert cleanup_record.is_file()
 
 	monkeypatch.setattr(temp_workspace, "_remove_directory", original_remove_directory)
-	temp_workspace._reclaim_stale_workspace(temp_root, stale)
+	with temporary_workspace(tmp_path) as workspace:
+		assert workspace.is_dir()
 	assert not stale.exists()
 	assert not owner_record.exists()
 	assert not cleanup_record.exists()
