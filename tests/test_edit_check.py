@@ -125,25 +125,47 @@ def digest(content: bytes) -> str:
 
 
 @lru_cache(maxsize=8)
-def _selected_ruff_artifact(release_path: Path, policy_release: str) -> tuple[ExternalTool, bytes]:
-	try:
-		manifest = verify_release(release_path)
-		if manifest.version != policy_release:
-			raise DistributionError(
-				f"selected release {policy_release} contains manifest {manifest.version}"
-			)
-		ruff = next((tool for tool in manifest.tools if tool.name == "ruff"), None)
-		if ruff is None:
-			raise DistributionError(f"selected release {policy_release} does not declare Ruff")
-		content = (release_path / ruff.path).read_bytes()
-		if digest(content) != ruff.sha256:
-			raise DistributionError(f"release checksum mismatch: {ruff.path}")
-	except (DistributionError, OSError) as error:
-		raise AssertionError(
-			f"Prepare the selected policy release {policy_release} in the local cache with "
-			f"quality-gate sync and quality-gate setup before running this suite: {error}"
-		) from error
-	return ruff, content
+def _selected_ruff_artifact(
+	configured_release_path: Path | None,
+	selected_cache_path: Path,
+	policy_release: str,
+) -> tuple[ExternalTool, bytes]:
+	# During release verification, QUALITY_GATE_POLICY_ROOT points at the candidate while the
+	# source manifest intentionally remains pinned to the previous published policy.
+	release_paths: list[Path] = []
+	if configured_release_path is not None:
+		release_paths.append(configured_release_path)
+	if selected_cache_path not in release_paths:
+		release_paths.append(selected_cache_path)
+
+	last_error: DistributionError | OSError | None = None
+	for release_path in release_paths:
+		try:
+			manifest = verify_release(release_path)
+			if manifest.version != policy_release:
+				last_error = DistributionError(
+					f"selected release {policy_release} contains manifest {manifest.version}"
+				)
+				continue
+			ruff = next((tool for tool in manifest.tools if tool.name == "ruff"), None)
+			if ruff is None:
+				last_error = DistributionError(
+					f"selected release {policy_release} does not declare Ruff"
+				)
+				continue
+			content = (release_path / ruff.path).read_bytes()
+			if digest(content) != ruff.sha256:
+				last_error = DistributionError(f"release checksum mismatch: {ruff.path}")
+				continue
+			return ruff, content
+		except (DistributionError, OSError) as error:
+			last_error = error
+
+	error = last_error or DistributionError(f"selected release {policy_release} is unavailable")
+	raise AssertionError(
+		f"Prepare the selected policy release {policy_release} in the local cache with "
+		f"quality-gate sync and quality-gate setup before running this suite: {error}"
+	) from error
 
 
 @pytest.fixture(scope="module")
@@ -158,12 +180,11 @@ def edit_cache() -> Iterator[Path]:
 def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
 	selected_release = load_manifest(REPOSITORY).policy_release
 	configured_policy_root = os.environ.get("QUALITY_GATE_POLICY_ROOT")
-	selected_root = (
-		Path(configured_policy_root)
-		if configured_policy_root
-		else default_cache_root() / "releases" / selected_release
+	configured_release_root = Path(configured_policy_root) if configured_policy_root else None
+	selected_cache_root = default_cache_root() / "releases" / selected_release
+	ruff_tool, ruff_content = _selected_ruff_artifact(
+		configured_release_root, selected_cache_root, selected_release
 	)
-	ruff_tool, ruff_content = _selected_ruff_artifact(selected_root, selected_release)
 	release = cache / "releases" / version
 	release.mkdir(parents=True)
 	files = {
@@ -299,6 +320,60 @@ def test_prepare_edit_cache_uses_selected_release_ruff_not_dev_distribution(
 	assert (cache / "releases" / "v3.1.0" / generated_tool.path).read_bytes() == source_content
 	assert "ruff" not in looked_up_distributions
 	assert verified_paths == [source_root]
+
+
+def test_prepare_edit_cache_uses_pinned_release_when_configured_root_is_candidate(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+	selected_release = load_manifest(REPOSITORY).policy_release
+	candidate_release = "v0.0.1" if selected_release != "v0.0.1" else "v0.0.2"
+	platform = "windows" if os.name == "nt" else "linux"
+	tool_version = UNIFIED_RELEASE_TOOLS["ruff"]
+	tool_path = UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform].get(
+		"ruff", f"ruff-{tool_version}-py3-none-any.whl"
+	)
+	selected_content = b"verified pinned Ruff artifact"
+	candidate_content = b"verified candidate Ruff artifact"
+	selected_tool = ExternalTool("ruff", tool_version, tool_path, digest(selected_content))
+	candidate_tool = ExternalTool("ruff", "99.0.0", tool_path, digest(candidate_content))
+	cache_root = tmp_path / "default-cache"
+	selected_root = cache_root / "releases" / selected_release
+	candidate_root = tmp_path / "candidate-release" / candidate_release
+	for root, content in (
+		(selected_root, selected_content),
+		(candidate_root, candidate_content),
+	):
+		artifact = root / tool_path
+		artifact.parent.mkdir(parents=True)
+		artifact.write_bytes(content)
+
+	manifests = {
+		selected_root: ReleaseManifest(selected_release, (), (selected_tool,)),
+		candidate_root: ReleaseManifest(candidate_release, (), (candidate_tool,)),
+	}
+	verified_paths: list[Path] = []
+
+	def verify_release_for_test(path: Path) -> ReleaseManifest:
+		verified_paths.append(path)
+		return manifests[path]
+
+	monkeypatch.setenv("QUALITY_GATE_POLICY_ROOT", str(candidate_root))
+	monkeypatch.setattr(sys.modules[__name__], "default_cache_root", lambda: cache_root)
+	monkeypatch.setattr(sys.modules[__name__], "verify_release", verify_release_for_test)
+	monkeypatch.setattr(
+		subprocess,
+		"run",
+		lambda command, **kwargs: subprocess.CompletedProcess(command, 0, b"", b""),
+	)
+
+	cache = prepare_edit_cache(tmp_path / "fixture", "v3.1.0")
+	generated = verify_release_cache(cache / "releases" / "v3.1.0")
+	generated_tool = next(tool for tool in generated.tools if tool.name == "ruff")
+
+	assert generated_tool.version == selected_tool.version
+	assert generated_tool.path == selected_tool.path
+	assert (cache / "releases" / "v3.1.0" / generated_tool.path).read_bytes() == selected_content
+	assert verified_paths == [candidate_root, selected_root]
 
 
 @pytest.mark.parametrize("release_state", ["missing", "corrupt"])
