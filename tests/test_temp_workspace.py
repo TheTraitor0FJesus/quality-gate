@@ -1612,6 +1612,56 @@ def test_cleanup_area_recovery_restores_nonempty_quarantined_directory(tmp_path:
 		os.close(cleanup_descriptor)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX quarantine uses directory descriptors")
+def test_removal_rescans_directory_when_entry_appears_after_quarantine(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	temp_root = tmp_path / "temp"
+	workspace = temp_root / "qg-rescan"
+	workspace.mkdir(parents=True)
+	victim = workspace / "victim"
+	victim.mkdir()
+	identity = victim.lstat()
+	original_move = temp_workspace._rename_entry_to_cleanup_area
+	injected = False
+
+	def add_entry_after_quarantine(
+		path: Path,
+		quarantine_name: str,
+		parent_descriptor: int,
+		cleanup_descriptor: int,
+	) -> None:
+		nonlocal injected
+		original_move(path, quarantine_name, parent_descriptor, cleanup_descriptor)
+		if path != victim or injected:
+			return
+		injected = True
+		directory_descriptor = os.open(
+			quarantine_name,
+			os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+			dir_fd=cleanup_descriptor,
+		)
+		try:
+			file_descriptor = os.open(
+				"late-entry",
+				os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+				0o600,
+				dir_fd=directory_descriptor,
+			)
+			with os.fdopen(file_descriptor, "wb") as late_entry:
+				late_entry.write(b"created during quarantine")
+		finally:
+			os.close(directory_descriptor)
+
+	monkeypatch.setattr(temp_workspace, "_rename_entry_to_cleanup_area", add_entry_after_quarantine)
+
+	temp_workspace._remove_entry(victim, expected_identity=identity)
+
+	assert injected
+	assert not victim.exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows deletion uses file-handle identity")
 @pytest.mark.parametrize("entry_kind", ["file", "link", "directory"])
 def test_removal_preserves_entry_replaced_after_identity_check(

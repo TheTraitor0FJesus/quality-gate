@@ -76,6 +76,7 @@ _PUBLICATION_LINK_SETTLE_ATTEMPTS = 100
 _PUBLICATION_LINK_SETTLE_DELAY_SECONDS = 0.001
 _SINGLE_LINK_COUNT = 1
 _PUBLICATION_TRANSITION_LINK_COUNT = 2
+_TREE_REMOVAL_MAX_RESCANS = 3
 _PRIVATE_DIRECTORY_OWNER_ACCESS = 0o300
 _TEMP_ENVIRONMENT = ("TMP", "TEMP", "TMPDIR")
 _active_workspace: ContextVar[tuple[Path, Path] | None] = ContextVar(
@@ -957,6 +958,48 @@ def _remove_entry(path: Path, *, expected_identity: os.stat_result | None = None
 
 
 def _remove_tree(path: Path, identity: os.stat_result) -> None:
+	rescans = 0
+	while True:
+		directories, deferred_root_controls = _scan_tree_for_removal(path, identity)
+		rescan = False
+		for directory, expected in reversed(directories[1:]):
+			try:
+				_remove_collected_directory(directory, expected)
+			except OSError as error:
+				if not _can_rescan_tree(error, rescans):
+					raise
+				rescans += 1
+				rescan = True
+				break
+		if rescan:
+			continue
+		for child_path, child_identity in deferred_root_controls:
+			_remove_scanned_child(
+				path,
+				identity,
+				child_path,
+				child_identity,
+				[],
+				root_control=True,
+			)
+		if directories:
+			try:
+				_remove_collected_directory(*directories[0])
+			except OSError as error:
+				if not _can_rescan_tree(error, rescans):
+					raise
+				rescans += 1
+				continue
+		return
+
+
+def _can_rescan_tree(error: OSError, rescans: int) -> bool:
+	return error.errno in {errno.ENOTEMPTY, errno.EEXIST} and rescans < _TREE_REMOVAL_MAX_RESCANS
+
+
+def _scan_tree_for_removal(
+	path: Path, identity: os.stat_result
+) -> tuple[list[tuple[Path, os.stat_result]], list[tuple[Path, os.stat_result]]]:
 	directories: list[tuple[Path, os.stat_result]] = []
 	deferred_root_controls: list[tuple[Path, os.stat_result]] = []
 	pending = [(path, identity)]
@@ -975,19 +1018,7 @@ def _remove_tree(path: Path, identity: os.stat_result) -> None:
 				pending,
 				deferred_root_controls=(deferred_root_controls if directory == path else None),
 			)
-	for directory, expected in reversed(directories[1:]):
-		_remove_collected_directory(directory, expected)
-	for child_path, child_identity in deferred_root_controls:
-		_remove_scanned_child(
-			path,
-			identity,
-			child_path,
-			child_identity,
-			pending,
-			root_control=True,
-		)
-	if directories:
-		_remove_collected_directory(*directories[0])
+	return directories, deferred_root_controls
 
 
 def _directory_entries_for_removal(
