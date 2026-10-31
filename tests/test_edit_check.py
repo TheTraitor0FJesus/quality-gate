@@ -128,29 +128,28 @@ def digest(content: bytes) -> str:
 def _selected_ruff_artifact(
 	configured_release_path: Path | None,
 	selected_cache_path: Path,
-	policy_release: str,
+	pinned_release: str,
 ) -> tuple[ExternalTool, bytes]:
-	# During release verification, QUALITY_GATE_POLICY_ROOT points at the candidate while the
-	# source manifest intentionally remains pinned to the previous published policy.
-	release_paths: list[Path] = []
+	# Release audits select the candidate explicitly while the source manifest remains pinned.
+	release_paths: list[tuple[Path, bool]] = []
 	if configured_release_path is not None:
-		release_paths.append(configured_release_path)
-	if selected_cache_path not in release_paths:
-		release_paths.append(selected_cache_path)
+		release_paths.append((configured_release_path, True))
+	if configured_release_path != selected_cache_path:
+		release_paths.append((selected_cache_path, False))
 
 	last_error: DistributionError | OSError | None = None
-	for release_path in release_paths:
+	for release_path, is_configured in release_paths:
 		try:
 			manifest = verify_release(release_path)
-			if manifest.version != policy_release:
+			if not is_configured and manifest.version != pinned_release:
 				last_error = DistributionError(
-					f"selected release {policy_release} contains manifest {manifest.version}"
+					f"cached release {pinned_release} contains manifest {manifest.version}"
 				)
 				continue
 			ruff = next((tool for tool in manifest.tools if tool.name == "ruff"), None)
 			if ruff is None:
 				last_error = DistributionError(
-					f"selected release {policy_release} does not declare Ruff"
+					f"selected release {manifest.version} does not declare Ruff"
 				)
 				continue
 			content = (release_path / ruff.path).read_bytes()
@@ -161,9 +160,9 @@ def _selected_ruff_artifact(
 		except (DistributionError, OSError) as error:
 			last_error = error
 
-	error = last_error or DistributionError(f"selected release {policy_release} is unavailable")
+	error = last_error or DistributionError(f"pinned release {pinned_release} is unavailable")
 	raise AssertionError(
-		f"Prepare the selected policy release {policy_release} in the local cache with "
+		f"Prepare the pinned policy release {pinned_release} in the local cache with "
 		f"quality-gate sync and quality-gate setup before running this suite: {error}"
 	) from error
 
@@ -322,7 +321,7 @@ def test_prepare_edit_cache_uses_selected_release_ruff_not_dev_distribution(
 	assert verified_paths == [source_root]
 
 
-def test_prepare_edit_cache_uses_pinned_release_when_configured_root_is_candidate(
+def test_prepare_edit_cache_uses_candidate_when_configured_root_is_selected(
 	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
 	selected_release = load_manifest(REPOSITORY).policy_release
@@ -332,30 +331,20 @@ def test_prepare_edit_cache_uses_pinned_release_when_configured_root_is_candidat
 	tool_path = UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform].get(
 		"ruff", f"ruff-{tool_version}-py3-none-any.whl"
 	)
-	selected_content = b"verified pinned Ruff artifact"
 	candidate_content = b"verified candidate Ruff artifact"
-	selected_tool = ExternalTool("ruff", tool_version, tool_path, digest(selected_content))
-	candidate_tool = ExternalTool("ruff", "99.0.0", tool_path, digest(candidate_content))
+	candidate_tool = ExternalTool("ruff", tool_version, tool_path, digest(candidate_content))
 	cache_root = tmp_path / "default-cache"
-	selected_root = cache_root / "releases" / selected_release
 	candidate_root = tmp_path / "candidate-release" / candidate_release
-	for root, content in (
-		(selected_root, selected_content),
-		(candidate_root, candidate_content),
-	):
-		artifact = root / tool_path
-		artifact.parent.mkdir(parents=True)
-		artifact.write_bytes(content)
-
-	manifests = {
-		selected_root: ReleaseManifest(selected_release, (), (selected_tool,)),
-		candidate_root: ReleaseManifest(candidate_release, (), (candidate_tool,)),
-	}
+	artifact = candidate_root / tool_path
+	artifact.parent.mkdir(parents=True)
+	artifact.write_bytes(candidate_content)
+	candidate_manifest = ReleaseManifest(candidate_release, (), (candidate_tool,))
 	verified_paths: list[Path] = []
 
 	def verify_release_for_test(path: Path) -> ReleaseManifest:
 		verified_paths.append(path)
-		return manifests[path]
+		assert path == candidate_root
+		return candidate_manifest
 
 	monkeypatch.setenv("QUALITY_GATE_POLICY_ROOT", str(candidate_root))
 	monkeypatch.setattr(sys.modules[__name__], "default_cache_root", lambda: cache_root)
@@ -370,10 +359,10 @@ def test_prepare_edit_cache_uses_pinned_release_when_configured_root_is_candidat
 	generated = verify_release_cache(cache / "releases" / "v3.1.0")
 	generated_tool = next(tool for tool in generated.tools if tool.name == "ruff")
 
-	assert generated_tool.version == selected_tool.version
-	assert generated_tool.path == selected_tool.path
-	assert (cache / "releases" / "v3.1.0" / generated_tool.path).read_bytes() == selected_content
-	assert verified_paths == [candidate_root, selected_root]
+	assert generated_tool.version == candidate_tool.version
+	assert generated_tool.path == candidate_tool.path
+	assert (cache / "releases" / "v3.1.0" / generated_tool.path).read_bytes() == candidate_content
+	assert verified_paths == [candidate_root]
 
 
 @pytest.mark.parametrize("release_state", ["missing", "corrupt"])
