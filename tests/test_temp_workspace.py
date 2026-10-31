@@ -573,6 +573,182 @@ def test_interrupted_key_publication_allows_next_workspace(tmp_path: Path) -> No
 	assert (state / "temp-workspace.key").stat().st_size == temp_workspace._OWNERSHIP_KEY_BYTES
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link publication recovery only")
+def test_interrupted_hard_link_key_publication_recovers_through_workspace(
+	tmp_path: Path,
+) -> None:
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	state_base = tmp_path / "state-base"
+	environment = os.environ.copy()
+	environment["XDG_STATE_HOME"] = str(state_base)
+	script = "\n".join(
+		(
+			"import errno, os",
+			"import quality_gate.temp_workspace as workspace",
+			"def unsupported(*args, **kwargs):",
+			"    raise OSError(errno.ENOSYS, 'no no-replace rename')",
+			"workspace._rename_without_replacement = unsupported",
+			"real_link = os.link",
+			"def link_then_exit(*args, **kwargs):",
+			"    real_link(*args, **kwargs)",
+			f"    os._exit({_INTERRUPTED_KEY_EXIT})",
+			"workspace.os.link = link_then_exit",
+			"workspace._ownership_key(create=True)",
+		)
+	)
+	process = subprocess.run(
+		[sys.executable, "-c", script],
+		cwd=Path(__file__).resolve().parents[1],
+		env=environment,
+		capture_output=True,
+		timeout=30,
+		check=False,
+	)
+	assert process.returncode == _INTERRUPTED_KEY_EXIT, process.stderr
+	state = state_base / "quality-gate" / "temp-workspace"
+	key_path = state / temp_workspace._OWNERSHIP_KEY_NAME
+	staging_paths = list(state.glob(".quality-gate-pending-*"))
+	assert len(staging_paths) == 1
+	staging_path = staging_paths[0]
+	key_identity = key_path.lstat()
+	staging_identity = staging_path.lstat()
+	key_bytes = key_path.read_bytes()
+	assert len(key_bytes) == temp_workspace._OWNERSHIP_KEY_BYTES
+	assert temp_workspace._same_file_identity(key_identity, staging_identity)
+	assert key_identity.st_nlink == _TRANSITIONAL_HARD_LINK_COUNT
+
+	foreign_link = state / "foreign-key-link"
+	os.link(key_path, foreign_link)
+	assert key_path.lstat().st_nlink == _TRANSITIONAL_HARD_LINK_COUNT + 1
+	with pytest.raises(TemporaryWorkspaceError):
+		with temporary_workspace(repository):
+			pytest.fail("workspace unexpectedly accepted a multiply-linked key")
+	assert staging_path.exists()
+	assert foreign_link.exists()
+	assert key_path.read_bytes() == key_bytes
+	foreign_link.unlink()
+
+	unrelated_pending = state / ".quality-gate-pending-unrelated"
+	unrelated_pending.write_bytes(b"foreign staging data")
+	foreign_target = tmp_path / "missing-foreign-target"
+	foreign_symlink = state / ".quality-gate-pending-foreign-link"
+	foreign_symlink.symlink_to(foreign_target)
+	symlink_target = os.readlink(foreign_symlink)
+	with temporary_workspace(repository) as workspace:
+		assert workspace.is_dir()
+		(workspace / "fresh").write_bytes(b"usable")
+		assert (workspace / "fresh").read_bytes() == b"usable"
+
+	assert not workspace.exists()
+	current_key_identity = key_path.lstat()
+	assert temp_workspace._same_file_identity(key_identity, current_key_identity)
+	assert key_path.read_bytes() == key_bytes
+	assert current_key_identity.st_nlink == _SINGLE_LINK_COUNT
+	assert not staging_path.exists()
+	assert unrelated_pending.read_bytes() == b"foreign staging data"
+	assert foreign_symlink.is_symlink()
+	assert os.readlink(foreign_symlink) == symlink_target
+	assert not foreign_target.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link publication only")
+def test_concurrent_workspace_can_read_key_during_slow_directory_fsync(
+	tmp_path: Path,
+) -> None:
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	state_base = tmp_path / "state-base"
+	state = state_base / "quality-gate" / "temp-workspace"
+	state.mkdir(mode=0o700, parents=True)
+	coordination = tmp_path / "coordination"
+	coordination.mkdir()
+	entered_fsync = coordination / "entered-fsync"
+	release_fsync = coordination / "release-fsync"
+	environment = os.environ.copy()
+	environment["XDG_STATE_HOME"] = str(state_base)
+	publisher_script = "\n".join(
+		(
+			"import errno, os, stat, sys, time",
+			"from pathlib import Path",
+			"import quality_gate.temp_workspace as workspace",
+			"root, state, entered, release = map(Path, sys.argv[1:])",
+			"def unsupported(*args, **kwargs):",
+			"    raise OSError(errno.ENOSYS, 'no no-replace rename')",
+			"workspace._rename_without_replacement = unsupported",
+			"real_fsync = os.fsync",
+			"def slow_directory_fsync(fd):",
+			"    metadata = os.fstat(fd)",
+			"    if (",
+			"        stat.S_ISDIR(metadata.st_mode)",
+			"        and workspace._same_file_identity(metadata, state.lstat())",
+			"    ):",
+			"        entered.touch()",
+			"        deadline = time.monotonic() + 20",
+			"        while not release.exists() and time.monotonic() < deadline:",
+			"            time.sleep(0.01)",
+			"        if not release.exists():",
+			"            os._exit(88)",
+			"    return real_fsync(fd)",
+			"workspace.os.fsync = slow_directory_fsync",
+			"from quality_gate.temp_workspace import temporary_workspace",
+			"with temporary_workspace(root) as work:",
+			"    (work / 'publisher').write_bytes(b'ok')",
+		)
+	)
+	publisher = subprocess.Popen(
+		[
+			sys.executable,
+			"-c",
+			publisher_script,
+			str(repository),
+			str(state),
+			str(entered_fsync),
+			str(release_fsync),
+		],
+		cwd=Path(__file__).resolve().parents[1],
+		env=environment,
+		stdout=subprocess.PIPE,
+		stderr=subprocess.PIPE,
+		text=True,
+	)
+	try:
+		deadline = time.monotonic() + 25
+		while not entered_fsync.exists() and time.monotonic() < deadline:
+			if publisher.poll() is not None:
+				break
+			time.sleep(0.01)
+		assert entered_fsync.exists(), "publisher did not reach the state-directory fsync"
+		key_path = state / temp_workspace._OWNERSHIP_KEY_NAME
+		assert key_path.lstat().st_nlink == _SINGLE_LINK_COUNT
+		workspace_script = "\n".join(
+			(
+				"import sys",
+				"from pathlib import Path",
+				"from quality_gate.temp_workspace import temporary_workspace",
+				"with temporary_workspace(Path(sys.argv[1])) as work:",
+				"    (work / 'concurrent-reader').write_bytes(b'ok')",
+			)
+		)
+		reader = subprocess.run(
+			[sys.executable, "-c", workspace_script, str(repository)],
+			cwd=Path(__file__).resolve().parents[1],
+			env=environment,
+			capture_output=True,
+			timeout=30,
+			check=False,
+		)
+		assert reader.returncode == 0, reader.stderr
+	finally:
+		release_fsync.touch(exist_ok=True)
+		try:
+			stdout, stderr = publisher.communicate(timeout=30)
+		except subprocess.TimeoutExpired:
+			publisher.kill()
+			stdout, stderr = publisher.communicate(timeout=15)
+	assert publisher.returncode == 0, (stdout, stderr)
+
+
 def test_concurrent_first_workspaces_share_one_complete_key(tmp_path: Path) -> None:
 	repository = tmp_path / "repository"
 	repository.mkdir()

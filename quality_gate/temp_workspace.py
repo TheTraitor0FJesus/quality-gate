@@ -75,6 +75,7 @@ _WINDOWS_FILE_ID_INFORMATION = 18
 _PUBLICATION_LINK_SETTLE_ATTEMPTS = 100
 _PUBLICATION_LINK_SETTLE_DELAY_SECONDS = 0.001
 _PUBLICATION_TRANSITION_LINK_COUNT = 2
+_PRIVATE_DIRECTORY_OWNER_ACCESS = 0o300
 _TEMP_ENVIRONMENT = ("TMP", "TEMP", "TMPDIR")
 _active_workspace: ContextVar[tuple[Path, Path] | None] = ContextVar(
 	"quality_gate_active_workspace", default=None
@@ -476,6 +477,22 @@ def _incomplete_ownership_key(path: Path) -> bool:
 	)
 
 
+def _remove_published_temporary(parent: int, name: str, identity: os.stat_result) -> None:
+	try:
+		current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+	except FileNotFoundError:
+		return
+	if _same_file_identity(identity, current):
+		os.unlink(name, dir_fd=parent)
+
+
+def _publish_hard_link(
+	parent: int, temporary_name: str, target_name: str, identity: os.stat_result
+) -> None:
+	os.link(temporary_name, target_name, src_dir_fd=parent, dst_dir_fd=parent)
+	_remove_published_temporary(parent, temporary_name, identity)
+
+
 def _publish_new_file(path: Path, content: bytes) -> None:
 	"""Publish complete bytes without replacing an existing name."""
 	descriptor, temporary_name = tempfile.mkstemp(prefix=".quality-gate-pending-", dir=path.parent)
@@ -504,12 +521,7 @@ def _publish_new_file(path: Path, content: bytes) -> None:
 						raise
 					use_hard_link = True
 				if use_hard_link:
-					os.link(
-						temporary.name,
-						path.name,
-						src_dir_fd=parent,
-						dst_dir_fd=parent,
-					)
+					_publish_hard_link(parent, temporary.name, path.name, identity)
 				os.fsync(parent)
 			finally:
 				os.close(parent)
@@ -529,21 +541,143 @@ def _create_ownership_key_file(path: Path) -> None:
 		pass
 
 
+def _private_state_directory_fd(path: Path) -> int | None:
+	flags = os.O_RDONLY | _optional_os_flag("O_DIRECTORY") | _optional_os_flag("O_NOFOLLOW")
+	try:
+		parent = os.open(path.parent, flags)
+	except OSError:
+		return None
+	try:
+		identity = os.fstat(parent)
+		path_identity = path.parent.lstat()
+	except OSError:
+		os.close(parent)
+		return None
+	if (
+		not stat.S_ISDIR(identity.st_mode)
+		or not _same_file_identity(identity, path_identity)
+		or identity.st_uid != _current_user_id()
+		or stat.S_IMODE(identity.st_mode) & 0o077
+		or (stat.S_IMODE(identity.st_mode) & _PRIVATE_DIRECTORY_OWNER_ACCESS)
+		!= _PRIVATE_DIRECTORY_OWNER_ACCESS
+	):
+		os.close(parent)
+		return None
+	return parent
+
+
+def _matching_key_staging_name(parent: int, target: os.stat_result) -> str | None:
+	matches: list[str] = []
+	for name in os.listdir(parent):
+		if not name.startswith(".quality-gate-pending-"):
+			continue
+		try:
+			candidate = os.stat(name, dir_fd=parent, follow_symlinks=False)
+		except FileNotFoundError:
+			continue
+		if (
+			_same_file_identity(target, candidate)
+			and stat.S_ISREG(candidate.st_mode)
+			and candidate.st_nlink == _PUBLICATION_TRANSITION_LINK_COUNT
+			and candidate.st_uid == _current_user_id()
+			and stat.S_IMODE(candidate.st_mode) == _OWNERSHIP_KEY_MODE
+		):
+			matches.append(name)
+	return matches[0] if len(matches) == 1 else None
+
+
+def _remove_key_staging_link(parent: int, path: Path, expected: os.stat_result, name: str) -> None:
+	try:
+		descriptor = os.open(
+			name,
+			os.O_RDONLY | _optional_os_flag("O_NOFOLLOW") | _optional_os_flag("O_NONBLOCK"),
+			dir_fd=parent,
+		)
+	except FileNotFoundError:
+		return
+	try:
+		staging_identity = os.fstat(descriptor)
+		try:
+			current = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+			staging = os.stat(name, dir_fd=parent, follow_symlinks=False)
+		except FileNotFoundError:
+			return
+		if (
+			_same_file_identity(expected, current)
+			and _same_file_identity(current, staging_identity)
+			and _same_file_identity(staging_identity, staging)
+			and current.st_nlink == _PUBLICATION_TRANSITION_LINK_COUNT
+			and staging.st_nlink == _PUBLICATION_TRANSITION_LINK_COUNT
+			and stat.S_ISREG(staging_identity.st_mode)
+		):
+			os.unlink(name, dir_fd=parent)
+			os.fsync(parent)
+	finally:
+		os.close(descriptor)
+
+
+def _recover_interrupted_key_publication(
+	path: Path, metadata: os.stat_result
+) -> os.stat_result | None:
+	"""Remove only a matching staging link left by a stopped key publisher."""
+	if (
+		os.name == "nt"
+		or path.name not in {_OWNERSHIP_KEY_NAME, _RECOVERY_KEY_NAME}
+		or metadata.st_nlink != _PUBLICATION_TRANSITION_LINK_COUNT
+		or not stat.S_ISREG(metadata.st_mode)
+		or metadata.st_uid != _current_user_id()
+		or stat.S_IMODE(metadata.st_mode) != _OWNERSHIP_KEY_MODE
+	):
+		return None
+	parent = _private_state_directory_fd(path)
+	if parent is None:
+		return None
+	try:
+		try:
+			current = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+		except FileNotFoundError:
+			return None
+		if (
+			not _same_file_identity(metadata, current)
+			or current.st_nlink != _PUBLICATION_TRANSITION_LINK_COUNT
+			or not stat.S_ISREG(current.st_mode)
+			or current.st_uid != _current_user_id()
+			or stat.S_IMODE(current.st_mode) != _OWNERSHIP_KEY_MODE
+		):
+			return None
+		staging_name = _matching_key_staging_name(parent, current)
+		if staging_name is None:
+			return None
+		_remove_key_staging_link(parent, path, current, staging_name)
+		try:
+			current = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+		except FileNotFoundError:
+			return None
+		if (
+			_same_file_identity(metadata, current)
+			and current.st_nlink == 1
+			and stat.S_ISREG(current.st_mode)
+			and current.st_uid == _current_user_id()
+			and stat.S_IMODE(current.st_mode) == _OWNERSHIP_KEY_MODE
+		):
+			return current
+		return None
+	finally:
+		os.close(parent)
+
+
 def _read_ownership_key(path: Path) -> bytes | None:
 	try:
 		metadata = path.lstat()
 	except FileNotFoundError:
 		return None
+	if metadata.st_nlink == _PUBLICATION_TRANSITION_LINK_COUNT:
+		recovered = _recover_interrupted_key_publication(path, metadata)
+		if recovered is not None:
+			metadata = recovered
 	if not _plain_lock_file(path, metadata) or metadata.st_size != _OWNERSHIP_KEY_BYTES:
 		raise OSError(f"temporary workspace ownership key is unsafe: {path}")
-	if os.name != "nt":
-		if metadata.st_uid != _current_user_id():
-			raise OSError(f"temporary workspace ownership key has a foreign owner: {path}")
-		if stat.S_IMODE(metadata.st_mode) != _OWNERSHIP_KEY_MODE:
-			os.chmod(path, _OWNERSHIP_KEY_MODE)
-			metadata = path.lstat()
-			if stat.S_IMODE(metadata.st_mode) != _OWNERSHIP_KEY_MODE:
-				raise OSError(f"temporary workspace ownership key permissions are unsafe: {path}")
+	metadata = _check_ownership_key_permissions(path, metadata)
 	try:
 		with path.open("rb") as stream:
 			opened = os.fstat(stream.fileno())
@@ -560,6 +694,18 @@ def _read_ownership_key(path: Path) -> bytes | None:
 	):
 		return None
 	return key
+
+
+def _check_ownership_key_permissions(path: Path, metadata: os.stat_result) -> os.stat_result:
+	if os.name != "nt":
+		if metadata.st_uid != _current_user_id():
+			raise OSError(f"temporary workspace ownership key has a foreign owner: {path}")
+		if stat.S_IMODE(metadata.st_mode) != _OWNERSHIP_KEY_MODE:
+			os.chmod(path, _OWNERSHIP_KEY_MODE)
+			metadata = path.lstat()
+			if stat.S_IMODE(metadata.st_mode) != _OWNERSHIP_KEY_MODE:
+				raise OSError(f"temporary workspace ownership key permissions are unsafe: {path}")
+	return metadata
 
 
 def _signed_record(payload: dict[str, object], *, create_key: bool) -> bytes | None:
