@@ -671,7 +671,9 @@ def test_read_only_repository_uses_a_per_repository_system_temp_fallback(
 	prepare_workspace = temp_workspace._prepare_workspace
 	attempted_roots: list[Path] = []
 
-	def reject_read_only_root(root: Path) -> tuple[Path, Path, BinaryIO]:
+	def reject_read_only_root(
+		root: Path,
+	) -> tuple[Path, Path, BinaryIO, os.stat_result, os.stat_result]:
 		attempted_roots.append(root)
 		if root == repository.resolve():
 			error = TemporaryWorkspaceError("repository temp is not writable")
