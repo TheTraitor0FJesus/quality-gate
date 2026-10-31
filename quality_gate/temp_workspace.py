@@ -12,6 +12,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -38,6 +39,7 @@ _CLEANUP_AREA_MARKER_NAME = ".quality-gate-cleanup-area"
 _OWNERSHIP_KEY_NAME = "temp-workspace.key"
 _RECOVERY_KEY_NAME = "temp-workspace-recovery.key"
 _OWNERSHIP_KEY_BYTES = 32
+_SIGNATURE_HEX_LENGTH = 64
 _OWNERSHIP_KEY_MODE = 0o600
 _OWNERSHIP_RECORD_SCHEMA = 2
 _CLEANUP_RECORD_SCHEMA = 2
@@ -70,6 +72,9 @@ _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _WINDOWS_FILE_BASIC_INFORMATION = 0
 _WINDOWS_FILE_DISPOSITION_INFORMATION = 4
 _WINDOWS_FILE_ID_INFORMATION = 18
+_PUBLICATION_LINK_SETTLE_ATTEMPTS = 100
+_PUBLICATION_LINK_SETTLE_DELAY_SECONDS = 0.001
+_PUBLICATION_TRANSITION_LINK_COUNT = 2
 _TEMP_ENVIRONMENT = ("TMP", "TEMP", "TMPDIR")
 _active_workspace: ContextVar[tuple[Path, Path] | None] = ContextVar(
 	"quality_gate_active_workspace", default=None
@@ -489,7 +494,22 @@ def _publish_new_file(path: Path, content: bytes) -> None:
 			try:
 				if not _same_file_identity(os.fstat(parent), path.parent.lstat()):
 					raise OSError(f"temporary publication directory changed: {path.parent}")
-				_rename_without_replacement(temporary.name, path.name, parent, parent)
+				use_hard_link = False
+				try:
+					_rename_without_replacement(temporary.name, path.name, parent, parent)
+				except AttributeError:
+					use_hard_link = True
+				except OSError as error:
+					if error.errno not in (None, errno.ENOSYS, errno.EINVAL):
+						raise
+					use_hard_link = True
+				if use_hard_link:
+					os.link(
+						temporary.name,
+						path.name,
+						src_dir_fd=parent,
+						dst_dir_fd=parent,
+					)
 				os.fsync(parent)
 			finally:
 				os.close(parent)
@@ -555,7 +575,14 @@ def _valid_signed_record(content: bytes) -> dict[str, object] | None:
 		record = json.loads(content)
 	except (json.JSONDecodeError, UnicodeDecodeError):
 		return None
-	if not isinstance(record, dict) or not isinstance(record.get("signature"), str):
+	if not isinstance(record, dict):
+		return None
+	signature = record.get("signature")
+	if (
+		not isinstance(signature, str)
+		or len(signature) != _SIGNATURE_HEX_LENGTH
+		or any(character not in "0123456789abcdef" for character in signature)
+	):
 		return None
 	if content != _canonical_json(record):
 		return None
@@ -570,12 +597,26 @@ def _valid_signed_record(content: bytes) -> dict[str, object] | None:
 		keys.append(recovery_key)
 	for candidate in keys:
 		expected = hmac.new(candidate, _canonical_json(payload), hashlib.sha256).hexdigest()
-		if hmac.compare_digest(record["signature"], expected):
+		if hmac.compare_digest(signature, expected):
 			return payload
 	return None
 
 
 def _plain_lock_file(path: Path, metadata: os.stat_result) -> bool:
+	if metadata.st_nlink == _PUBLICATION_TRANSITION_LINK_COUNT:
+		for _ in range(_PUBLICATION_LINK_SETTLE_ATTEMPTS):
+			time.sleep(_PUBLICATION_LINK_SETTLE_DELAY_SECONDS)
+			try:
+				current = path.lstat()
+			except OSError:
+				return False
+			if not _same_file_identity(metadata, current):
+				return False
+			if current.st_nlink != _PUBLICATION_TRANSITION_LINK_COUNT:
+				metadata = current
+				break
+		else:
+			return False
 	return (
 		stat.S_ISREG(metadata.st_mode)
 		and not path.is_symlink()
@@ -2157,7 +2198,13 @@ def _write_cleanup_record(
 	marker_identity: os.stat_result,
 ) -> os.stat_result | None:
 	path = _cleanup_record_path(temp_root, run_directory)
-	if path.exists():
+	try:
+		path.lstat()
+	except FileNotFoundError:
+		pass
+	except OSError:
+		return None
+	else:
 		valid, identity, active_identity, marker_file = _has_valid_cleanup_record(
 			temp_root, run_directory, directory_identity
 		)

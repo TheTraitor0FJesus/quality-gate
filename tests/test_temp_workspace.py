@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -27,6 +28,8 @@ from quality_gate.temp_workspace import (
 )
 
 _SECOND_NESTED_LSTAT_CALL = 2
+_SINGLE_LINK_COUNT = 1
+_TRANSITIONAL_HARD_LINK_COUNT = 2
 _INTERRUPTED_KEY_EXIT = 73
 _INTERRUPTED_CLEANUP_EXIT = 74
 
@@ -384,6 +387,113 @@ def test_partial_cleanup_record_does_not_strand_owned_workspace(
 		assert workspace.is_dir()
 		assert not stale.exists()
 	assert partial.read_bytes() == b'{"format":'
+
+
+def test_temporary_workspace_reclaims_owned_run_with_dangling_cleanup_symlink(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	monkeypatch.setattr(temp_workspace, "_user_state_directory", lambda: tmp_path / "state")
+	repository = tmp_path / "repository"
+	temp_root = repository / "temp"
+	temp_root.mkdir(parents=True)
+	stale, _, active_lock, _, _ = temp_workspace._create_run_directory(temp_root)
+	(stale / "owned").write_bytes(b"owned")
+	cleanup_intent = temp_workspace._cleanup_record_path(temp_root, stale)
+	foreign_target = tmp_path / "missing-foreign-cleanup-target"
+	try:
+		cleanup_intent.symlink_to(foreign_target)
+	except OSError as error:
+		pytest.skip(f"file symlink creation is unavailable: {error}")
+	link_target = os.readlink(cleanup_intent)
+	temp_workspace._unlock(active_lock)
+
+	with temporary_workspace(repository) as workspace:
+		assert workspace != stale
+		assert workspace.is_dir()
+		assert not stale.exists()
+		assert cleanup_intent.is_symlink()
+		assert os.readlink(cleanup_intent) == link_target
+		assert not foreign_target.exists()
+		(workspace / "fresh").write_bytes(b"usable")
+		assert (workspace / "fresh").read_bytes() == b"usable"
+
+	assert not workspace.exists()
+	assert cleanup_intent.is_symlink()
+	assert os.readlink(cleanup_intent) == link_target
+	assert not foreign_target.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link fallback only")
+@pytest.mark.parametrize(
+	"rename_error",
+	[
+		pytest.param(OSError("safe recovery is unavailable"), id="unsupported-platform"),
+		pytest.param(AttributeError("no no-replace rename"), id="missing-symbol"),
+		pytest.param(OSError(errno.ENOSYS, "no no-replace rename"), id="enosys"),
+		pytest.param(OSError(errno.EINVAL, "no no-replace rename"), id="einval"),
+	],
+)
+def test_publish_new_file_uses_hard_link_fallback_and_cleans_temporary(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rename_error: Exception
+) -> None:
+	target = tmp_path / "published-key"
+	content = b"k" * temp_workspace._OWNERSHIP_KEY_BYTES
+
+	def unavailable_rename(*_args: object) -> None:
+		raise rename_error
+
+	monkeypatch.setattr(temp_workspace, "_rename_without_replacement", unavailable_rename)
+	temp_workspace._publish_new_file(target, content)
+
+	metadata = target.lstat()
+	assert metadata.st_nlink == _SINGLE_LINK_COUNT
+	assert temp_workspace._plain_lock_file(target, metadata)
+	assert not list(tmp_path.glob(".quality-gate-pending-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link fallback only")
+def test_plain_lock_file_retries_after_hard_link_transition(tmp_path: Path) -> None:
+	target = tmp_path / "published-key"
+	temporary = tmp_path / ".quality-gate-pending-test"
+	content = b"k" * temp_workspace._OWNERSHIP_KEY_BYTES
+	target.write_bytes(content)
+	os.link(target, temporary)
+	metadata = target.lstat()
+	assert metadata.st_nlink == _TRANSITIONAL_HARD_LINK_COUNT
+	result: list[bool] = []
+	reader_started = threading.Event()
+
+	def read_plain_file() -> None:
+		reader_started.set()
+		result.append(temp_workspace._plain_lock_file(target, metadata))
+
+	reader = threading.Thread(target=read_plain_file)
+	reader.start()
+	assert reader_started.wait(timeout=5)
+	temporary.unlink()
+	reader.join(timeout=5)
+	assert not reader.is_alive()
+	assert result == [True]
+	assert temp_workspace._read_ownership_key(target) == content
+	assert target.lstat().st_nlink == _SINGLE_LINK_COUNT
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link fallback only")
+def test_publish_new_file_hard_link_fallback_preserves_occupied_target(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	target = tmp_path / "occupied"
+	target.write_bytes(b"foreign")
+
+	def unsupported_rename(*_args: object) -> None:
+		raise OSError(errno.ENOSYS, "no no-replace rename")
+
+	monkeypatch.setattr(temp_workspace, "_rename_without_replacement", unsupported_rename)
+	with pytest.raises(FileExistsError):
+		temp_workspace._publish_new_file(target, b"replacement")
+
+	assert target.read_bytes() == b"foreign"
+	assert not list(tmp_path.glob(".quality-gate-pending-*"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX cleanup areas only")
@@ -855,6 +965,17 @@ def test_stale_reclamation_preserves_owner_record_without_valid_signature(
 	assert run_directory.is_dir()
 	assert owner_record.is_file()
 	assert (run_directory / "owned-content").read_text(encoding="utf-8") == "owned"
+
+
+@pytest.mark.parametrize("signature", [None, 1, "0" * 63, "A" * 64, "g" * 64, "é" * 64])
+def test_valid_signed_record_rejects_malformed_signature_before_comparison(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signature: object
+) -> None:
+	monkeypatch.setattr(temp_workspace, "_user_state_directory", lambda: tmp_path / "state")
+	assert temp_workspace._ownership_key(create=True) is not None
+	record = {"format": "test", "signature": signature}
+
+	assert temp_workspace._valid_signed_record(temp_workspace._canonical_json(record)) is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows deletion uses file-handle identity")
