@@ -74,6 +74,7 @@ _WINDOWS_FILE_DISPOSITION_INFORMATION = 4
 _WINDOWS_FILE_ID_INFORMATION = 18
 _PUBLICATION_LINK_SETTLE_ATTEMPTS = 100
 _PUBLICATION_LINK_SETTLE_DELAY_SECONDS = 0.001
+_SINGLE_LINK_COUNT = 1
 _PUBLICATION_TRANSITION_LINK_COUNT = 2
 _PRIVATE_DIRECTORY_OWNER_ACCESS = 0o300
 _TEMP_ENVIRONMENT = ("TMP", "TEMP", "TMPDIR")
@@ -477,20 +478,116 @@ def _incomplete_ownership_key(path: Path) -> bool:
 	)
 
 
-def _remove_published_temporary(parent: int, name: str, identity: os.stat_result) -> None:
+def _published_name_matches(
+	parent: int,
+	target_name: str,
+	identity: os.stat_result,
+	*,
+	link_count: int,
+	content_size: int,
+) -> bool:
 	try:
-		current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+		current = os.stat(target_name, dir_fd=parent, follow_symlinks=False)
+	except FileNotFoundError:
+		return False
+	return (
+		_same_file_identity(identity, current)
+		and stat.S_ISREG(current.st_mode)
+		and current.st_uid == identity.st_uid
+		and stat.S_IMODE(current.st_mode) == stat.S_IMODE(identity.st_mode)
+		and current.st_nlink == link_count
+		and current.st_size == content_size
+	)
+
+
+def _remove_published_staging_link(
+	parent: int,
+	temporary_name: str,
+	target_name: str,
+	identity: os.stat_result,
+	content_size: int,
+) -> None:
+	try:
+		current = os.stat(temporary_name, dir_fd=parent, follow_symlinks=False)
 	except FileNotFoundError:
 		return
-	if _same_file_identity(identity, current):
-		os.unlink(name, dir_fd=parent)
+	if not _same_file_identity(identity, current):
+		return
+	try:
+		current = os.stat(temporary_name, dir_fd=parent, follow_symlinks=False)
+	except FileNotFoundError:
+		return
+	if not _same_file_identity(identity, current):
+		return
+	if _published_name_matches(
+		parent,
+		target_name,
+		identity,
+		link_count=_PUBLICATION_TRANSITION_LINK_COUNT,
+		content_size=content_size,
+	):
+		os.unlink(temporary_name, dir_fd=parent)
+		return
+	if not _published_name_matches(
+		parent,
+		target_name,
+		identity,
+		link_count=_SINGLE_LINK_COUNT,
+		content_size=content_size,
+	):
+		raise OSError(f"temporary publication target changed before staging removal: {target_name}")
+
+
+def _remove_published_temporary(
+	parent: int,
+	temporary_name: str,
+	target_name: str,
+	identity: os.stat_result,
+	content_size: int,
+) -> None:
+	try:
+		_remove_published_staging_link(
+			parent,
+			temporary_name,
+			target_name,
+			identity,
+			content_size,
+		)
+	except FileNotFoundError as error:
+		if _published_name_matches(
+			parent,
+			target_name,
+			identity,
+			link_count=_SINGLE_LINK_COUNT,
+			content_size=content_size,
+		):
+			return
+		raise error
+	if not _published_name_matches(
+		parent,
+		target_name,
+		identity,
+		link_count=_SINGLE_LINK_COUNT,
+		content_size=content_size,
+	):
+		raise OSError(f"temporary publication target changed during staging removal: {target_name}")
 
 
 def _publish_hard_link(
-	parent: int, temporary_name: str, target_name: str, identity: os.stat_result
+	parent: int,
+	temporary_name: str,
+	target_name: str,
+	identity: os.stat_result,
+	content_size: int,
 ) -> None:
 	os.link(temporary_name, target_name, src_dir_fd=parent, dst_dir_fd=parent)
-	_remove_published_temporary(parent, temporary_name, identity)
+	_remove_published_temporary(
+		parent,
+		temporary_name,
+		target_name,
+		identity,
+		content_size,
+	)
 
 
 def _publish_new_file(path: Path, content: bytes) -> None:
@@ -521,7 +618,7 @@ def _publish_new_file(path: Path, content: bytes) -> None:
 						raise
 					use_hard_link = True
 				if use_hard_link:
-					_publish_hard_link(parent, temporary.name, path.name, identity)
+					_publish_hard_link(parent, temporary.name, path.name, identity, len(content))
 				os.fsync(parent)
 			finally:
 				os.close(parent)
@@ -593,8 +690,18 @@ def _remove_key_staging_link(parent: int, path: Path, expected: os.stat_result, 
 			os.O_RDONLY | _optional_os_flag("O_NOFOLLOW") | _optional_os_flag("O_NONBLOCK"),
 			dir_fd=parent,
 		)
-	except FileNotFoundError:
-		return
+	except OSError as error:
+		if isinstance(error, FileNotFoundError):
+			return
+		if _published_name_matches(
+			parent,
+			path.name,
+			expected,
+			link_count=_SINGLE_LINK_COUNT,
+			content_size=expected.st_size,
+		):
+			return
+		raise
 	try:
 		staging_identity = os.fstat(descriptor)
 		try:
@@ -610,8 +717,31 @@ def _remove_key_staging_link(parent: int, path: Path, expected: os.stat_result, 
 			and staging.st_nlink == _PUBLICATION_TRANSITION_LINK_COUNT
 			and stat.S_ISREG(staging_identity.st_mode)
 		):
-			os.unlink(name, dir_fd=parent)
-			os.fsync(parent)
+			try:
+				current = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+				staging = os.stat(name, dir_fd=parent, follow_symlinks=False)
+			except FileNotFoundError:
+				return
+			if (
+				_same_file_identity(expected, current)
+				and _same_file_identity(current, staging_identity)
+				and _same_file_identity(staging_identity, staging)
+				and current.st_nlink == _PUBLICATION_TRANSITION_LINK_COUNT
+				and staging.st_nlink == _PUBLICATION_TRANSITION_LINK_COUNT
+				and stat.S_ISREG(staging.st_mode)
+			):
+				try:
+					os.unlink(name, dir_fd=parent)
+				except FileNotFoundError as error:
+					if not _published_name_matches(
+						parent,
+						path.name,
+						expected,
+						link_count=_SINGLE_LINK_COUNT,
+						content_size=expected.st_size,
+					):
+						raise error
+				os.fsync(parent)
 	finally:
 		os.close(descriptor)
 

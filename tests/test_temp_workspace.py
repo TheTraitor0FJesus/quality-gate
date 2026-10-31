@@ -32,6 +32,206 @@ _SINGLE_LINK_COUNT = 1
 _TRANSITIONAL_HARD_LINK_COUNT = 2
 _INTERRUPTED_KEY_EXIT = 73
 _INTERRUPTED_CLEANUP_EXIT = 74
+_INTERRUPTED_AFTER_UNLINK_EXIT = 75
+
+
+def _run_workspace_script(
+	script: str, environment: dict[str, str], *arguments: str
+) -> subprocess.CompletedProcess[bytes]:
+	return subprocess.run(
+		[sys.executable, "-c", script, *arguments],
+		cwd=Path(__file__).resolve().parents[1],
+		env=environment,
+		capture_output=True,
+		timeout=30,
+		check=False,
+	)
+
+
+def _start_workspace_script(
+	script: str, environment: dict[str, str], *arguments: str
+) -> subprocess.Popen[bytes]:
+	return subprocess.Popen(
+		[sys.executable, "-c", script, *arguments],
+		cwd=Path(__file__).resolve().parents[1],
+		env=environment,
+		stdout=subprocess.PIPE,
+		stderr=subprocess.PIPE,
+	)
+
+
+def _wait_for_workspace_marker(
+	marker: Path, process: subprocess.Popen[bytes], timeout_seconds: float = 30
+) -> None:
+	deadline = time.monotonic() + timeout_seconds
+	while not marker.exists() and time.monotonic() < deadline:
+		if process.poll() is not None:
+			break
+		time.sleep(0.01)
+	assert marker.exists(), f"process did not reach marker {marker.name}"
+
+
+def _collect_workspace_process(
+	process: subprocess.Popen[bytes], timeout_seconds: float = 30
+) -> tuple[bytes, bytes]:
+	try:
+		stdout, stderr = process.communicate(timeout=timeout_seconds)
+	except subprocess.TimeoutExpired:
+		process.kill()
+		stdout, stderr = process.communicate(timeout=15)
+	return stdout, stderr
+
+
+def _assert_workspace_script_cleaned(result: subprocess.CompletedProcess[bytes]) -> Path:
+	assert result.returncode == 0, result.stderr
+	workspace = Path(result.stdout.decode().strip())
+	assert not workspace.exists()
+	return workspace
+
+
+def _apply_publisher_race_final_action(
+	final_action: str,
+	key_path: Path,
+	staging_path: Path,
+	key_identity: os.stat_result,
+	tmp_path: Path,
+) -> tuple[Path | None, Path | None]:
+	if final_action == "replaced":
+		foreign_key = key_path.with_name("foreign-key")
+		foreign_key.write_bytes(b"f" * temp_workspace._OWNERSHIP_KEY_BYTES)
+		foreign_key.chmod(temp_workspace._OWNERSHIP_KEY_MODE)
+		os.replace(foreign_key, key_path)
+		assert not temp_workspace._same_file_identity(key_identity, key_path.lstat())
+		return foreign_key, None
+	if final_action == "missing":
+		key_path.unlink()
+		return None, None
+	if final_action == "staging-replaced":
+		foreign_target = tmp_path / "missing-replacement-target"
+		staging_path.symlink_to(foreign_target)
+		return None, foreign_target
+	return None, None
+
+
+def _publisher_race_script() -> str:
+	return "\n".join(
+		(
+			"import errno, os, sys, time",
+			"from pathlib import Path",
+			"import quality_gate.temp_workspace as workspace",
+			"root, coordination = map(Path, sys.argv[1:3])",
+			"pause_after = int(sys.argv[3])",
+			"staging_statted = coordination / 'publisher-staging-statted'",
+			"resume_publisher = coordination / 'resume-publisher'",
+			"def unsupported(*args, **kwargs):",
+			"    raise OSError(errno.ENOSYS, 'no no-replace rename')",
+			"workspace._rename_without_replacement = unsupported",
+			"original_stat = os.stat",
+			"staging_stat_count = [0]",
+			"def pause_after_staging_stat(path, *args, **kwargs):",
+			"    metadata = original_stat(path, *args, **kwargs)",
+			"    is_staging_stat = (",
+			"        isinstance(path, str)",
+			"        and path.startswith('.quality-gate-pending-')",
+			"        and kwargs.get('dir_fd') is not None",
+			"        and kwargs.get('follow_symlinks') is False",
+			"    )",
+			"    if is_staging_stat:",
+			"        staging_stat_count[0] += 1",
+			"    if is_staging_stat and staging_stat_count[0] == pause_after:",
+			"        staging_statted.touch()",
+			"        deadline = time.monotonic() + 30",
+			"        while not resume_publisher.exists() and time.monotonic() < deadline:",
+			"            time.sleep(0.01)",
+			"        if not resume_publisher.exists():",
+			"            os._exit(88)",
+			"    return metadata",
+			"workspace.os.stat = pause_after_staging_stat",
+			"from quality_gate.temp_workspace import temporary_workspace",
+			"with temporary_workspace(root) as work:",
+			"    (work / 'publisher').write_bytes(b'published')",
+		)
+	)
+
+
+def _recovery_reader_script() -> str:
+	return "\n".join(
+		(
+			"import sys",
+			"from pathlib import Path",
+			"from quality_gate.temp_workspace import temporary_workspace",
+			"with temporary_workspace(Path(sys.argv[1])) as work:",
+			"    (work / 'reader').write_bytes(b'recovered')",
+			"    print(work, flush=True)",
+		)
+	)
+
+
+def _recover_while_publisher_paused(
+	staging_statted: Path,
+	publisher: subprocess.Popen[bytes],
+	state: Path,
+	environment: dict[str, str],
+	repository: Path,
+	final_action: str,
+	tmp_path: Path,
+) -> tuple[Path, os.stat_result, bytes, Path, Path | None, Path | None]:
+	_wait_for_workspace_marker(staging_statted, publisher, timeout_seconds=25)
+	key_path = state / temp_workspace._OWNERSHIP_KEY_NAME
+	key_identity = key_path.lstat()
+	staging_paths = list(state.glob(".quality-gate-pending-*"))
+	assert len(staging_paths) == 1
+	staging_path = staging_paths[0]
+	assert temp_workspace._same_file_identity(key_identity, staging_path.lstat())
+	assert key_identity.st_nlink == _TRANSITIONAL_HARD_LINK_COUNT
+	key_bytes = key_path.read_bytes()
+	reader = _run_workspace_script(_recovery_reader_script(), environment, str(repository))
+	_assert_workspace_script_cleaned(reader)
+	assert not staging_path.exists()
+	assert temp_workspace._same_file_identity(key_identity, key_path.lstat())
+	assert key_path.read_bytes() == key_bytes
+	assert key_path.lstat().st_nlink == _SINGLE_LINK_COUNT
+	foreign_key, foreign_target = _apply_publisher_race_final_action(
+		final_action, key_path, staging_path, key_identity, tmp_path
+	)
+	return key_path, key_identity, key_bytes, staging_path, foreign_key, foreign_target
+
+
+def _assert_publisher_race_outcome(
+	final_action: str,
+	publisher: subprocess.Popen[bytes],
+	publisher_stdout: bytes,
+	publisher_stderr: bytes,
+	state: Path,
+	environment: dict[str, str],
+	repository: Path,
+	key_path: Path,
+	key_identity: os.stat_result,
+	key_bytes: bytes,
+	staging_path: Path,
+	foreign_key: Path | None,
+	foreign_target: Path | None,
+) -> None:
+	if final_action in {"intact", "staging-replaced"}:
+		assert publisher.returncode == 0, publisher_stderr
+		assert temp_workspace._same_file_identity(key_identity, key_path.lstat())
+		assert key_path.read_bytes() == key_bytes
+		assert key_path.lstat().st_nlink == _SINGLE_LINK_COUNT
+		if final_action == "staging-replaced":
+			assert foreign_target is not None
+			assert staging_path.is_symlink()
+			assert os.readlink(staging_path) == str(foreign_target)
+			assert not foreign_target.exists()
+		return
+	assert publisher.returncode != 0, publisher_stdout
+	assert not list(state.glob(".quality-gate-pending-*"))
+	if final_action == "replaced":
+		assert key_path.read_bytes() == b"f" * temp_workspace._OWNERSHIP_KEY_BYTES
+		assert foreign_key is not None and not foreign_key.exists()
+		return
+	assert not key_path.exists()
+	fresh = _run_workspace_script(_recovery_reader_script(), environment, str(repository))
+	_assert_workspace_script_cleaned(fresh)
 
 
 @pytest.mark.parametrize("mode", ["ruff", "validate", "secrets", "integrity", "types"])
@@ -621,9 +821,19 @@ def test_interrupted_hard_link_key_publication_recovers_through_workspace(
 	foreign_link = state / "foreign-key-link"
 	os.link(key_path, foreign_link)
 	assert key_path.lstat().st_nlink == _TRANSITIONAL_HARD_LINK_COUNT + 1
-	with pytest.raises(TemporaryWorkspaceError):
-		with temporary_workspace(repository):
-			pytest.fail("workspace unexpectedly accepted a multiply-linked key")
+	workspace_script = "\n".join(
+		(
+			"import sys",
+			"from pathlib import Path",
+			"from quality_gate.temp_workspace import temporary_workspace",
+			"with temporary_workspace(Path(sys.argv[1])) as work:",
+			"    (work / 'fresh').write_bytes(b'usable')",
+			"    print(work, flush=True)",
+		)
+	)
+	refused = _run_workspace_script(workspace_script, environment, str(repository))
+	assert refused.returncode != 0, refused.stdout
+	assert b"temporary workspace ownership key is unsafe" in refused.stderr
 	assert staging_path.exists()
 	assert foreign_link.exists()
 	assert key_path.read_bytes() == key_bytes
@@ -635,12 +845,8 @@ def test_interrupted_hard_link_key_publication_recovers_through_workspace(
 	foreign_symlink = state / ".quality-gate-pending-foreign-link"
 	foreign_symlink.symlink_to(foreign_target)
 	symlink_target = os.readlink(foreign_symlink)
-	with temporary_workspace(repository) as workspace:
-		assert workspace.is_dir()
-		(workspace / "fresh").write_bytes(b"usable")
-		assert (workspace / "fresh").read_bytes() == b"usable"
-
-	assert not workspace.exists()
+	created = _run_workspace_script(workspace_script, environment, str(repository))
+	_assert_workspace_script_cleaned(created)
 	current_key_identity = key_path.lstat()
 	assert temp_workspace._same_file_identity(key_identity, current_key_identity)
 	assert key_path.read_bytes() == key_bytes
@@ -650,6 +856,211 @@ def test_interrupted_hard_link_key_publication_recovers_through_workspace(
 	assert foreign_symlink.is_symlink()
 	assert os.readlink(foreign_symlink) == symlink_target
 	assert not foreign_target.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link publication only")
+def test_interrupted_after_staging_unlink_keeps_published_key_usable(
+	tmp_path: Path,
+) -> None:
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	state_base = tmp_path / "state-base"
+	state = state_base / "quality-gate" / "temp-workspace"
+	environment = os.environ.copy()
+	environment["XDG_STATE_HOME"] = str(state_base)
+	script = "\n".join(
+		(
+			"import errno, os, stat, sys",
+			"from pathlib import Path",
+			"import quality_gate.temp_workspace as workspace",
+			"state = Path(sys.argv[1])",
+			"def unsupported(*args, **kwargs):",
+			"    raise OSError(errno.ENOSYS, 'no no-replace rename')",
+			"workspace._rename_without_replacement = unsupported",
+			"real_fsync = os.fsync",
+			"def stop_after_staging_unlink(fd):",
+			"    metadata = os.fstat(fd)",
+			"    if (",
+			"        stat.S_ISDIR(metadata.st_mode)",
+			"        and workspace._same_file_identity(metadata, state.lstat())",
+			"    ):",
+			"        if not list(state.glob('.quality-gate-pending-*')):",
+			f"            os._exit({_INTERRUPTED_AFTER_UNLINK_EXIT})",
+			"    return real_fsync(fd)",
+			"workspace.os.fsync = stop_after_staging_unlink",
+			"workspace._ownership_key(create=True)",
+		)
+	)
+	process = _run_workspace_script(script, environment, str(state))
+	assert process.returncode == _INTERRUPTED_AFTER_UNLINK_EXIT, process.stderr
+	key_path = state / temp_workspace._OWNERSHIP_KEY_NAME
+	key_identity = key_path.lstat()
+	key_bytes = key_path.read_bytes()
+	assert len(key_bytes) == temp_workspace._OWNERSHIP_KEY_BYTES
+	assert key_identity.st_nlink == _SINGLE_LINK_COUNT
+	assert not list(state.glob(".quality-gate-pending-*"))
+
+	workspace_script = "\n".join(
+		(
+			"import sys",
+			"from pathlib import Path",
+			"from quality_gate.temp_workspace import temporary_workspace",
+			"with temporary_workspace(Path(sys.argv[1])) as work:",
+			"    (work / 'usable').write_bytes(b'ok')",
+			"    print(work, flush=True)",
+		)
+	)
+	workspace_result = _run_workspace_script(workspace_script, environment, str(repository))
+	_assert_workspace_script_cleaned(workspace_result)
+	assert temp_workspace._same_file_identity(key_identity, key_path.lstat())
+	assert key_path.read_bytes() == key_bytes
+	assert key_path.lstat().st_nlink == _SINGLE_LINK_COUNT
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link publication recovery only")
+@pytest.mark.parametrize("final_action", ["intact", "staging-replaced", "replaced", "missing"])
+@pytest.mark.parametrize("staging_stat_number", [1, 2])
+def test_concurrent_key_recovery_and_publisher_cleanup_race(
+	tmp_path: Path, final_action: str, staging_stat_number: int
+) -> None:
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	state_base = tmp_path / "state-base"
+	state = state_base / "quality-gate" / "temp-workspace"
+	coordination = tmp_path / "coordination"
+	coordination.mkdir()
+	staging_statted = coordination / "publisher-staging-statted"
+	resume_publisher = coordination / "resume-publisher"
+	environment = os.environ.copy()
+	environment["XDG_STATE_HOME"] = str(state_base)
+	publisher = _start_workspace_script(
+		_publisher_race_script(),
+		environment,
+		str(repository),
+		str(coordination),
+		str(staging_stat_number),
+	)
+	key_path: Path
+	key_identity: os.stat_result
+	key_bytes: bytes
+	staging_path: Path
+	foreign_key: Path | None
+	foreign_target: Path | None
+	try:
+		(
+			key_path,
+			key_identity,
+			key_bytes,
+			staging_path,
+			foreign_key,
+			foreign_target,
+		) = _recover_while_publisher_paused(
+			staging_statted,
+			publisher,
+			state,
+			environment,
+			repository,
+			final_action,
+			tmp_path,
+		)
+	finally:
+		resume_publisher.touch(exist_ok=True)
+		publisher_stdout, publisher_stderr = _collect_workspace_process(publisher)
+	_assert_publisher_race_outcome(
+		final_action,
+		publisher,
+		publisher_stdout,
+		publisher_stderr,
+		state,
+		environment,
+		repository,
+		key_path,
+		key_identity,
+		key_bytes,
+		staging_path,
+		foreign_key,
+		foreign_target,
+	)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link recovery only")
+def test_concurrent_public_recovery_readers_share_staging_removal(
+	tmp_path: Path,
+) -> None:
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	state_base = tmp_path / "state-base"
+	state = state_base / "quality-gate" / "temp-workspace"
+	state.mkdir(mode=0o700, parents=True)
+	key_path = state / temp_workspace._OWNERSHIP_KEY_NAME
+	key_bytes = b"k" * temp_workspace._OWNERSHIP_KEY_BYTES
+	key_path.write_bytes(key_bytes)
+	key_path.chmod(temp_workspace._OWNERSHIP_KEY_MODE)
+	staging_path = state / ".quality-gate-pending-orphan"
+	os.link(key_path, staging_path)
+	key_identity = key_path.lstat()
+	coordination = tmp_path / "coordination"
+	coordination.mkdir()
+	first_ready = coordination / "first-ready"
+	second_ready = coordination / "second-ready"
+	release = coordination / "release"
+	environment = os.environ.copy()
+	environment["XDG_STATE_HOME"] = str(state_base)
+	script = "\n".join(
+		(
+			"import os, sys, time",
+			"from pathlib import Path",
+			"import quality_gate.temp_workspace as workspace",
+			"worker, root, coordination = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])",
+			"original_unlink = os.unlink",
+			"def ordered_unlink(path, *args, **kwargs):",
+			"    is_staging = isinstance(path, str) and path.startswith('.quality-gate-pending-')",
+			"    if is_staging and kwargs.get('dir_fd') is not None:",
+			"        (coordination / f'{worker}-ready').touch()",
+			"        deadline = time.monotonic() + 30",
+			"        while (",
+			"            not (coordination / 'release').exists()",
+			"            and time.monotonic() < deadline",
+			"        ):",
+			"            time.sleep(0.01)",
+			"        if not (coordination / 'release').exists():",
+			"            os._exit(88)",
+			"        if worker == 'second':",
+			"            while (",
+			"                not (coordination / 'first-unlinked').exists()",
+			"                and time.monotonic() < deadline",
+			"            ):",
+			"                time.sleep(0.01)",
+			"            if not (coordination / 'first-unlinked').exists():",
+			"                os._exit(89)",
+			"    result = original_unlink(path, *args, **kwargs)",
+			"    if is_staging and worker == 'first':",
+			"        (coordination / 'first-unlinked').touch()",
+			"    return result",
+			"workspace.os.unlink = ordered_unlink",
+			"from quality_gate.temp_workspace import temporary_workspace",
+			"with temporary_workspace(root) as work:",
+			"    (work / worker).write_bytes(b'ok')",
+			"    print(work, flush=True)",
+		)
+	)
+	processes = [
+		_start_workspace_script(script, environment, worker, str(repository), str(coordination))
+		for worker in ("first", "second")
+	]
+	try:
+		_wait_for_workspace_marker(first_ready, processes[0], timeout_seconds=25)
+		_wait_for_workspace_marker(second_ready, processes[1], timeout_seconds=25)
+	finally:
+		release.touch(exist_ok=True)
+		outputs = [_collect_workspace_process(process) for process in processes]
+
+	assert all(process.returncode == 0 for process in processes), outputs
+	assert all(not Path(stdout.decode().strip()).exists() for stdout, _stderr in outputs)
+	assert not staging_path.exists()
+	assert temp_workspace._same_file_identity(key_identity, key_path.lstat())
+	assert key_path.read_bytes() == key_bytes
+	assert key_path.lstat().st_nlink == _SINGLE_LINK_COUNT
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link publication only")
