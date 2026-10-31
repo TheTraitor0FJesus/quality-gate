@@ -9,8 +9,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, cast
 
 import pytest
 
@@ -24,6 +25,8 @@ from quality_gate.temp_workspace import (
 	TemporaryWorkspaceError,
 	temporary_workspace,
 )
+
+_SECOND_NESTED_LSTAT_CALL = 2
 
 
 @pytest.mark.parametrize("mode", ["ruff", "validate", "secrets", "integrity", "types"])
@@ -410,6 +413,7 @@ def test_stale_reclamation_keeps_root_controls_when_child_removal_fails(
 	assert active_lock.is_file()
 	assert marker.is_file()
 	assert owner_record.is_file()
+	assert temp_workspace._cleanup_record_path(temp_root, stale).is_file()
 	assert blocked.read_text(encoding="utf-8") == "owned"
 
 	monkeypatch.setattr(temp_workspace, "_directory_entries_for_removal", original_entries)
@@ -417,6 +421,105 @@ def test_stale_reclamation_keeps_root_controls_when_child_removal_fails(
 	temp_workspace._reclaim_stale_workspace(temp_root, stale)
 	assert not stale.exists()
 	assert not owner_record.exists()
+	assert not temp_workspace._cleanup_record_path(temp_root, stale).exists()
+
+
+@pytest.mark.parametrize("removed_control", [".active.lock", ".quality-gate-workspace"])
+def test_stale_reclamation_resumes_after_control_file_removal_fails(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	removed_control: str,
+) -> None:
+	temp_root = tmp_path / "temp"
+	stale = temp_root / "qg-interrupted-control"
+	stale.mkdir(parents=True)
+	active_lock = stale / ".active.lock"
+	active_lock.write_bytes(b"\0")
+	marker = stale / ".quality-gate-workspace"
+	marker.write_bytes(temp_workspace._ownership_marker(temp_root, stale))
+	identity = stale.lstat()
+	owner_record = temp_workspace._ownership_record_path(temp_root, stale)
+	cleanup_record = temp_workspace._cleanup_record_path(temp_root, stale)
+	temp_workspace._write_ownership_record(temp_root, stale, identity)
+
+	original_entries = temp_workspace._directory_entries_for_removal
+	original_remove_file = temp_workspace._remove_file
+
+	def put_root_controls_first(
+		directory: Path, expected: os.stat_result
+	) -> list[tuple[Path, os.stat_result]] | None:
+		entries = original_entries(directory, expected)
+		if directory != stale or entries is None:
+			return entries
+		controls = [
+			item for item in entries if item[0].name in {".active.lock", ".quality-gate-workspace"}
+		]
+		first_control = next(item for item in controls if item[0].name == removed_control)
+		other_controls = [item for item in controls if item[0].name != removed_control]
+		return [first_control, *other_controls, *(item for item in entries if item not in controls)]
+
+	def fail_after_control(path: Path, expected: os.stat_result) -> None:
+		original_remove_file(path, expected)
+		if path.name == removed_control:
+			raise OSError(errno.EIO, "simulated interruption after control removal", path)
+
+	monkeypatch.setattr(temp_workspace, "_directory_entries_for_removal", put_root_controls_first)
+	monkeypatch.setattr(temp_workspace, "_remove_file", fail_after_control)
+	temp_workspace._reclaim_stale_workspace(temp_root, stale)
+
+	assert stale.is_dir()
+	assert cleanup_record.is_file()
+	assert owner_record.is_file()
+	assert not (stale / removed_control).exists()
+	assert (
+		stale / (".quality-gate-workspace" if removed_control == ".active.lock" else ".active.lock")
+	).is_file()
+
+	monkeypatch.setattr(temp_workspace, "_directory_entries_for_removal", original_entries)
+	monkeypatch.setattr(temp_workspace, "_remove_file", original_remove_file)
+	temp_workspace._reclaim_stale_workspace(temp_root, stale)
+	assert not stale.exists()
+	assert not owner_record.exists()
+	assert not cleanup_record.exists()
+
+
+def test_stale_reclamation_resumes_after_final_directory_removal_fails(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	temp_root = tmp_path / "temp"
+	stale = temp_root / "qg-interrupted-rmdir"
+	stale.mkdir(parents=True)
+	active_lock = stale / ".active.lock"
+	active_lock.write_bytes(b"\0")
+	marker = stale / ".quality-gate-workspace"
+	marker.write_bytes(temp_workspace._ownership_marker(temp_root, stale))
+	identity = stale.lstat()
+	owner_record = temp_workspace._ownership_record_path(temp_root, stale)
+	cleanup_record = temp_workspace._cleanup_record_path(temp_root, stale)
+	temp_workspace._write_ownership_record(temp_root, stale, identity)
+
+	original_remove_directory = temp_workspace._remove_directory
+
+	def fail_final_rmdir(path: Path, *, expected_identity: os.stat_result) -> None:
+		if path == stale:
+			raise OSError(errno.EIO, "simulated final rmdir failure", path)
+		original_remove_directory(path, expected_identity=expected_identity)
+
+	monkeypatch.setattr(temp_workspace, "_remove_directory", fail_final_rmdir)
+	temp_workspace._reclaim_stale_workspace(temp_root, stale)
+
+	assert stale.is_dir()
+	assert not active_lock.exists()
+	assert not marker.exists()
+	assert owner_record.is_file()
+	assert cleanup_record.is_file()
+
+	monkeypatch.setattr(temp_workspace, "_remove_directory", original_remove_directory)
+	temp_workspace._reclaim_stale_workspace(temp_root, stale)
+	assert not stale.exists()
+	assert not owner_record.exists()
+	assert not cleanup_record.exists()
 
 
 @pytest.mark.parametrize("valid_record", [True, False])
@@ -445,6 +548,233 @@ def test_stale_reclamation_removes_only_a_valid_orphan_owner_record(
 	assert owner_record.exists() is not valid_record
 
 
+def test_stale_reclamation_preserves_owner_record_without_valid_signature(
+	tmp_path: Path,
+) -> None:
+	temp_root = tmp_path / "temp"
+	run_directory = temp_root / "qg-forged-owner"
+	run_directory.mkdir(parents=True)
+	(run_directory / ".active.lock").write_bytes(b"\0")
+	(run_directory / ".quality-gate-workspace").write_bytes(
+		temp_workspace._ownership_marker(temp_root, run_directory)
+	)
+	(run_directory / "owned-content").write_text("owned", encoding="utf-8")
+	identity = run_directory.lstat()
+	owner_record = temp_workspace._ownership_record_path(temp_root, run_directory)
+	forged = json.loads(temp_workspace._ownership_record(temp_root, run_directory, identity))
+	forged["signature"] = "0" * 64
+	owner_record.write_text(
+		json.dumps(forged, sort_keys=True, separators=(",", ":")) + "\n",
+		encoding="utf-8",
+	)
+
+	temp_workspace._reclaim_stale_workspace(temp_root, run_directory)
+
+	assert run_directory.is_dir()
+	assert owner_record.is_file()
+	assert (run_directory / "owned-content").read_text(encoding="utf-8") == "owned"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows deletion uses file-handle identity")
+def test_cleanup_area_recovery_restores_nonempty_quarantined_directory(tmp_path: Path) -> None:
+	temp_root = tmp_path / "temp"
+	temp_root.mkdir()
+	workspace = temp_root / "qg-interrupted"
+	workspace.mkdir()
+	content = workspace / "late-content"
+	content.write_text("preserve", encoding="utf-8")
+	workspace_identity = workspace.lstat()
+	root_identity = temp_root.lstat()
+	area, cleanup_descriptor = temp_workspace._open_cleanup_area(temp_root)
+	root_descriptor = os.open(
+		temp_root,
+		os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+	)
+	token = "interrupted"
+	quarantine_name = f"entry-{workspace_identity.st_dev:x}-{workspace_identity.st_ino:x}-{token}"
+	try:
+		journal_name, _journal_identity = temp_workspace._write_quarantine_journal(
+			temp_root,
+			workspace,
+			workspace_identity,
+			root_identity,
+			"directory",
+			token,
+			quarantine_name,
+			cleanup_descriptor,
+		)
+		os.rename(
+			workspace.name,
+			quarantine_name,
+			src_dir_fd=root_descriptor,
+			dst_dir_fd=cleanup_descriptor,
+		)
+		os.fsync(root_descriptor)
+		os.fsync(cleanup_descriptor)
+
+		temp_workspace._recover_quarantined_entries(temp_root, cleanup_descriptor)
+
+		assert content.read_text(encoding="utf-8") == "preserve"
+		assert not (area / quarantine_name).exists()
+		assert not (area / journal_name).exists()
+	finally:
+		os.close(root_descriptor)
+		os.close(cleanup_descriptor)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows deletion uses file-handle identity")
+@pytest.mark.parametrize("entry_kind", ["file", "link", "directory"])
+def test_removal_preserves_entry_replaced_after_identity_check(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	entry_kind: str,
+) -> None:
+	temp_root = tmp_path / "temp"
+	workspace = temp_root / "qg-race"
+	workspace.mkdir(parents=True)
+	victim = workspace / "victim"
+	displaced = tmp_path / f"displaced-{entry_kind}"
+	foreign_target = tmp_path / "foreign-target"
+	foreign_target.write_text("outside", encoding="utf-8")
+	if entry_kind == "file":
+		victim.write_text("owned", encoding="utf-8")
+	elif entry_kind == "link":
+		try:
+			victim.symlink_to(foreign_target)
+		except OSError as error:
+			pytest.skip(f"file symlinks are unavailable: {error}")
+	else:
+		victim.mkdir()
+	identity = victim.lstat()
+	original_move = temp_workspace._rename_entry_to_cleanup_area
+	replaced = False
+
+	def replace_before_move(
+		path: Path,
+		quarantine_name: str,
+		parent_descriptor: int,
+		cleanup_descriptor: int,
+	) -> None:
+		nonlocal replaced
+		if path == victim and not replaced:
+			path.replace(displaced)
+			if entry_kind == "file":
+				path.write_text("foreign", encoding="utf-8")
+			elif entry_kind == "link":
+				path.symlink_to(foreign_target)
+			else:
+				path.mkdir()
+				(path / "foreign.txt").write_text("foreign", encoding="utf-8")
+			replaced = True
+		original_move(path, quarantine_name, parent_descriptor, cleanup_descriptor)
+
+	monkeypatch.setattr(temp_workspace, "_rename_entry_to_cleanup_area", replace_before_move)
+	with pytest.raises(OSError, match="changed"):
+		temp_workspace._remove_entry(victim, expected_identity=identity)
+
+	assert replaced
+	if entry_kind == "file":
+		assert victim.read_text(encoding="utf-8") == "foreign"
+		assert displaced.read_text(encoding="utf-8") == "owned"
+	elif entry_kind == "link":
+		assert victim.is_symlink()
+		assert displaced.is_symlink()
+		assert foreign_target.read_text(encoding="utf-8") == "outside"
+	else:
+		assert (victim / "foreign.txt").read_text(encoding="utf-8") == "foreign"
+		assert displaced.is_dir()
+		assert not list(displaced.iterdir())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX retry uses directory permissions")
+def test_removal_rechecks_identity_after_permission_retry(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	temp_root = tmp_path / "temp"
+	workspace = temp_root / "qg-permission-retry"
+	workspace.mkdir(parents=True)
+	victim = workspace / "victim"
+	displaced = tmp_path / "displaced-original"
+	victim.write_text("owned", encoding="utf-8")
+	identity = victim.lstat()
+	original_rename = os.rename
+	replaced = False
+
+	def replace_before_retry(
+		source: str | os.PathLike[str],
+		destination: str | os.PathLike[str],
+		*,
+		src_dir_fd: int | None = None,
+		dst_dir_fd: int | None = None,
+	) -> None:
+		nonlocal replaced
+		if source == victim.name and not replaced:
+			victim.replace(displaced)
+			victim.write_text("foreign", encoding="utf-8")
+			replaced = True
+			raise PermissionError("simulated first rename failure")
+		original_rename(
+			source,
+			destination,
+			src_dir_fd=src_dir_fd,
+			dst_dir_fd=dst_dir_fd,
+		)
+
+	monkeypatch.setattr(temp_workspace.os, "rename", replace_before_retry)
+	with pytest.raises(OSError, match="changed"):
+		temp_workspace._remove_entry(victim, expected_identity=identity)
+
+	assert replaced
+	assert victim.read_text(encoding="utf-8") == "foreign"
+	assert displaced.read_text(encoding="utf-8") == "owned"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows deletion uses file-handle identity")
+def test_windows_removal_deletes_the_opened_identity_after_path_replacement(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	from ctypes import wintypes
+
+	temp_root = tmp_path / "temp"
+	workspace = temp_root / "qg-windows-race"
+	workspace.mkdir(parents=True)
+	victim = workspace / "victim"
+	displaced = tmp_path / "displaced-original"
+	victim.write_text("owned", encoding="utf-8")
+	identity = victim.lstat()
+	kernel32, advapi32 = temp_workspace._windows_security_api()
+	original_create_file = cast(Callable[..., object], kernel32.CreateFileW)
+	replaced = False
+
+	def open_then_replace(*arguments: object) -> object:
+		nonlocal replaced
+		handle = original_create_file(*arguments)
+		if handle not in (None, wintypes.HANDLE(-1).value):
+			victim.replace(displaced)
+			victim.write_text("foreign", encoding="utf-8")
+			replaced = True
+		return handle
+
+	class KernelProxy:
+		def __getattr__(self, name: str) -> object:
+			if name == "CreateFileW":
+				return open_then_replace
+			return getattr(kernel32, name)
+
+	monkeypatch.setattr(
+		temp_workspace,
+		"_windows_security_api",
+		lambda: (KernelProxy(), advapi32),
+	)
+	temp_workspace._remove_by_windows_handle(victim, identity, kind="file")
+
+	assert replaced
+	assert victim.read_text(encoding="utf-8") == "foreign"
+	assert not displaced.exists()
+
+
 @pytest.mark.parametrize("replacement_kind", ["file", "link"])
 def test_recursive_removal_preserves_a_nested_directory_replaced_before_reclamation(
 	tmp_path: Path,
@@ -466,7 +796,7 @@ def test_recursive_removal_preserves_a_nested_directory_replaced_before_reclamat
 		nonlocal nested_lstat_calls, replaced
 		if path == nested:
 			nested_lstat_calls += 1
-			if nested_lstat_calls == 2:
+			if nested_lstat_calls == _SECOND_NESTED_LSTAT_CALL:
 				path.replace(displaced)
 				if replacement_kind == "file":
 					path.write_text("foreign", encoding="utf-8")

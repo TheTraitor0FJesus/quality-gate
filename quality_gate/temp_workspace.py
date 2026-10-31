@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
+import hmac
 import json
 import os
 import stat
+import sys
 import tempfile
 import threading
 from collections.abc import Iterator
@@ -14,7 +17,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from importlib import import_module
 from pathlib import Path
-from typing import BinaryIO, Protocol, cast
+from typing import Any, BinaryIO, Protocol, cast
 
 from .path_safety import is_link_or_reparse, is_reparse_point
 
@@ -27,7 +30,44 @@ _OWNERSHIP_MARKER_NAME = ".quality-gate-workspace"
 _ROOT_CONTROL_FILE_NAMES = frozenset({_ACTIVE_LOCK_NAME, _OWNERSHIP_MARKER_NAME})
 _OWNERSHIP_MARKER_MAX_BYTES = 4096
 _OWNERSHIP_RECORD_PREFIX = ".quality-gate-owner-"
+_CLEANUP_RECORD_PREFIX = ".quality-gate-cleanup-record-"
 _OWNERSHIP_RECORD_MAX_BYTES = 4096
+_CLEANUP_AREA_NAME = ".quality-gate-cleanup"
+_CLEANUP_AREA_MARKER_NAME = ".quality-gate-cleanup-area"
+_OWNERSHIP_KEY_NAME = "temp-workspace.key"
+_OWNERSHIP_KEY_BYTES = 32
+_OWNERSHIP_KEY_MODE = 0o600
+_OWNERSHIP_RECORD_SCHEMA = 2
+_CLEANUP_RECORD_SCHEMA = 2
+_QUARANTINE_JOURNAL_MAX_BYTES = 4096
+_QUARANTINE_JOURNAL_SCHEMA = 1
+_WINDOWS_ACL_SIZE_INFORMATION = 2
+_WINDOWS_ACE_COUNT = 2
+_WINDOWS_ACE_ALLOW = 0
+_WINDOWS_ACE_INHERIT_FLAGS = 0x03
+_WINDOWS_ALL_ACCESS = 0x001F01FF
+_WINDOWS_LOCAL_SYSTEM_SID = "S-1-5-18"
+_WINDOWS_ERROR_ALREADY_EXISTS = 183
+_WINDOWS_DACL_SECURITY_INFORMATION = 0x00000004
+_WINDOWS_DACL_PROTECTED = 0x1000
+_WINDOWS_TOKEN_QUERY = 0x0008
+_WINDOWS_TOKEN_USER_INFORMATION = 1
+_WINDOWS_DELETE_ACCESS = 0x00010000
+_WINDOWS_READ_ATTRIBUTES_ACCESS = 0x00000080
+_WINDOWS_WRITE_ATTRIBUTES_ACCESS = 0x00000100
+_WINDOWS_SHARE_READ = 0x00000001
+_WINDOWS_SHARE_WRITE = 0x00000002
+_WINDOWS_SHARE_DELETE = 0x00000004
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_OPEN_REPARSE_POINT = 0x00200000
+_WINDOWS_BACKUP_SEMANTICS = 0x02000000
+_WINDOWS_FILE_ATTRIBUTE_READONLY = 0x00000001
+_WINDOWS_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+_WINDOWS_FILE_BASIC_INFORMATION = 0
+_WINDOWS_FILE_DISPOSITION_INFORMATION = 4
+_WINDOWS_FILE_ID_INFORMATION = 18
 _TEMP_ENVIRONMENT = ("TMP", "TEMP", "TMPDIR")
 _active_workspace: ContextVar[tuple[Path, Path] | None] = ContextVar(
 	"quality_gate_active_workspace", default=None
@@ -87,6 +127,398 @@ def _unlock(handle: BinaryIO) -> None:
 
 def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
 	return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _optional_os_flag(name: str) -> int:
+	return cast(int, getattr(os, name, 0))
+
+
+def _current_user_id() -> int:
+	get_uid_name = "getuid"
+	get_uid = cast(Any, getattr(os, get_uid_name))
+	return cast(int, get_uid())
+
+
+def _canonical_json(value: dict[str, object]) -> bytes:
+	return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _user_state_directory() -> Path:
+	if os.name == "nt":
+		base = os.environ.get("LOCALAPPDATA")
+		if not base:
+			base = str(Path.home() / "AppData" / "Local")
+	else:
+		base = os.environ.get("XDG_STATE_HOME")
+		if not base or not Path(base).is_absolute():
+			base = str(Path.home() / ".local" / "state")
+	return Path(base) / "quality-gate" / "temp-workspace"
+
+
+def _windows_security_api() -> tuple[Any, Any]:
+	loader_name = "WinDLL"
+	loader = cast(Any, getattr(ctypes, loader_name))
+	kernel32 = cast(Any, loader("kernel32", use_last_error=True))
+	advapi32 = cast(Any, loader("advapi32", use_last_error=True))
+	from ctypes import wintypes
+
+	get_process = cast(Any, kernel32.GetCurrentProcess)
+	get_process.restype = wintypes.HANDLE
+	create_file = cast(Any, kernel32.CreateFileW)
+	create_file.argtypes = [
+		wintypes.LPCWSTR,
+		wintypes.DWORD,
+		wintypes.DWORD,
+		ctypes.c_void_p,
+		wintypes.DWORD,
+		wintypes.DWORD,
+		wintypes.HANDLE,
+	]
+	create_file.restype = wintypes.HANDLE
+	get_file_information = cast(Any, kernel32.GetFileInformationByHandle)
+	get_file_information.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+	get_file_information.restype = wintypes.BOOL
+	get_file_information_ex = cast(Any, kernel32.GetFileInformationByHandleEx)
+	get_file_information_ex.argtypes = [
+		wintypes.HANDLE,
+		wintypes.DWORD,
+		ctypes.c_void_p,
+		wintypes.DWORD,
+	]
+	get_file_information_ex.restype = wintypes.BOOL
+	set_file_information = cast(Any, kernel32.SetFileInformationByHandle)
+	set_file_information.argtypes = [
+		wintypes.HANDLE,
+		wintypes.DWORD,
+		ctypes.c_void_p,
+		wintypes.DWORD,
+	]
+	set_file_information.restype = wintypes.BOOL
+	close_handle = cast(Any, kernel32.CloseHandle)
+	close_handle.argtypes = [wintypes.HANDLE]
+	close_handle.restype = wintypes.BOOL
+	local_free = cast(Any, kernel32.LocalFree)
+	local_free.argtypes = [ctypes.c_void_p]
+	local_free.restype = ctypes.c_void_p
+	return kernel32, advapi32
+
+
+def _windows_error(code: int | None = None) -> OSError:
+	win_error_name = "WinError"
+	last_error_name = "get_last_error"
+	win_error = cast(Any, getattr(ctypes, win_error_name))
+	get_last_error = cast(Any, getattr(ctypes, last_error_name))
+	return cast(OSError, win_error(get_last_error() if code is None else code))
+
+
+def _windows_user_sid() -> str:
+	from ctypes import wintypes
+
+	class SidAndAttributes(ctypes.Structure):
+		_fields_ = [("sid", ctypes.c_void_p), ("attributes", wintypes.DWORD)]
+
+	class TokenUser(ctypes.Structure):
+		_fields_ = [("user", SidAndAttributes)]
+
+	kernel32, advapi32 = _windows_security_api()
+	open_process_token = cast(Any, advapi32.OpenProcessToken)
+	open_process_token.argtypes = [
+		wintypes.HANDLE,
+		wintypes.DWORD,
+		ctypes.POINTER(wintypes.HANDLE),
+	]
+	open_process_token.restype = wintypes.BOOL
+	get_process = cast(Any, kernel32.GetCurrentProcess)
+	get_token_information = cast(Any, advapi32.GetTokenInformation)
+	get_token_information.argtypes = [
+		wintypes.HANDLE,
+		wintypes.DWORD,
+		ctypes.c_void_p,
+		wintypes.DWORD,
+		ctypes.POINTER(wintypes.DWORD),
+	]
+	get_token_information.restype = wintypes.BOOL
+	convert_sid = cast(Any, advapi32.ConvertSidToStringSidW)
+	convert_sid.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+	convert_sid.restype = wintypes.BOOL
+	close_handle = cast(Any, kernel32.CloseHandle)
+	local_free = cast(Any, kernel32.LocalFree)
+	token = wintypes.HANDLE()
+	if not open_process_token(get_process(), _WINDOWS_TOKEN_QUERY, ctypes.byref(token)):
+		raise _windows_error()
+	try:
+		required = wintypes.DWORD()
+		get_token_information(
+			token, _WINDOWS_TOKEN_USER_INFORMATION, None, 0, ctypes.byref(required)
+		)
+		buffer = (ctypes.c_byte * required.value)()
+		if not get_token_information(
+			token,
+			_WINDOWS_TOKEN_USER_INFORMATION,
+			ctypes.byref(buffer),
+			required.value,
+			ctypes.byref(required),
+		):
+			raise _windows_error()
+		user = ctypes.cast(ctypes.byref(buffer), ctypes.POINTER(TokenUser)).contents
+		sid_text = wintypes.LPWSTR()
+		if not convert_sid(user.user.sid, ctypes.byref(sid_text)):
+			raise _windows_error()
+		try:
+			return str(sid_text.value)
+		finally:
+			local_free(ctypes.cast(sid_text, ctypes.c_void_p))
+	finally:
+		close_handle(token)
+
+
+def _windows_directory_acl_is_private(path: Path) -> bool:
+	from ctypes import wintypes
+
+	kernel32, advapi32 = _windows_security_api()
+	get_named_security_info = cast(Any, advapi32.GetNamedSecurityInfoW)
+	get_descriptor_control = cast(Any, advapi32.GetSecurityDescriptorControl)
+	get_descriptor_dacl = cast(Any, advapi32.GetSecurityDescriptorDacl)
+	local_free = cast(Any, kernel32.LocalFree)
+	descriptor = ctypes.c_void_p()
+	dacl = ctypes.c_void_p()
+	status = get_named_security_info(
+		ctypes.c_wchar_p(str(path)),
+		1,
+		_WINDOWS_DACL_SECURITY_INFORMATION,
+		None,
+		None,
+		ctypes.byref(dacl),
+		None,
+		ctypes.byref(descriptor),
+	)
+	if status != 0:
+		return False
+	try:
+		control = wintypes.WORD()
+		revision = wintypes.DWORD()
+		present = wintypes.BOOL()
+		defaulted = wintypes.BOOL()
+		checked_dacl = ctypes.c_void_p()
+		if not get_descriptor_control(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+			return False
+		if not (control.value & _WINDOWS_DACL_PROTECTED) or not get_descriptor_dacl(
+			descriptor,
+			ctypes.byref(present),
+			ctypes.byref(checked_dacl),
+			ctypes.byref(defaulted),
+		):
+			return False
+		if not present.value or checked_dacl.value is None:
+			return False
+		return _windows_dacl_is_private(checked_dacl)
+	finally:
+		local_free(descriptor)
+
+
+def _windows_dacl_is_private(dacl: ctypes.c_void_p) -> bool:
+	from ctypes import wintypes
+
+	class AclSizeInformation(ctypes.Structure):
+		_fields_ = [
+			("ace_count", wintypes.DWORD),
+			("acl_bytes_in_use", wintypes.DWORD),
+			("acl_bytes_free", wintypes.DWORD),
+		]
+
+	class AceHeader(ctypes.Structure):
+		_fields_ = [
+			("ace_type", ctypes.c_ubyte),
+			("ace_flags", ctypes.c_ubyte),
+			("ace_size", wintypes.WORD),
+		]
+
+	kernel32, advapi32 = _windows_security_api()
+	get_acl_information = cast(Any, advapi32.GetAclInformation)
+	get_ace = cast(Any, advapi32.GetAce)
+	convert_sid = cast(Any, advapi32.ConvertSidToStringSidW)
+	local_free = cast(Any, kernel32.LocalFree)
+	acl_info = AclSizeInformation()
+	if not get_acl_information(
+		dacl, ctypes.byref(acl_info), ctypes.sizeof(acl_info), _WINDOWS_ACL_SIZE_INFORMATION
+	):
+		return False
+	if acl_info.ace_count != _WINDOWS_ACE_COUNT:
+		return False
+	aces: set[tuple[str, int, int]] = set()
+	for index in range(acl_info.ace_count):
+		ace = ctypes.c_void_p()
+		if not get_ace(dacl, index, ctypes.byref(ace)):
+			return False
+		header = ctypes.cast(ace, ctypes.POINTER(AceHeader)).contents
+		if header.ace_type != _WINDOWS_ACE_ALLOW or header.ace_flags != _WINDOWS_ACE_INHERIT_FLAGS:
+			return False
+		ace_address = ace.value
+		if ace_address is None:
+			return False
+		mask = ctypes.c_uint32.from_address(ace_address + ctypes.sizeof(AceHeader)).value
+		sid = ctypes.c_void_p(
+			ace_address + ctypes.sizeof(AceHeader) + ctypes.sizeof(wintypes.DWORD)
+		)
+		sid_text = wintypes.LPWSTR()
+		if not convert_sid(sid, ctypes.byref(sid_text)):
+			return False
+		try:
+			aces.add((str(sid_text.value), int(mask), int(header.ace_flags)))
+		finally:
+			local_free(ctypes.cast(sid_text, ctypes.c_void_p))
+	return aces == {
+		(_windows_user_sid(), _WINDOWS_ALL_ACCESS, _WINDOWS_ACE_INHERIT_FLAGS),
+		(_WINDOWS_LOCAL_SYSTEM_SID, _WINDOWS_ALL_ACCESS, _WINDOWS_ACE_INHERIT_FLAGS),
+	}
+
+
+def _ensure_private_directory(path: Path, *, restrict_existing: bool = False) -> os.stat_result:
+	path.parent.mkdir(parents=True, exist_ok=True)
+	if os.name == "nt":
+		return _ensure_windows_private_directory(path)
+	return _ensure_posix_private_directory(path, restrict_existing=restrict_existing)
+
+
+def _ensure_windows_private_directory(path: Path) -> os.stat_result:
+	from ctypes import wintypes
+
+	class SecurityAttributes(ctypes.Structure):
+		_fields_ = [
+			("length", wintypes.DWORD),
+			("security_descriptor", ctypes.c_void_p),
+			("inherit_handle", wintypes.BOOL),
+		]
+
+	kernel32, advapi32 = _windows_security_api()
+	convert_sddl = cast(Any, advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW)
+	create_directory = cast(Any, kernel32.CreateDirectoryW)
+	local_free = cast(Any, kernel32.LocalFree)
+	sddl = f"D:P(A;OICI;FA;;;{_windows_user_sid()})(A;OICI;FA;;;SY)"
+	descriptor = ctypes.c_void_p()
+	if not convert_sddl(ctypes.c_wchar_p(sddl), 1, ctypes.byref(descriptor), None):
+		raise _windows_error()
+	try:
+		attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+		if not create_directory(ctypes.c_wchar_p(str(path)), ctypes.byref(attributes)):
+			last_error_name = "get_last_error"
+			get_last_error = cast(Any, getattr(ctypes, last_error_name))
+			error = get_last_error()
+			if error != _WINDOWS_ERROR_ALREADY_EXISTS:
+				raise _windows_error(error)
+	finally:
+		local_free(descriptor)
+	metadata = path.lstat()
+	if is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+		raise OSError(f"private temporary directory is unsafe: {path}")
+	if not _windows_directory_acl_is_private(path):
+		raise OSError(f"private temporary directory ACL is unsafe: {path}")
+	return metadata
+
+
+def _ensure_posix_private_directory(path: Path, *, restrict_existing: bool) -> os.stat_result:
+	try:
+		path.mkdir(mode=0o700)
+	except FileExistsError:
+		pass
+	metadata = path.lstat()
+	if is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+		raise OSError(f"private temporary directory is unsafe: {path}")
+	if metadata.st_uid != _current_user_id():
+		raise OSError(f"private temporary directory has a foreign owner: {path}")
+	if stat.S_IMODE(metadata.st_mode) & 0o077 and restrict_existing:
+		os.chmod(path, 0o700)
+		metadata = path.lstat()
+	if stat.S_IMODE(metadata.st_mode) & 0o077:
+		raise OSError(f"private temporary directory permissions are unsafe: {path}")
+	return metadata
+
+
+def _ownership_key(*, create: bool) -> bytes | None:
+	path = _user_state_directory() / _OWNERSHIP_KEY_NAME
+	if create:
+		_ensure_private_directory(path.parent, restrict_existing=True)
+	key = _read_ownership_key(path)
+	if key is not None or not create:
+		return key
+	_create_ownership_key_file(path)
+	return _read_ownership_key(path)
+
+
+def _create_ownership_key_file(path: Path) -> None:
+	key = os.urandom(_OWNERSHIP_KEY_BYTES)
+	try:
+		descriptor = os.open(
+			path,
+			os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+			_OWNERSHIP_KEY_MODE,
+		)
+	except FileExistsError:
+		return
+	with os.fdopen(descriptor, "wb") as stream:
+		stream.write(key)
+		stream.flush()
+		os.fsync(stream.fileno())
+
+
+def _read_ownership_key(path: Path) -> bytes | None:
+	try:
+		metadata = path.lstat()
+	except FileNotFoundError:
+		return None
+	if not _plain_lock_file(path, metadata) or metadata.st_size != _OWNERSHIP_KEY_BYTES:
+		raise OSError(f"temporary workspace ownership key is unsafe: {path}")
+	if os.name != "nt":
+		if metadata.st_uid != _current_user_id():
+			raise OSError(f"temporary workspace ownership key has a foreign owner: {path}")
+		if stat.S_IMODE(metadata.st_mode) != _OWNERSHIP_KEY_MODE:
+			os.chmod(path, _OWNERSHIP_KEY_MODE)
+			metadata = path.lstat()
+			if stat.S_IMODE(metadata.st_mode) != _OWNERSHIP_KEY_MODE:
+				raise OSError(f"temporary workspace ownership key permissions are unsafe: {path}")
+	try:
+		with path.open("rb") as stream:
+			opened = os.fstat(stream.fileno())
+			if not _same_file_identity(metadata, opened) or not _plain_lock_file(path, opened):
+				return None
+			key = stream.read(_OWNERSHIP_KEY_BYTES + 1)
+		current = path.lstat()
+	except OSError:
+		return None
+	if (
+		len(key) != _OWNERSHIP_KEY_BYTES
+		or not _same_file_identity(metadata, current)
+		or not _plain_lock_file(path, current)
+	):
+		return None
+	return key
+
+
+def _signed_record(payload: dict[str, object], *, create_key: bool) -> bytes | None:
+	key = _ownership_key(create=create_key)
+	if key is None:
+		return None
+	signature = hmac.new(key, _canonical_json(payload), hashlib.sha256).hexdigest()
+	return _canonical_json({**payload, "signature": signature})
+
+
+def _valid_signed_record(content: bytes) -> dict[str, object] | None:
+	try:
+		record = json.loads(content)
+	except (json.JSONDecodeError, UnicodeDecodeError):
+		return None
+	if not isinstance(record, dict) or not isinstance(record.get("signature"), str):
+		return None
+	if content != _canonical_json(record):
+		return None
+	payload = {key: value for key, value in record.items() if key != "signature"}
+	key = _ownership_key(create=False)
+	if key is None:
+		return None
+	expected = hmac.new(key, _canonical_json(payload), hashlib.sha256).hexdigest()
+	if not hmac.compare_digest(record["signature"], expected):
+		return None
+	return payload
 
 
 def _plain_lock_file(path: Path, metadata: os.stat_result) -> bool:
@@ -272,77 +704,700 @@ def _check_ordinary_directory(path: Path, *, allow_missing: bool = False) -> os.
 	return metadata
 
 
-def _remove_link(path: Path, metadata: os.stat_result) -> None:
-	current = path.lstat()
-	if not _same_file_identity(metadata, current):
-		raise OSError(f"temporary workspace link changed before removal: {path}")
-	if stat.S_ISDIR(metadata.st_mode):
-		path.rmdir()
+def _temporary_root_for_entry(path: Path) -> Path:
+	if path.name.startswith((_OWNERSHIP_RECORD_PREFIX, _CLEANUP_RECORD_PREFIX)):
+		return path.parent
+	workspace_directories = [
+		candidate for candidate in (path, *path.parents) if candidate.name.startswith("qg-")
+	]
+	managed_workspace = next(
+		(
+			candidate
+			for candidate in workspace_directories
+			if candidate.parent.name == TEMP_DIRECTORY_NAME
+		),
+		None,
+	)
+	if managed_workspace is not None:
+		return managed_workspace.parent
+	if workspace_directories:
+		return workspace_directories[-1].parent
+	raise OSError(f"temporary workspace entry has no managed root: {path}")
+
+
+def _cleanup_area_marker(temp_root: Path, identity: os.stat_result) -> bytes:
+	payload: dict[str, object] = {
+		"device": identity.st_dev,
+		"format": "quality-gate-temp-workspace-cleanup-area",
+		"inode": identity.st_ino,
+		"root": os.path.normcase(os.path.abspath(temp_root)),
+		"schema": 1,
+	}
+	marker = _signed_record(payload, create_key=True)
+	if marker is None:
+		raise OSError(f"temporary workspace signing key is unavailable: {temp_root}")
+	return marker
+
+
+def _open_cleanup_area(temp_root: Path) -> tuple[Path, int]:
+	_check_ordinary_directory(temp_root)
+	area = temp_root / _CLEANUP_AREA_NAME
+	identity = _ensure_private_directory(area)
+	expected_marker = _cleanup_area_marker(temp_root, identity)
+	marker = area / _CLEANUP_AREA_MARKER_NAME
+	try:
+		with marker.open("xb") as stream:
+			stream.write(expected_marker)
+			stream.flush()
+			os.fsync(stream.fileno())
+	except FileExistsError:
+		pass
+	marker_identity = marker.lstat()
+	if (
+		not _plain_lock_file(marker, marker_identity)
+		or marker_identity.st_size > _OWNERSHIP_RECORD_MAX_BYTES
+	):
+		raise OSError(f"temporary workspace cleanup area marker is unsafe: {marker}")
+	with marker.open("rb") as stream:
+		opened = os.fstat(stream.fileno())
+		if not _same_file_identity(marker_identity, opened) or not _plain_lock_file(marker, opened):
+			raise OSError(f"temporary workspace cleanup area marker changed: {marker}")
+		content = stream.read(_OWNERSHIP_RECORD_MAX_BYTES + 1)
+	if content != expected_marker or not _same_file_identity(marker_identity, marker.lstat()):
+		raise OSError(f"temporary workspace cleanup area marker is not authentic: {marker}")
+	if os.name == "nt":
+		return area, -1
+	flags = os.O_RDONLY | _optional_os_flag("O_DIRECTORY") | _optional_os_flag("O_NOFOLLOW")
+	descriptor = os.open(area, flags)
+	opened_area = os.fstat(descriptor)
+	current_area = area.lstat()
+	if not _same_file_identity(identity, opened_area) or not _same_file_identity(
+		identity, current_area
+	):
+		os.close(descriptor)
+		raise OSError(f"temporary workspace cleanup area changed: {area}")
+	os.fsync(descriptor)
+	_recover_quarantined_entries(temp_root, descriptor)
+	return area, descriptor
+
+
+def _recover_quarantined_entries(temp_root: Path, cleanup_descriptor: int) -> None:
+	for name in os.listdir(cleanup_descriptor):
+		if not name.startswith("pending-") or not name.endswith(".json"):
+			continue
+		_recover_quarantined_entry(temp_root, name, cleanup_descriptor)
+
+
+def _recover_quarantined_entry(temp_root: Path, journal_name: str, cleanup_descriptor: int) -> None:
+	journal_identity, payload = _read_quarantine_journal(cleanup_descriptor, journal_name)
+	if payload is None or payload["root"] != os.path.normcase(os.path.abspath(temp_root)):
+		return
+	quarantine_name = payload["quarantine"]
+	if not isinstance(quarantine_name, str):
+		return
+	try:
+		metadata = os.stat(quarantine_name, dir_fd=cleanup_descriptor, follow_symlinks=False)
+	except FileNotFoundError:
+		_remove_quarantine_journal(journal_name, journal_identity, cleanup_descriptor)
+		return
+	expected_identity = (cast(int, payload["device"]), cast(int, payload["inode"]))
+	if (metadata.st_dev, metadata.st_ino) != expected_identity:
+		_remove_restored_quarantine_journal(
+			temp_root, payload, journal_name, journal_identity, quarantine_name, cleanup_descriptor
+		)
+		return
+	if not _quarantined_kind_matches(metadata, str(payload["kind"])):
+		return
+	try:
+		_delete_quarantined_entry(quarantine_name, str(payload["kind"]), cleanup_descriptor)
+	except OSError:
+		_remove_restored_quarantine_journal(
+			temp_root, payload, journal_name, journal_identity, quarantine_name, cleanup_descriptor
+		)
+		return
+	os.fsync(cleanup_descriptor)
+	_remove_quarantine_journal(journal_name, journal_identity, cleanup_descriptor)
+
+
+def _delete_quarantined_entry(name: str, kind: str, cleanup_descriptor: int) -> None:
+	if kind == "directory":
+		os.rmdir(name, dir_fd=cleanup_descriptor)
 	else:
-		path.unlink()
+		os.unlink(name, dir_fd=cleanup_descriptor)
+
+
+def _remove_restored_quarantine_journal(
+	temp_root: Path,
+	payload: dict[str, object],
+	journal_name: str,
+	journal_identity: os.stat_result | None,
+	quarantine_name: str,
+	cleanup_descriptor: int,
+) -> None:
+	if _restore_pending_quarantined_entry(temp_root, payload, quarantine_name, cleanup_descriptor):
+		_remove_quarantine_journal(journal_name, journal_identity, cleanup_descriptor)
+
+
+def _restore_pending_quarantined_entry(
+	temp_root: Path,
+	payload: dict[str, object],
+	quarantine_name: str,
+	cleanup_descriptor: int,
+) -> bool:
+	try:
+		parent_relative = Path(str(payload["parent"]))
+		parent_path = temp_root / parent_relative
+		parent_identity = (
+			cast(int, payload["parent_device"]),
+			cast(int, payload["parent_inode"]),
+		)
+		parent = os.open(
+			parent_path,
+			os.O_RDONLY | _optional_os_flag("O_DIRECTORY") | _optional_os_flag("O_NOFOLLOW"),
+		)
+	except (OSError, TypeError, ValueError):
+		return False
+	try:
+		opened_parent = os.fstat(parent)
+		if (opened_parent.st_dev, opened_parent.st_ino) != parent_identity:
+			return False
+		_restore_quarantined_entry(
+			Path(str(payload["name"])),
+			quarantine_name,
+			parent,
+			cleanup_descriptor,
+		)
+		os.fsync(parent)
+		os.fsync(cleanup_descriptor)
+		return True
+	except OSError:
+		return False
+	finally:
+		os.close(parent)
+
+
+def _remove_quarantine_journal(
+	name: str, expected_identity: os.stat_result | None, cleanup_descriptor: int
+) -> None:
+	if expected_identity is None:
+		return
+	try:
+		current = os.stat(name, dir_fd=cleanup_descriptor, follow_symlinks=False)
+	except FileNotFoundError:
+		return
+	if _same_file_identity(expected_identity, current):
+		os.unlink(name, dir_fd=cleanup_descriptor)
+		os.fsync(cleanup_descriptor)
+
+
+def _write_quarantine_journal(
+	temp_root: Path,
+	path: Path,
+	expected_identity: os.stat_result,
+	parent_identity: os.stat_result,
+	kind: str,
+	token: str,
+	quarantine_name: str,
+	cleanup_descriptor: int,
+) -> tuple[str, os.stat_result]:
+	journal_name = f"pending-{token}.json"
+	parent_relative = path.parent.relative_to(temp_root).as_posix()
+	payload: dict[str, object] = {
+		"device": expected_identity.st_dev,
+		"format": "quality-gate-temp-workspace-quarantine",
+		"inode": expected_identity.st_ino,
+		"kind": kind,
+		"name": path.name,
+		"parent": parent_relative,
+		"parent_device": parent_identity.st_dev,
+		"parent_inode": parent_identity.st_ino,
+		"quarantine": quarantine_name,
+		"root": os.path.normcase(os.path.abspath(temp_root)),
+		"schema": 1,
+		"token": token,
+	}
+	content = _signed_record(payload, create_key=False)
+	if content is None:
+		raise OSError(f"temporary workspace quarantine key is unavailable: {path}")
+	flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _optional_os_flag("O_NOFOLLOW")
+	descriptor = os.open(journal_name, flags, 0o600, dir_fd=cleanup_descriptor)
+	created_identity = os.fstat(descriptor)
+	try:
+		with os.fdopen(descriptor, "wb") as stream:
+			stream.write(content)
+			stream.flush()
+			os.fsync(stream.fileno())
+		os.fsync(cleanup_descriptor)
+		return journal_name, created_identity
+	except OSError:
+		_remove_quarantine_journal(journal_name, created_identity, cleanup_descriptor)
+		raise
+
+
+def _quarantined_kind_matches(metadata: os.stat_result, kind: str) -> bool:
+	if kind == "link":
+		return is_link_or_reparse(metadata)
+	if kind == "directory":
+		return stat.S_ISDIR(metadata.st_mode) and not is_link_or_reparse(metadata)
+	return (
+		kind == "file" and not stat.S_ISDIR(metadata.st_mode) and not is_link_or_reparse(metadata)
+	)
+
+
+def _read_quarantine_journal(
+	cleanup_descriptor: int, name: str
+) -> tuple[os.stat_result | None, dict[str, object] | None]:
+	try:
+		metadata = os.stat(name, dir_fd=cleanup_descriptor, follow_symlinks=False)
+		if (
+			not stat.S_ISREG(metadata.st_mode)
+			or metadata.st_nlink != 1
+			or metadata.st_size > _QUARANTINE_JOURNAL_MAX_BYTES
+		):
+			return metadata, None
+		descriptor = os.open(
+			name,
+			os.O_RDONLY | _optional_os_flag("O_NOFOLLOW"),
+			dir_fd=cleanup_descriptor,
+		)
+		with os.fdopen(descriptor, "rb") as stream:
+			opened = os.fstat(stream.fileno())
+			if not _same_file_identity(metadata, opened):
+				return metadata, None
+			content = stream.read(_QUARANTINE_JOURNAL_MAX_BYTES + 1)
+			current = os.stat(name, dir_fd=cleanup_descriptor, follow_symlinks=False)
+	except OSError:
+		return None, None
+	if len(content) > _QUARANTINE_JOURNAL_MAX_BYTES or not _same_file_identity(metadata, current):
+		return metadata, None
+	payload = _valid_signed_record(content)
+	if payload is None or set(payload) != {
+		"device",
+		"format",
+		"inode",
+		"kind",
+		"name",
+		"parent",
+		"parent_device",
+		"parent_inode",
+		"quarantine",
+		"root",
+		"schema",
+		"token",
+	}:
+		return metadata, None
+	token = name.removeprefix("pending-").removesuffix(".json")
+	if (
+		payload["format"] != "quality-gate-temp-workspace-quarantine"
+		or payload["schema"] != _QUARANTINE_JOURNAL_SCHEMA
+		or payload["token"] != token
+		or type(payload["device"]) is not int
+		or cast(int, payload["device"]) < 0
+		or type(payload["inode"]) is not int
+		or cast(int, payload["inode"]) < 0
+		or type(payload["parent_device"]) is not int
+		or cast(int, payload["parent_device"]) < 0
+		or type(payload["parent_inode"]) is not int
+		or cast(int, payload["parent_inode"]) < 0
+		or type(payload["schema"]) is not int
+		or cast(int, payload["schema"]) != _QUARANTINE_JOURNAL_SCHEMA
+		or not isinstance(payload["kind"], str)
+		or payload["kind"] not in {"file", "link", "directory"}
+		or not isinstance(payload["name"], str)
+		or not payload["name"]
+		or Path(payload["name"]).name != payload["name"]
+		or not isinstance(payload["parent"], str)
+		or Path(payload["parent"]).is_absolute()
+		or ".." in Path(payload["parent"]).parts
+		or not isinstance(payload["root"], str)
+		or not isinstance(payload["quarantine"], str)
+	):
+		return metadata, None
+	expected_quarantine_name = (
+		f"entry-{cast(int, payload['device']):x}-{cast(int, payload['inode']):x}-{token}"
+	)
+	if payload["quarantine"] != expected_quarantine_name:
+		return metadata, None
+	return metadata, payload
+
+
+def _rename_entry_to_cleanup_area(
+	path: Path,
+	quarantine_name: str,
+	parent_descriptor: int,
+	cleanup_descriptor: int,
+) -> None:
+	try:
+		os.rename(
+			path.name,
+			quarantine_name,
+			src_dir_fd=parent_descriptor,
+			dst_dir_fd=cleanup_descriptor,
+		)
+	except PermissionError:
+		parent_mode = os.fstat(parent_descriptor).st_mode
+		fchmod_name = "fchmod"
+		fchmod = cast(Any, getattr(os, fchmod_name))
+		fchmod(parent_descriptor, stat.S_IMODE(parent_mode) | stat.S_IWUSR | stat.S_IXUSR)
+		os.rename(
+			path.name,
+			quarantine_name,
+			src_dir_fd=parent_descriptor,
+			dst_dir_fd=cleanup_descriptor,
+		)
+
+
+def _rename_without_replacement(
+	source_name: str,
+	destination_name: str,
+	source_descriptor: int,
+	destination_descriptor: int,
+) -> None:
+	result: int
+	if sys.platform.startswith("linux"):
+		libc = cast(Any, ctypes.CDLL(None, use_errno=True))
+		renameat2 = cast(Any, libc.renameat2)
+		result = renameat2(
+			source_descriptor,
+			os.fsencode(source_name),
+			destination_descriptor,
+			os.fsencode(destination_name),
+			1,
+		)
+	elif sys.platform == "darwin":
+		libc = cast(Any, ctypes.CDLL(None, use_errno=True))
+		renameatx = cast(Any, libc.renameatx_np)
+		result = renameatx(
+			source_descriptor,
+			os.fsencode(source_name),
+			destination_descriptor,
+			os.fsencode(destination_name),
+			0x00000004,
+		)
+	else:
+		raise OSError("safe recovery of a replaced temporary entry is unavailable on this platform")
+	if result != 0:
+		error = ctypes.get_errno()
+		raise OSError(error, os.strerror(error), destination_name)
+
+
+def _restore_quarantined_entry(
+	path: Path,
+	quarantine_name: str,
+	parent_descriptor: int,
+	cleanup_descriptor: int,
+) -> None:
+	_rename_without_replacement(quarantine_name, path.name, cleanup_descriptor, parent_descriptor)
+
+
+def _remove_by_quarantine(
+	path: Path,
+	expected_identity: os.stat_result,
+	*,
+	kind: str,
+) -> None:
+	if os.name == "nt":
+		_remove_by_windows_handle(path, expected_identity, kind=kind)
+		return
+	_remove_by_posix_quarantine(path, expected_identity, kind=kind)
+
+
+def _remove_by_posix_quarantine(
+	path: Path,
+	expected_identity: os.stat_result,
+	*,
+	kind: str,
+) -> None:
+	root = _temporary_root_for_entry(path)
+	parent_identity = path.parent.lstat()
+	if is_link_or_reparse(parent_identity) or not stat.S_ISDIR(parent_identity.st_mode):
+		raise OSError(f"temporary workspace parent changed before removal: {path.parent}")
+	flags = os.O_RDONLY | _optional_os_flag("O_DIRECTORY") | _optional_os_flag("O_NOFOLLOW")
+	parent_descriptor = os.open(path.parent, flags)
+	try:
+		if not _same_file_identity(parent_identity, os.fstat(parent_descriptor)):
+			raise OSError(f"temporary workspace parent changed before removal: {path.parent}")
+		current = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+		if not _same_file_identity(expected_identity, current):
+			raise OSError(f"temporary workspace identity changed before removal: {path}")
+		_area, cleanup_descriptor = _open_cleanup_area(root)
+		try:
+			_remove_quarantined_entry(
+				root,
+				path,
+				expected_identity,
+				parent_identity,
+				kind,
+				parent_descriptor,
+				cleanup_descriptor,
+			)
+		finally:
+			os.close(cleanup_descriptor)
+	finally:
+		os.close(parent_descriptor)
+
+
+def _remove_quarantined_entry(
+	temp_root: Path,
+	path: Path,
+	expected_identity: os.stat_result,
+	parent_identity: os.stat_result,
+	kind: str,
+	parent_descriptor: int,
+	cleanup_descriptor: int,
+) -> None:
+	token = os.urandom(16).hex()
+	quarantine_name = f"entry-{expected_identity.st_dev:x}-{expected_identity.st_ino:x}-{token}"
+	journal_name, journal_identity = _write_quarantine_journal(
+		temp_root,
+		path,
+		expected_identity,
+		parent_identity,
+		kind,
+		token,
+		quarantine_name,
+		cleanup_descriptor,
+	)
+	try:
+		_rename_entry_to_cleanup_area(path, quarantine_name, parent_descriptor, cleanup_descriptor)
+	except OSError:
+		_remove_quarantine_journal(journal_name, journal_identity, cleanup_descriptor)
+		raise
+	moved = os.stat(quarantine_name, dir_fd=cleanup_descriptor, follow_symlinks=False)
+	if not _same_file_identity(expected_identity, moved) or not _quarantined_kind_matches(
+		moved, kind
+	):
+		_restore_quarantined_entry(path, quarantine_name, parent_descriptor, cleanup_descriptor)
+		os.fsync(parent_descriptor)
+		os.fsync(cleanup_descriptor)
+		_remove_quarantine_journal(journal_name, journal_identity, cleanup_descriptor)
+		raise OSError(f"temporary workspace entry changed during removal: {path}")
+	try:
+		_delete_quarantined_entry(quarantine_name, kind, cleanup_descriptor)
+		os.fsync(cleanup_descriptor)
+	except OSError:
+		_restore_failed_quarantine(path, quarantine_name, parent_descriptor, cleanup_descriptor)
+		_remove_quarantine_journal(journal_name, journal_identity, cleanup_descriptor)
+		raise
+	_remove_quarantine_journal(journal_name, journal_identity, cleanup_descriptor)
+
+
+def _restore_failed_quarantine(
+	path: Path,
+	quarantine_name: str,
+	parent_descriptor: int,
+	cleanup_descriptor: int,
+) -> None:
+	try:
+		_restore_quarantined_entry(path, quarantine_name, parent_descriptor, cleanup_descriptor)
+		os.fsync(parent_descriptor)
+		os.fsync(cleanup_descriptor)
+	except OSError as restore_error:
+		raise OSError(
+			f"temporary workspace entry could not be restored from cleanup area: {path}"
+		) from restore_error
+
+
+def _open_windows_removal_handle(path: Path, kernel32: object) -> int:
+	from ctypes import wintypes
+
+	api = cast(Any, kernel32)
+	handle = api.CreateFileW(
+		ctypes.c_wchar_p(str(path)),
+		_WINDOWS_DELETE_ACCESS | _WINDOWS_READ_ATTRIBUTES_ACCESS | _WINDOWS_WRITE_ATTRIBUTES_ACCESS,
+		_WINDOWS_SHARE_READ | _WINDOWS_SHARE_WRITE | _WINDOWS_SHARE_DELETE,
+		None,
+		_WINDOWS_OPEN_EXISTING,
+		_WINDOWS_OPEN_REPARSE_POINT | _WINDOWS_BACKUP_SEMANTICS,
+		None,
+	)
+	if handle == wintypes.HANDLE(-1).value:
+		raise _windows_error()
+	return cast(int, handle)
+
+
+def _windows_file_identity(
+	handle: int, kernel32: object
+) -> tuple[tuple[int, int], tuple[int, int] | None, int]:
+	from ctypes import wintypes
+
+	class ByHandleFileInformation(ctypes.Structure):
+		_fields_ = [
+			("attributes", wintypes.DWORD),
+			("creation_time_low", wintypes.DWORD),
+			("creation_time_high", wintypes.DWORD),
+			("last_access_low", wintypes.DWORD),
+			("last_access_high", wintypes.DWORD),
+			("last_write_low", wintypes.DWORD),
+			("last_write_high", wintypes.DWORD),
+			("volume_serial", wintypes.DWORD),
+			("size_high", wintypes.DWORD),
+			("size_low", wintypes.DWORD),
+			("links", wintypes.DWORD),
+			("index_high", wintypes.DWORD),
+			("index_low", wintypes.DWORD),
+		]
+
+	class FileIdentifier(ctypes.Structure):
+		_fields_ = [("low", ctypes.c_uint64), ("high", ctypes.c_uint64)]
+
+	class FileIdInformation(ctypes.Structure):
+		_fields_ = [
+			("volume_serial", ctypes.c_uint64),
+			("file_id", FileIdentifier),
+		]
+
+	information = ByHandleFileInformation()
+	api = cast(Any, kernel32)
+	get_file_information = api.GetFileInformationByHandle
+	if not get_file_information(handle, ctypes.byref(information)):
+		raise _windows_error()
+	legacy_identity = (
+		int(information.volume_serial),
+		(int(information.index_high) << 32) | int(information.index_low),
+	)
+	file_id_information = FileIdInformation()
+	get_file_information_ex = api.GetFileInformationByHandleEx
+	modern_identity: tuple[int, int] | None = None
+	if get_file_information_ex(
+		handle,
+		_WINDOWS_FILE_ID_INFORMATION,
+		ctypes.byref(file_id_information),
+		ctypes.sizeof(file_id_information),
+	):
+		modern_file_id = int(file_id_information.file_id.low) | (
+			int(file_id_information.file_id.high) << 64
+		)
+		modern_identity = (int(file_id_information.volume_serial), modern_file_id)
+	return legacy_identity, modern_identity, int(information.attributes)
+
+
+def _validate_windows_removal_identity(
+	path: Path,
+	expected_identity: os.stat_result,
+	kind: str,
+	legacy_identity: tuple[int, int],
+	modern_identity: tuple[int, int] | None,
+	attributes: int,
+) -> None:
+	expected_file_identity = (expected_identity.st_dev, expected_identity.st_ino)
+	if expected_file_identity not in {legacy_identity, modern_identity}:
+		raise OSError(
+			f"temporary workspace identity changed before removal: {path}; "
+			f"expected {expected_file_identity}, opened {legacy_identity} / {modern_identity}"
+		)
+	reparse = bool(attributes & _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT)
+	is_directory = bool(attributes & _WINDOWS_FILE_ATTRIBUTE_DIRECTORY)
+	expected_type = (
+		(kind == "link" and reparse)
+		or (kind == "directory" and is_directory)
+		or (kind == "file" and not reparse and not is_directory)
+	)
+	if not expected_type:
+		raise OSError(f"temporary workspace entry type changed before removal: {path}")
+
+
+def _clear_windows_readonly_attribute(handle: int, attributes: int, kernel32: object) -> None:
+	from ctypes import wintypes
+
+	class FileBasicInformation(ctypes.Structure):
+		_fields_ = [
+			("creation_time", ctypes.c_longlong),
+			("last_access_time", ctypes.c_longlong),
+			("last_write_time", ctypes.c_longlong),
+			("change_time", ctypes.c_longlong),
+			("attributes", wintypes.DWORD),
+		]
+
+	if not attributes & _WINDOWS_FILE_ATTRIBUTE_READONLY:
+		return
+	api = cast(Any, kernel32)
+	get_file_information = api.GetFileInformationByHandleEx
+	set_file_information = api.SetFileInformationByHandle
+	basic = FileBasicInformation()
+	if not get_file_information(
+		handle,
+		_WINDOWS_FILE_BASIC_INFORMATION,
+		ctypes.byref(basic),
+		ctypes.sizeof(basic),
+	):
+		raise _windows_error()
+	basic.attributes &= ~_WINDOWS_FILE_ATTRIBUTE_READONLY
+	if basic.attributes == 0:
+		basic.attributes = _WINDOWS_FILE_ATTRIBUTE_NORMAL
+	if not set_file_information(
+		handle,
+		_WINDOWS_FILE_BASIC_INFORMATION,
+		ctypes.byref(basic),
+		ctypes.sizeof(basic),
+	):
+		raise _windows_error()
+
+
+def _mark_windows_handle_for_deletion(handle: int, kernel32: object) -> None:
+	from ctypes import wintypes
+
+	class FileDispositionInformation(ctypes.Structure):
+		_fields_ = [("delete_file", wintypes.BOOLEAN)]
+
+	disposition = FileDispositionInformation(True)
+	set_file_information = cast(Any, kernel32).SetFileInformationByHandle
+	if not set_file_information(
+		handle,
+		_WINDOWS_FILE_DISPOSITION_INFORMATION,
+		ctypes.byref(disposition),
+		ctypes.sizeof(disposition),
+	):
+		raise _windows_error()
+
+
+def _remove_by_windows_handle(path: Path, expected_identity: os.stat_result, *, kind: str) -> None:
+	kernel32, _advapi32 = _windows_security_api()
+	handle = _open_windows_removal_handle(path, kernel32)
+	try:
+		legacy_identity, modern_identity, attributes = _windows_file_identity(handle, kernel32)
+		_validate_windows_removal_identity(
+			path, expected_identity, kind, legacy_identity, modern_identity, attributes
+		)
+		_clear_windows_readonly_attribute(handle, attributes, kernel32)
+		_mark_windows_handle_for_deletion(handle, kernel32)
+	finally:
+		cast(Any, kernel32).CloseHandle(handle)
+
+
+def _remove_link(path: Path, metadata: os.stat_result) -> None:
+	_remove_by_quarantine(path, metadata, kind="link")
 
 
 def _remove_file(path: Path, expected_identity: os.stat_result) -> None:
-	metadata = path.lstat()
-	if not _same_file_identity(expected_identity, metadata):
-		raise OSError(f"temporary workspace file changed before removal: {path}")
-	try:
-		path.unlink()
-	except PermissionError:
-		metadata = path.lstat()
-		if (
-			not _same_file_identity(expected_identity, metadata)
-			or is_link_or_reparse(metadata)
-			or not stat.S_ISREG(metadata.st_mode)
-		):
-			raise
-		os.chmod(path, stat.S_IWRITE)
-		metadata = path.lstat()
-		if (
-			not _same_file_identity(expected_identity, metadata)
-			or is_link_or_reparse(metadata)
-			or not stat.S_ISREG(metadata.st_mode)
-		):
-			raise OSError(f"temporary workspace file changed before removal: {path}") from None
-		path.unlink()
+	_remove_by_quarantine(path, expected_identity, kind="file")
 
 
 def _remove_directory(path: Path, *, expected_identity: os.stat_result) -> None:
-	metadata = path.lstat()
-	if not _same_file_identity(expected_identity, metadata):
-		raise OSError(f"temporary workspace directory changed before removal: {path}")
-	try:
-		path.rmdir()
-	except PermissionError:
-		metadata = path.lstat()
-		if (
-			not _same_file_identity(expected_identity, metadata)
-			or is_link_or_reparse(metadata)
-			or not stat.S_ISDIR(metadata.st_mode)
-		):
-			raise
-		os.chmod(path, stat.S_IWRITE)
-		metadata = path.lstat()
-		if (
-			not _same_file_identity(expected_identity, metadata)
-			or is_link_or_reparse(metadata)
-			or not stat.S_ISDIR(metadata.st_mode)
-		):
-			raise OSError(f"temporary workspace directory changed before removal: {path}") from None
-		path.rmdir()
+	_remove_by_quarantine(path, expected_identity, kind="directory")
 
 
 def _clean_stale_entries(temp_root: Path) -> None:
+	seen: set[str] = set()
 	for owner_record in tuple(temp_root.iterdir()):
 		entry = _run_directory_from_owner_record(temp_root, owner_record)
-		if entry is not None:
+		if entry is not None and entry.name not in seen:
+			seen.add(entry.name)
 			_reclaim_stale_workspace(temp_root, entry)
 
 
 def _run_directory_from_owner_record(temp_root: Path, owner_record: Path) -> Path | None:
-	if not owner_record.name.startswith(_OWNERSHIP_RECORD_PREFIX):
+	prefix = next(
+		(
+			candidate
+			for candidate in (_OWNERSHIP_RECORD_PREFIX, _CLEANUP_RECORD_PREFIX)
+			if owner_record.name.startswith(candidate)
+		),
+		None,
+	)
+	if prefix is None:
 		return None
-	run_name = owner_record.name.removeprefix(_OWNERSHIP_RECORD_PREFIX)
+	run_name = owner_record.name.removeprefix(prefix)
 	if not run_name.startswith("qg-") or Path(run_name).name != run_name:
 		return None
 	return temp_root / run_name
@@ -354,80 +1409,112 @@ def _reclaim_stale_workspace(temp_root: Path, entry: Path) -> None:
 	except FileNotFoundError:
 		_remove_orphan_ownership_record(temp_root, entry)
 		return
-	if not _is_owned_workspace(temp_root, entry, metadata):
+	if is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
 		return
 	owner_valid, owner_identity = _has_valid_ownership_record(temp_root, entry, metadata)
 	if not owner_valid or owner_identity is None:
 		return
-	if not _can_reclaim_workspace(temp_root, entry, metadata, owner_identity):
+	cleanup_valid, cleanup_identity, active_identity, marker_identity = _has_valid_cleanup_record(
+		temp_root, entry, metadata
+	)
+	if cleanup_identity is not None and not cleanup_valid:
+		return
+	cleanup_controls = (
+		(active_identity, marker_identity)
+		if active_identity is not None and marker_identity is not None
+		else None
+	)
+	can_reclaim, cleanup_identity, cleanup_controls = _can_reclaim_workspace(
+		temp_root,
+		entry,
+		metadata,
+		owner_identity,
+		cleanup_identity=cleanup_identity,
+		cleanup_controls=cleanup_controls,
+	)
+	if not can_reclaim or cleanup_identity is None or cleanup_controls is None:
 		return
 	try:
 		_remove_entry(entry, expected_identity=metadata)
 	except OSError:
 		return
+	_remove_cleanup_record(temp_root, entry, metadata, expected_record=cleanup_identity)
 	_remove_ownership_record(temp_root, entry, metadata, expected_record=owner_identity)
 
 
 def _remove_orphan_ownership_record(temp_root: Path, run_directory: Path) -> None:
-	path = _ownership_record_path(temp_root, run_directory)
-	try:
-		metadata = path.lstat()
-		if not _plain_lock_file(path, metadata) or metadata.st_size > _OWNERSHIP_RECORD_MAX_BYTES:
-			return
-		with path.open("rb") as stream:
-			opened = os.fstat(stream.fileno())
-			if not _same_file_identity(metadata, opened) or not _plain_lock_file(path, opened):
-				return
-			content = stream.read(_OWNERSHIP_RECORD_MAX_BYTES + 1)
-		current = path.lstat()
-	except OSError:
-		return
-	if (
-		len(content) > _OWNERSHIP_RECORD_MAX_BYTES
-		or not _same_file_identity(metadata, current)
-		or not _plain_lock_file(path, current)
+	for path, expected_format, expected_schema in (
+		(
+			_ownership_record_path(temp_root, run_directory),
+			"quality-gate-temp-workspace-owner",
+			_OWNERSHIP_RECORD_SCHEMA,
+		),
+		(
+			_cleanup_record_path(temp_root, run_directory),
+			"quality-gate-temp-workspace-cleanup",
+			_CLEANUP_RECORD_SCHEMA,
+		),
 	):
-		return
-	try:
-		record = json.loads(content)
-	except (json.JSONDecodeError, UnicodeDecodeError):
-		return
-	if not isinstance(record, dict) or set(record) != {
-		"device",
-		"format",
-		"inode",
-		"root",
-		"run",
-		"schema",
-	}:
-		return
-	if (
-		type(record["device"]) is not int
-		or record["device"] < 0
-		or type(record["inode"]) is not int
-		or record["inode"] < 0
-		or type(record["schema"]) is not int
-		or record["schema"] != 1
-		or record["format"] != "quality-gate-temp-workspace-owner"
-		or record["root"] != os.path.normcase(os.path.abspath(temp_root))
-		or record["run"] != run_directory.name
-	):
-		return
-	canonical = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-	if content != canonical:
-		return
-	try:
-		_remove_file(path, metadata)
-	except OSError:
-		return
-
-
-def _is_owned_workspace(temp_root: Path, entry: Path, metadata: os.stat_result) -> bool:
-	return (
-		stat.S_ISDIR(metadata.st_mode)
-		and not is_link_or_reparse(metadata)
-		and _has_valid_ownership_marker(temp_root, entry, expected_directory=metadata)
-	)
+		try:
+			metadata = path.lstat()
+			if (
+				not _plain_lock_file(path, metadata)
+				or metadata.st_size > _OWNERSHIP_RECORD_MAX_BYTES
+			):
+				continue
+			with path.open("rb") as stream:
+				opened = os.fstat(stream.fileno())
+				if not _same_file_identity(metadata, opened) or not _plain_lock_file(path, opened):
+					continue
+				content = stream.read(_OWNERSHIP_RECORD_MAX_BYTES + 1)
+			current = path.lstat()
+		except OSError:
+			continue
+		if (
+			len(content) > _OWNERSHIP_RECORD_MAX_BYTES
+			or not _same_file_identity(metadata, current)
+			or not _plain_lock_file(path, current)
+		):
+			continue
+		payload = _valid_signed_record(content)
+		valid_fields = {"device", "format", "inode", "root", "run", "schema"}
+		if expected_format == "quality-gate-temp-workspace-cleanup":
+			valid_fields |= {
+				"active_device",
+				"active_inode",
+				"marker_device",
+				"marker_inode",
+			}
+		if (
+			payload is None
+			or set(payload) != valid_fields
+			or type(payload["device"]) is not int
+			or payload["device"] < 0
+			or type(payload["inode"]) is not int
+			or payload["inode"] < 0
+			or type(payload["schema"]) is not int
+			or payload["schema"] != expected_schema
+			or payload["format"] != expected_format
+			or payload["root"] != os.path.normcase(os.path.abspath(temp_root))
+			or payload["run"] != run_directory.name
+			or (
+				expected_format == "quality-gate-temp-workspace-cleanup"
+				and any(
+					type(payload[field]) is not int or cast(int, payload[field]) < 0
+					for field in (
+						"active_device",
+						"active_inode",
+						"marker_device",
+						"marker_inode",
+					)
+				)
+			)
+		):
+			continue
+		try:
+			_remove_file(path, metadata)
+		except OSError:
+			continue
 
 
 def _can_reclaim_workspace(
@@ -435,20 +1522,159 @@ def _can_reclaim_workspace(
 	entry: Path,
 	metadata: os.stat_result,
 	owner_identity: os.stat_result,
-) -> bool:
+	*,
+	cleanup_identity: os.stat_result | None,
+	cleanup_controls: tuple[tuple[int, int], tuple[int, int]] | None,
+) -> tuple[
+	bool,
+	os.stat_result | None,
+	tuple[tuple[int, int], tuple[int, int]] | None,
+]:
 	try:
 		active_lock = _open_locked_file(entry / _ACTIVE_LOCK_NAME, blocking=False, create=False)
 	except OSError:
-		return False
+		return False, cleanup_identity, cleanup_controls
 	if active_lock is None:
-		return False
+		return _can_reclaim_without_active_lock(
+			temp_root,
+			entry,
+			metadata,
+			owner_identity,
+			cleanup_identity,
+			cleanup_controls,
+		)
 	try:
-		return _workspace_ownership_is_current(temp_root, entry, metadata, owner_identity)
+		if cleanup_identity is None:
+			return _begin_workspace_cleanup(temp_root, entry, metadata, owner_identity, active_lock)
+		return _resume_workspace_cleanup(
+			temp_root,
+			entry,
+			metadata,
+			owner_identity,
+			cleanup_identity,
+			cleanup_controls,
+		)
 	finally:
 		_unlock(active_lock)
 
 
+def _can_reclaim_without_active_lock(
+	temp_root: Path,
+	entry: Path,
+	metadata: os.stat_result,
+	owner_identity: os.stat_result,
+	cleanup_identity: os.stat_result | None,
+	cleanup_controls: tuple[tuple[int, int], tuple[int, int]] | None,
+) -> tuple[bool, os.stat_result | None, tuple[tuple[int, int], tuple[int, int]] | None]:
+	if cleanup_identity is None or cleanup_controls is None:
+		return False, cleanup_identity, cleanup_controls
+	try:
+		(entry / _ACTIVE_LOCK_NAME).lstat()
+	except FileNotFoundError:
+		return (
+			_workspace_ownership_is_current(
+				temp_root,
+				entry,
+				metadata,
+				owner_identity,
+				cleanup_identity=cleanup_identity,
+				cleanup_controls=cleanup_controls,
+				allow_missing_marker=True,
+			),
+			cleanup_identity,
+			cleanup_controls,
+		)
+	return False, cleanup_identity, cleanup_controls
+
+
+def _begin_workspace_cleanup(
+	temp_root: Path,
+	entry: Path,
+	metadata: os.stat_result,
+	owner_identity: os.stat_result,
+	active_lock: BinaryIO,
+) -> tuple[bool, os.stat_result | None, tuple[tuple[int, int], tuple[int, int]] | None]:
+	active_file_identity = os.fstat(active_lock.fileno())
+	marker_file_identity = (entry / _OWNERSHIP_MARKER_NAME).lstat()
+	if not _workspace_ownership_is_current(temp_root, entry, metadata, owner_identity):
+		return False, None, None
+	if not _same_file_identity(active_file_identity, (entry / _ACTIVE_LOCK_NAME).lstat()):
+		return False, None, None
+	if not _same_file_identity(marker_file_identity, (entry / _OWNERSHIP_MARKER_NAME).lstat()):
+		return False, None, None
+	cleanup_identity = _write_cleanup_record(
+		temp_root, entry, metadata, active_file_identity, marker_file_identity
+	)
+	if cleanup_identity is None:
+		return False, None, None
+	cleanup_controls = (
+		(active_file_identity.st_dev, active_file_identity.st_ino),
+		(marker_file_identity.st_dev, marker_file_identity.st_ino),
+	)
+	return (
+		_workspace_ownership_is_current(
+			temp_root,
+			entry,
+			metadata,
+			owner_identity,
+			cleanup_identity=cleanup_identity,
+			cleanup_controls=cleanup_controls,
+		),
+		cleanup_identity,
+		cleanup_controls,
+	)
+
+
+def _resume_workspace_cleanup(
+	temp_root: Path,
+	entry: Path,
+	metadata: os.stat_result,
+	owner_identity: os.stat_result,
+	cleanup_identity: os.stat_result,
+	cleanup_controls: tuple[tuple[int, int], tuple[int, int]] | None,
+) -> tuple[bool, os.stat_result | None, tuple[tuple[int, int], tuple[int, int]] | None]:
+	if cleanup_controls is None:
+		return False, cleanup_identity, cleanup_controls
+	return (
+		_workspace_ownership_is_current(
+			temp_root,
+			entry,
+			metadata,
+			owner_identity,
+			cleanup_identity=cleanup_identity,
+			cleanup_controls=cleanup_controls,
+			allow_missing_marker=True,
+		),
+		cleanup_identity,
+		cleanup_controls,
+	)
+
+
 def _workspace_ownership_is_current(
+	temp_root: Path,
+	entry: Path,
+	metadata: os.stat_result,
+	owner_identity: os.stat_result,
+	*,
+	cleanup_identity: os.stat_result | None = None,
+	cleanup_controls: tuple[tuple[int, int], tuple[int, int]] | None = None,
+	allow_missing_marker: bool = False,
+) -> bool:
+	if not _workspace_owner_is_current(temp_root, entry, metadata, owner_identity):
+		return False
+	if cleanup_identity is None:
+		return _has_valid_ownership_marker(temp_root, entry, expected_directory=metadata)
+	return _cleanup_controls_are_current(
+		temp_root,
+		entry,
+		metadata,
+		cleanup_identity,
+		cleanup_controls,
+		allow_missing_marker=allow_missing_marker,
+	)
+
+
+def _workspace_owner_is_current(
 	temp_root: Path,
 	entry: Path,
 	metadata: os.stat_result,
@@ -458,15 +1684,56 @@ def _workspace_ownership_is_current(
 		current = entry.lstat()
 	except OSError:
 		return False
-	return (
-		not is_link_or_reparse(current)
-		and stat.S_ISDIR(current.st_mode)
-		and _same_file_identity(metadata, current)
-		and _has_valid_ownership_record(temp_root, entry, metadata, expected_record=owner_identity)[
-			0
-		]
-		and _has_valid_ownership_marker(temp_root, entry, expected_directory=metadata)
-	)
+	if (
+		is_link_or_reparse(current)
+		or not stat.S_ISDIR(current.st_mode)
+		or not _same_file_identity(metadata, current)
+		or not _has_valid_ownership_record(
+			temp_root, entry, metadata, expected_record=owner_identity
+		)[0]
+	):
+		return False
+	return True
+
+
+def _cleanup_controls_are_current(
+	temp_root: Path,
+	entry: Path,
+	metadata: os.stat_result,
+	cleanup_identity: os.stat_result,
+	cleanup_controls: tuple[tuple[int, int], tuple[int, int]] | None,
+	*,
+	allow_missing_marker: bool,
+) -> bool:
+	cleanup_controls_from_record: tuple[tuple[int, int], tuple[int, int]] | None = None
+	(
+		cleanup_valid,
+		_cleanup_record_identity,
+		active_identity,
+		marker_identity,
+	) = _has_valid_cleanup_record(temp_root, entry, metadata, expected_record=cleanup_identity)
+	if not cleanup_valid or active_identity is None or marker_identity is None:
+		return False
+	cleanup_controls_from_record = (active_identity, marker_identity)
+	if cleanup_controls != cleanup_controls_from_record:
+		return False
+	active_path = entry / _ACTIVE_LOCK_NAME
+	try:
+		active_metadata = active_path.lstat()
+	except FileNotFoundError:
+		if not allow_missing_marker:
+			return False
+	else:
+		if (active_metadata.st_dev, active_metadata.st_ino) != active_identity:
+			return False
+	marker_path = entry / _OWNERSHIP_MARKER_NAME
+	try:
+		marker_metadata = marker_path.lstat()
+	except FileNotFoundError:
+		return allow_missing_marker
+	if (marker_metadata.st_dev, marker_metadata.st_ino) != cleanup_controls_from_record[1]:
+		return False
+	return _has_valid_ownership_marker(temp_root, entry, expected_directory=metadata)
 
 
 def _ownership_marker(temp_root: Path, run_directory: Path) -> bytes:
@@ -486,27 +1753,59 @@ def _ownership_marker(temp_root: Path, run_directory: Path) -> bytes:
 
 
 def _ownership_record(
-	temp_root: Path, run_directory: Path, directory_identity: os.stat_result
+	temp_root: Path,
+	run_directory: Path,
+	directory_identity: os.stat_result,
+	*,
+	create_key: bool = True,
 ) -> bytes:
-	return (
-		json.dumps(
-			{
-				"device": directory_identity.st_dev,
-				"format": "quality-gate-temp-workspace-owner",
-				"inode": directory_identity.st_ino,
-				"root": os.path.normcase(os.path.abspath(temp_root)),
-				"run": run_directory.name,
-				"schema": 1,
-			},
-			sort_keys=True,
-			separators=(",", ":"),
-		)
-		+ "\n"
-	).encode("utf-8")
+	payload: dict[str, object] = {
+		"device": directory_identity.st_dev,
+		"format": "quality-gate-temp-workspace-owner",
+		"inode": directory_identity.st_ino,
+		"root": os.path.normcase(os.path.abspath(temp_root)),
+		"run": run_directory.name,
+		"schema": _OWNERSHIP_RECORD_SCHEMA,
+	}
+	record = _signed_record(payload, create_key=create_key)
+	if record is None:
+		raise OSError(f"temporary workspace ownership key is unavailable: {run_directory}")
+	return record
+
+
+def _cleanup_record(
+	temp_root: Path,
+	run_directory: Path,
+	directory_identity: os.stat_result,
+	active_lock_identity: os.stat_result,
+	marker_identity: os.stat_result,
+	*,
+	create_key: bool = True,
+) -> bytes:
+	payload: dict[str, object] = {
+		"active_device": active_lock_identity.st_dev,
+		"active_inode": active_lock_identity.st_ino,
+		"device": directory_identity.st_dev,
+		"format": "quality-gate-temp-workspace-cleanup",
+		"inode": directory_identity.st_ino,
+		"marker_device": marker_identity.st_dev,
+		"marker_inode": marker_identity.st_ino,
+		"root": os.path.normcase(os.path.abspath(temp_root)),
+		"run": run_directory.name,
+		"schema": _CLEANUP_RECORD_SCHEMA,
+	}
+	record = _signed_record(payload, create_key=create_key)
+	if record is None:
+		raise OSError(f"temporary workspace cleanup key is unavailable: {run_directory}")
+	return record
 
 
 def _ownership_record_path(temp_root: Path, run_directory: Path) -> Path:
 	return temp_root / f"{_OWNERSHIP_RECORD_PREFIX}{run_directory.name}"
+
+
+def _cleanup_record_path(temp_root: Path, run_directory: Path) -> Path:
+	return temp_root / f"{_CLEANUP_RECORD_PREFIX}{run_directory.name}"
 
 
 def _has_valid_ownership_record(
@@ -543,7 +1842,93 @@ def _has_valid_ownership_record(
 			return False, metadata
 		if not _same_file_identity(directory_identity, current_directory):
 			return False, metadata
-	return content == _ownership_record(temp_root, run_directory, directory_identity), metadata
+	try:
+		expected = _ownership_record(temp_root, run_directory, directory_identity, create_key=False)
+	except OSError:
+		return False, metadata
+	return content == expected, metadata
+
+
+def _has_valid_cleanup_record(
+	temp_root: Path,
+	run_directory: Path,
+	directory_identity: os.stat_result,
+	*,
+	expected_record: os.stat_result | None = None,
+	verify_directory: bool = True,
+) -> tuple[
+	bool,
+	os.stat_result | None,
+	tuple[int, int] | None,
+	tuple[int, int] | None,
+]:
+	path = _cleanup_record_path(temp_root, run_directory)
+	try:
+		metadata = path.lstat()
+		if (
+			not _plain_lock_file(path, metadata)
+			or metadata.st_size > _OWNERSHIP_RECORD_MAX_BYTES
+			or (expected_record is not None and not _same_file_identity(expected_record, metadata))
+		):
+			return False, metadata, None, None
+		with path.open("rb") as stream:
+			opened = os.fstat(stream.fileno())
+			if not _same_file_identity(metadata, opened) or not _plain_lock_file(path, opened):
+				return False, metadata, None, None
+			content = stream.read(_OWNERSHIP_RECORD_MAX_BYTES + 1)
+		current = path.lstat()
+	except OSError:
+		return False, None, None, None
+	if not _same_file_identity(metadata, current):
+		return False, metadata, None, None
+	if verify_directory:
+		try:
+			current_directory = run_directory.lstat()
+		except OSError:
+			return False, metadata, None, None
+		if not _same_file_identity(directory_identity, current_directory):
+			return False, metadata, None, None
+	payload = _valid_signed_record(content)
+	if (
+		payload is None
+		or set(payload)
+		!= {
+			"active_device",
+			"active_inode",
+			"device",
+			"format",
+			"inode",
+			"marker_device",
+			"marker_inode",
+			"root",
+			"run",
+			"schema",
+		}
+		or type(payload["active_device"]) is not int
+		or payload["active_device"] < 0
+		or type(payload["active_inode"]) is not int
+		or payload["active_inode"] < 0
+		or type(payload["device"]) is not int
+		or payload["device"] != directory_identity.st_dev
+		or type(payload["inode"]) is not int
+		or payload["inode"] != directory_identity.st_ino
+		or type(payload["marker_device"]) is not int
+		or payload["marker_device"] < 0
+		or type(payload["marker_inode"]) is not int
+		or payload["marker_inode"] < 0
+		or type(payload["schema"]) is not int
+		or payload["schema"] != _CLEANUP_RECORD_SCHEMA
+		or payload["format"] != "quality-gate-temp-workspace-cleanup"
+		or payload["root"] != os.path.normcase(os.path.abspath(temp_root))
+		or payload["run"] != run_directory.name
+	):
+		return False, metadata, None, None
+	return (
+		True,
+		metadata,
+		(payload["active_device"], payload["active_inode"]),
+		(payload["marker_device"], payload["marker_inode"]),
+	)
 
 
 def _write_ownership_record(
@@ -575,6 +1960,62 @@ def _write_ownership_record(
 		raise
 
 
+def _write_cleanup_record(
+	temp_root: Path,
+	run_directory: Path,
+	directory_identity: os.stat_result,
+	active_lock_identity: os.stat_result,
+	marker_identity: os.stat_result,
+) -> os.stat_result | None:
+	path = _cleanup_record_path(temp_root, run_directory)
+	created_identity: os.stat_result | None = None
+	try:
+		with path.open("xb") as stream:
+			created_identity = os.fstat(stream.fileno())
+			stream.write(
+				_cleanup_record(
+					temp_root,
+					run_directory,
+					directory_identity,
+					active_lock_identity,
+					marker_identity,
+				)
+			)
+			stream.flush()
+			os.fsync(stream.fileno())
+		valid, identity, active_identity, marker_file = _has_valid_cleanup_record(
+			temp_root, run_directory, directory_identity
+		)
+		if (
+			not valid
+			or identity is None
+			or created_identity is None
+			or not _same_file_identity(created_identity, identity)
+			or (active_identity != (active_lock_identity.st_dev, active_lock_identity.st_ino))
+			or (marker_file != (marker_identity.st_dev, marker_identity.st_ino))
+		):
+			raise OSError(f"temporary workspace cleanup could not be recorded: {run_directory}")
+		return identity
+	except FileExistsError:
+		valid, identity, active_identity, marker_file = _has_valid_cleanup_record(
+			temp_root, run_directory, directory_identity
+		)
+		return (
+			identity
+			if valid
+			and active_identity == (active_lock_identity.st_dev, active_lock_identity.st_ino)
+			and marker_file == (marker_identity.st_dev, marker_identity.st_ino)
+			else None
+		)
+	except OSError:
+		if created_identity is not None:
+			try:
+				_remove_file(path, created_identity)
+			except OSError:
+				pass
+		return None
+
+
 def _remove_ownership_record(
 	temp_root: Path,
 	run_directory: Path,
@@ -591,6 +2032,24 @@ def _remove_ownership_record(
 	)
 	if valid and identity is not None:
 		_remove_file(_ownership_record_path(temp_root, run_directory), identity)
+
+
+def _remove_cleanup_record(
+	temp_root: Path,
+	run_directory: Path,
+	directory_identity: os.stat_result,
+	*,
+	expected_record: os.stat_result | None = None,
+) -> None:
+	valid, identity, _active_identity, _marker_identity = _has_valid_cleanup_record(
+		temp_root,
+		run_directory,
+		directory_identity,
+		expected_record=expected_record,
+		verify_directory=False,
+	)
+	if valid and identity is not None:
+		_remove_file(_cleanup_record_path(temp_root, run_directory), identity)
 
 
 def _has_valid_ownership_marker(
@@ -650,6 +2109,8 @@ def _locked_file(path: Path) -> Iterator[None]:
 def _create_run_directory(
 	temp_root: Path,
 ) -> tuple[Path, Path, BinaryIO, os.stat_result, os.stat_result]:
+	if _ownership_key(create=True) is None:
+		raise OSError(f"temporary workspace ownership key is unavailable: {temp_root}")
 	root_lock_path = temp_root / _ROOT_LOCK_NAME
 	with _locked_file(root_lock_path):
 		_clean_stale_entries(temp_root)
@@ -779,8 +2240,49 @@ def _remove_workspace(
 ) -> None:
 	try:
 		with _locked_file(root_lock_path):
+			if not _workspace_ownership_is_current(
+				root_lock_path.parent,
+				run_directory,
+				run_identity,
+				owner_identity,
+			):
+				raise OSError(
+					f"temporary workspace ownership changed before cleanup: {run_directory}"
+				)
+			active_identity = os.fstat(active_lock.fileno())
+			marker_identity = (run_directory / _OWNERSHIP_MARKER_NAME).lstat()
+			cleanup_identity = _write_cleanup_record(
+				root_lock_path.parent,
+				run_directory,
+				run_identity,
+				active_identity,
+				marker_identity,
+			)
+			if cleanup_identity is None:
+				raise OSError(f"temporary workspace cleanup could not be recorded: {run_directory}")
+			cleanup_controls = (
+				(active_identity.st_dev, active_identity.st_ino),
+				(marker_identity.st_dev, marker_identity.st_ino),
+			)
+			if not _workspace_ownership_is_current(
+				root_lock_path.parent,
+				run_directory,
+				run_identity,
+				owner_identity,
+				cleanup_identity=cleanup_identity,
+				cleanup_controls=cleanup_controls,
+			):
+				raise OSError(
+					f"temporary workspace controls changed before cleanup: {run_directory}"
+				)
 			_unlock(active_lock)
 			_remove_entry(run_directory, expected_identity=run_identity)
+			_remove_cleanup_record(
+				root_lock_path.parent,
+				run_directory,
+				run_identity,
+				expected_record=cleanup_identity,
+			)
 			_remove_ownership_record(
 				root_lock_path.parent,
 				run_directory,
