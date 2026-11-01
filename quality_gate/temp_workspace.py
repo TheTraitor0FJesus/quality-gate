@@ -16,10 +16,10 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from importlib import import_module
 from pathlib import Path
-from typing import Any, BinaryIO, Protocol, cast
+from typing import Any, BinaryIO, cast
 
+from .file_lock import lock_file, unlock_file
 from .path_safety import is_link_or_reparse, is_reparse_point
 
 TEMP_DIRECTORY_NAME = "temp"
@@ -90,48 +90,12 @@ class TemporaryWorkspaceError(OSError):
 	"""Repository-local scratch space could not be prepared or cleaned."""
 
 
-class _PosixLockModule(Protocol):
-	LOCK_EX: int
-	LOCK_NB: int
-	LOCK_UN: int
-
-	def flock(self, descriptor: int, operation: int) -> None: ...
-
-
-class _WindowsLockModule(Protocol):
-	LK_LOCK: int
-	LK_NBLCK: int
-	LK_UNLCK: int
-
-	def locking(self, descriptor: int, mode: int, nbytes: int) -> None: ...
-
-
 def _lock(handle: BinaryIO, *, blocking: bool) -> None:
-	handle.seek(0)
-	if os.name == "nt":
-		msvcrt = cast(_WindowsLockModule, import_module("msvcrt"))
-		mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
-		msvcrt.locking(handle.fileno(), mode, 1)
-		return
-
-	fcntl = cast(_PosixLockModule, import_module("fcntl"))
-	mode = fcntl.LOCK_EX
-	if not blocking:
-		mode |= fcntl.LOCK_NB
-	fcntl.flock(handle.fileno(), mode)
+	lock_file(handle, blocking=blocking)
 
 
 def _unlock(handle: BinaryIO) -> None:
-	try:
-		handle.seek(0)
-		if os.name == "nt":
-			msvcrt = cast(_WindowsLockModule, import_module("msvcrt"))
-			msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-		else:
-			fcntl = cast(_PosixLockModule, import_module("fcntl"))
-			fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-	finally:
-		handle.close()
+	unlock_file(handle)
 
 
 def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
@@ -2616,7 +2580,12 @@ def _has_valid_ownership_marker(
 
 @contextmanager
 def _locked_file(path: Path) -> Iterator[None]:
-	handle = _open_locked_file(path, blocking=True)
+	try:
+		handle = _open_locked_file(path, blocking=True)
+	except OSError as error:
+		if "symbolic link" in str(error):
+			raise
+		raise OSError(f"could not acquire temporary workspace lock: {path}") from error
 	if handle is None:
 		raise OSError(f"could not acquire temporary workspace lock: {path}")
 	try:

@@ -80,6 +80,49 @@ budget. Ruff children default to four worker threads. See [Local Gate queue](loc
 for settings, nested execution, and the native-wrapper activation requirement. Source changes do
 not activate this behavior in an older immutable consumer release.
 
+Each applicable Python component runs Ruff during its Gate checks. The runner runs mypy only when the
+component enables type checking with `typecheck = true`. Native-cache selection never skips a
+configured tool invocation. Each process receives a persistent native cache namespace keyed by the
+shared Git directory for linked worktrees, prepared runtime fingerprint and engine version, exact
+pinned tool and policy configuration, host platform and Python version, command options, and component
+import root. Worktrees in one clone can share namespaces; separate clones remain isolated. For a
+persistent namespace, the runner copies the current candidate to a stable, read-only source root that
+it owns while holding that namespace's lease. It derives file timestamps from file contents so
+Ruff can reuse entries when equal source bytes arrive in different temporary snapshots, then removes
+the staged source tree after the command. If staging is unsafe or unavailable, the runner uses the
+original snapshot with that Gate run's private cache. The cache directory is under the policy cache's
+`native-tools/` directory. A bounded OS-lock lease is held while each process runs. Busy,
+inaccessible, unowned, or invalid storage uses the private cache and continues verification.
+Provider-owned entries expire after 30 days and are limited to eight namespaces per repository and
+tool; cleanup skips active leases and removes no unowned entry.
+
+The runner exposes a `NativeToolCacheSelection` record beside each native tool command, with
+`namespace_id`, `storage`, `fallback_reason`, and `selection_duration_ms`. The record is available to
+the caller but does not emit telemetry. It does not prove an internal Ruff or mypy cache hit, and it
+does not identify reuse of a complete check result.
+
+One opt-in measurement used policy v4.2.0, Python 3.12.10, Windows 11, Ruff 0.16.4, and mypy 2.3.1.
+Seven fixture snapshots invoked both tools: one cold snapshot, five warm snapshots, and one snapshot
+with changed source. Each tool ran seven subprocesses, 14 in total. The cold and warm checks passed;
+both tools ran and failed on changed source as expected. The persistent cache payload contained nine
+Ruff files and 18 mypy files, excluding ownership markers.
+
+| Tool | Cold run | Five warm runs | Median (range) | Cold/median ratio |
+| --- | ---: | ---: | ---: | ---: |
+| Ruff | 151.28 ms | 87.83, 96.33, 83.09, 84.87, 82.88 ms | 84.87 ms (82.88–96.33 ms) | 1.78x |
+| mypy | 1,146.77 ms | 239.92, 257.09, 233.13, 253.92, 235.81 ms | 239.92 ms (233.13–257.09 ms) | 4.78x |
+
+This was one measurement on one host. Timings are tool subprocess wall time, and operating-system
+cache state was uncontrolled. Every check executed the tool; the measurements describe repeated
+tool execution with a shared persistent namespace and cache payload, not a confirmed internal cache
+hit or complete-result reuse. Treat the timings as provisional, not as a stable performance estimate.
+
+If persistent cache use repeatedly falls back, let active Gate runs finish, then remove the
+user-local policy cache's `native-tools/` directory to rebuild only native tool state on the next
+run. The default policy cache is `%LOCALAPPDATA%\quality-gate` on Windows (system temp if unset)
+and `$XDG_CACHE_HOME/quality-gate` (or `~/.cache/quality-gate`) on Unix. A private fallback is
+automatic and still runs the selected check.
+
 ## Manifest maintenance
 
 For post-edit Ruff checks, use the separate [working-tree interface](edit-check.md). Its explicit
