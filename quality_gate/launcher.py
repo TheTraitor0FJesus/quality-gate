@@ -8,7 +8,13 @@ from pathlib import Path
 
 from .contracts import Manifest, load_manifest
 from .distribution import DistributionError, PolicyCache, ReleaseManifest, load_release_manifest
-from .runtime import RuntimeInspection, RuntimeManager, RuntimeUnavailable, runtime_identity
+from .runtime import (
+	RuntimeIdentity,
+	RuntimeInspection,
+	RuntimeManager,
+	RuntimeUnavailable,
+	runtime_identity,
+)
 
 _POLICY_RELEASE = re.compile(r"^v\d+\.\d+\.\d+$")
 
@@ -22,6 +28,8 @@ class PreparedEnvironment:
 	policy_root: Path
 	release_manifest: ReleaseManifest
 	runtimes: tuple[RuntimeInspection, ...]
+	cache_root: Path
+	runtime_identities: tuple[RuntimeIdentity | None, ...]
 
 
 def prepare(
@@ -79,6 +87,7 @@ def _prepare(
 	release_manifest = load_release_manifest(policy_root)
 	manager = RuntimeManager(cache)
 	runtimes: list[RuntimeInspection] = []
+	runtime_identities: list[RuntimeIdentity | None] = []
 	for component in manifest.python:
 		try:
 			identity = runtime_identity(
@@ -90,6 +99,7 @@ def _prepare(
 		except RuntimeUnavailable as error:
 			if create_runtimes:
 				raise
+			runtime_identities.append(None)
 			runtimes.append(
 				RuntimeInspection(
 					manager.root / "unavailable" / component.name,
@@ -99,6 +109,7 @@ def _prepare(
 				)
 			)
 			continue
+		runtime_identities.append(identity)
 		if create_runtimes:
 			runtimes.append(
 				manager.ensure(
@@ -117,4 +128,6 @@ def _prepare(
 		policy_root,
 		release_manifest,
 		tuple(runtimes),
+		cache.requested_root,
+		tuple(runtime_identities),
 	)
