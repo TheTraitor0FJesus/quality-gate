@@ -255,7 +255,8 @@ class PolicyCache:
 	"""Manage immutable releases and their active/previous selection state."""
 
 	def __init__(self, root: Path | str | None = None) -> None:
-		self.root = Path(root or default_cache_root()).expanduser().resolve()
+		self.requested_root = Path(root or default_cache_root()).expanduser()
+		self.root = self.requested_root.resolve()
 		self.releases = self.root / "releases"
 		self.quarantine = self.root / "quarantine"
 		self.state_path = self.root / "state.json"

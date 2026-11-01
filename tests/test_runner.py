@@ -9,6 +9,8 @@ import subprocess
 import sys
 import time
 import tomllib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,15 +18,25 @@ from typing import cast
 
 import pytest
 
-from quality_gate import runner
+from quality_gate import native_cache as native_cache_module, runner
 from quality_gate.admission import AdmissionError
 from quality_gate.distribution import ExternalTool, ReleaseFile, ReleaseManifest
 from quality_gate.launcher import PreparedEnvironment
+from quality_gate.runtime import RuntimeIdentity
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXPECTED_TIMEOUT_WAIT_CALLS = 2
 EXPECTED_BIOME_INVOCATIONS = 2
+EXPECTED_NATIVE_CACHE_EXECUTIONS = 2
 UNCHECKED_EXIT = 2
+
+
+@pytest.fixture(autouse=True)
+def use_long_windows_staging_limit_for_gate_temp_workspace(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	if os.name == "nt":
+		monkeypatch.setattr(native_cache_module, "_WINDOWS_MAX_PATH", 32767)
 
 
 def _fake_candidate_snapshot(root: Path) -> AbstractContextManager[SimpleNamespace]:
@@ -425,6 +437,224 @@ def test_ruff_children_receive_a_bounded_worker_environment(
 	]
 	assert errors == []
 	assert observed == ["4", "4", "unset"]
+
+
+def test_native_cache_selection_reuses_snapshot_independent_path_and_still_runs_tool(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	policy_root = tmp_path / "policy"
+	configuration = policy_root / "quality_gate" / "policy" / "ruff.toml"
+	configuration.parent.mkdir(parents=True)
+	configuration.write_text('[lint]\nselect = ["F"]\n', encoding="utf-8")
+	prepared = SimpleNamespace(
+		policy_root=policy_root,
+		cache_root=tmp_path / "provider-cache",
+		release_manifest=ReleaseManifest(
+			"v4.2.0",
+			(),
+			(ExternalTool("ruff", "0.16.4", "tools/ruff.exe", "a" * 64),),
+		),
+		runtime_identities=(
+			RuntimeIdentity(
+				repository="C:/repositories/example",
+				policy_release="v4.2.0",
+				component="python",
+				python_version="3.11",
+				component_contract={"path": "src"},
+				dependency_inputs=(),
+			),
+		),
+	)
+	observed: list[tuple[Path, str]] = []
+	snapshot_roots: list[Path] = []
+
+	def inspect_invocation(
+		_command: list[str],
+		root: Path,
+		environment: dict[str, str],
+		*,
+		timeout: float | None = None,
+	) -> str:
+		assert timeout is not None and timeout > 0
+		observed.append((root, environment["RUFF_CACHE_DIR"]))
+		return ""
+
+	monkeypatch.setattr(runner, "run", inspect_invocation)
+	for snapshot_name in ("snapshot-one", "snapshot-two"):
+		snapshot_root = tmp_path / snapshot_name
+		snapshot_roots.append(snapshot_root)
+		source_root = snapshot_root / "src"
+		source_root.mkdir(parents=True)
+		(source_root / "module.py").write_text("def check() -> None: ...\n", encoding="utf-8")
+		component = runner.PythonComponent(snapshot_root / "src", None, None, True)
+		private_cache = tmp_path / snapshot_name / "private-cache"
+		commands = [
+			(
+				"python.component_1.ruff",
+				["ruff", "check", "--config", str(configuration), "src"],
+				10,
+			)
+		]
+		executed, errors, _outputs = runner._execute_commands(
+			snapshot_root,
+			runner._safe_environment(str(private_cache)),
+			commands,
+			10,
+			time.monotonic() + 30,
+			prepared=prepared,
+			component=component,
+			component_index=1,
+		)
+		assert executed == ["python.component_1.ruff"]
+		assert errors == []
+
+	assert len(observed) == EXPECTED_NATIVE_CACHE_EXECUTIONS
+	assert snapshot_roots[0] != snapshot_roots[1]
+	assert observed[0][0] == observed[1][0]
+	assert observed[0][0] == Path(observed[0][1]) / "_s" / "c"
+	assert observed[0][1] == observed[1][1]
+	assert observed[0][1].startswith(str(prepared.cache_root))
+
+
+def test_native_cache_selection_reuses_namespace_across_git_worktrees(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	repository = tmp_path / "repository"
+	second_worktree = tmp_path / "second-worktree"
+	empty_hooks = tmp_path / "empty-hooks"
+	empty_hooks.mkdir()
+	subprocess.run(
+		["git", "-c", f"core.hooksPath={empty_hooks}", "init", "--quiet", str(repository)],
+		check=True,
+		capture_output=True,
+		text=True,
+		timeout=10,
+	)
+
+	def run_git(*arguments: str) -> None:
+		subprocess.run(
+			[
+				"git",
+				"-C",
+				str(repository),
+				"-c",
+				f"core.hooksPath={empty_hooks}",
+				*arguments,
+			],
+			check=True,
+			capture_output=True,
+			text=True,
+			timeout=10,
+		)
+
+	run_git("config", "user.name", "Quality Gate Test")
+	run_git("config", "user.email", "quality-gate-test@example.invalid")
+	run_git("config", "commit.gpgsign", "false")
+	source_file = repository / "src" / "module.py"
+	source_file.parent.mkdir()
+	source_file.write_text("def check() -> None: ...\n", encoding="utf-8")
+	run_git("add", "src/module.py")
+	run_git("commit", "--quiet", "-m", "test fixture")
+	run_git("worktree", "add", "--quiet", "--detach", str(second_worktree), "HEAD")
+
+	policy_root = tmp_path / "policy"
+	configuration = policy_root / "quality_gate" / "policy" / "ruff.toml"
+	configuration.parent.mkdir(parents=True)
+	configuration.write_text('[lint]\nselect = ["F"]\n', encoding="utf-8")
+	shared_cache_root = tmp_path / "provider-cache"
+	persistent_started = threading.Event()
+	private_started = threading.Event()
+	observed: list[tuple[Path, str, str]] = []
+
+	def inspect_invocation(
+		_command: list[str],
+		root: Path,
+		environment: dict[str, str],
+		*,
+		timeout: float | None = None,
+	) -> str:
+		assert timeout is not None and timeout > 0
+		cache_path = Path(environment["RUFF_CACHE_DIR"])
+		if cache_path.is_relative_to(shared_cache_root.resolve()):
+			storage = "persistent"
+			persistent_started.set()
+			assert private_started.wait(timeout=10)
+		else:
+			storage = "private"
+			assert persistent_started.wait(timeout=10)
+			private_started.set()
+		assert (root / "src" / "module.py").read_text(encoding="utf-8") == (
+			"def check() -> None: ...\n"
+		)
+		observed.append((root, str(cache_path), storage))
+		return ""
+
+	monkeypatch.setattr(runner, "run", inspect_invocation)
+	worktrees = (repository, second_worktree)
+	identities: list[str] = []
+	snapshot_roots: list[Path] = []
+
+	def execute_from_worktree(worktree: Path) -> None:
+		from quality_gate.snapshot import candidate_snapshot
+
+		identity = RuntimeIdentity(
+			repository=str(worktree),
+			policy_release="v4.2.0",
+			component="python",
+			python_version="3.11",
+			component_contract={"path": "src"},
+			dependency_inputs=(),
+		)
+		prepared = SimpleNamespace(
+			policy_root=policy_root,
+			cache_root=shared_cache_root,
+			release_manifest=ReleaseManifest(
+				"v4.2.0",
+				(),
+				(ExternalTool("ruff", "0.16.4", "tools/ruff.exe", "a" * 64),),
+			),
+			runtime_identities=(identity,),
+		)
+		with candidate_snapshot(worktree) as snapshot:
+			root = snapshot.root
+			component = runner.PythonComponent(root / "src", None, None, True)
+			command = ["ruff", "check", "--config", str(configuration), "src"]
+			cache_identity = runner._native_cache_identity(
+				root, "python.component_1.ruff", command, prepared, component, 1
+			)
+			assert cache_identity is not None
+			identities.append(cache_identity.namespace_id)
+			snapshot_roots.append(root)
+			executed, errors, _outputs = runner._execute_commands(
+				root,
+				runner._safe_environment(str(tmp_path / f"private-{worktree.name}")),
+				[("python.component_1.ruff", command, 10)],
+				10,
+				time.monotonic() + 30,
+				prepared=prepared,
+				component=component,
+				component_index=1,
+			)
+			assert executed == ["python.component_1.ruff"]
+			assert errors == []
+
+	with ThreadPoolExecutor(max_workers=2) as executor:
+		first = executor.submit(execute_from_worktree, worktrees[0])
+		assert persistent_started.wait(timeout=10)
+		second = executor.submit(execute_from_worktree, worktrees[1])
+		first.result(timeout=30)
+		second.result(timeout=30)
+
+	assert len(observed) == 2
+	assert len(set(identities)) == 1
+	persistent = next(item for item in observed if item[2] == "persistent")
+	private = next(item for item in observed if item[2] == "private")
+	assert persistent[0] != private[0]
+	assert persistent[0].is_relative_to(shared_cache_root.resolve())
+	assert private[0] in snapshot_roots
+	assert private[1] == str(tmp_path / f"private-{second_worktree.name}")
 
 
 def test_ruff_worker_override_is_validated_and_applied_only_to_ruff(

@@ -8,6 +8,7 @@ import json
 import locale
 import logging
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -16,11 +17,12 @@ import threading
 import time
 import tokenize
 import tomllib
-from contextlib import nullcontext
-from dataclasses import dataclass
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from . import __version__
 from .admission import (
 	AdmissionError,
 	child_admission_environment,
@@ -42,8 +44,15 @@ from .distribution import DistributionError
 from .integrity import documentation_results, git_integrity_results, workflow_result
 from .launcher import PreparedEnvironment, prepare, prepare_bootstrap
 from .lessons import lessons_result
+from .native_cache import (
+	NativeToolCache,
+	NativeToolCacheError,
+	NativeToolCacheIdentity,
+	NativeToolCacheSelection,
+	native_tool_source_workspace,
+)
 from .reporting import render
-from .runtime import RuntimeUnavailable
+from .runtime import RuntimeIdentity, RuntimeUnavailable, runtime_fingerprint
 from .secrets import secret_audit_result, secret_candidate_result, secret_history_result
 from .snapshot import SnapshotError, candidate_snapshot
 from .temp_workspace import TemporaryWorkspaceError, temporary_workspace
@@ -1513,12 +1522,150 @@ def _component_commands(
 	return commands
 
 
+def _native_tool_configuration(
+	check_id: str,
+) -> tuple[Literal["ruff", "mypy"], str, str] | None:
+	"""Map one native check to its tool, policy file, and cache environment key."""
+	if check_id.endswith((".ruff", ".format")):
+		return "ruff", "ruff.toml", "RUFF_CACHE_DIR"
+	if check_id.endswith(".mypy"):
+		return "mypy", "mypy.ini", "MYPY_CACHE_DIR"
+	return None
+
+
+def _native_cache_identity(
+	actual_root: Path,
+	check_id: str,
+	command: list[str],
+	prepared: PreparedEnvironment,
+	component: PythonComponent,
+	component_index: int,
+) -> NativeToolCacheIdentity | None:
+	"""Build a snapshot-independent key for one exact pinned native tool command."""
+	tool_configuration = _native_tool_configuration(check_id)
+	if tool_configuration is None:
+		return None
+	tool_name, configuration_name, _environment_key = tool_configuration
+
+	release_manifest = getattr(prepared, "release_manifest", None)
+	tools = getattr(release_manifest, "tools", ())
+	tool = next(
+		(item for item in tools if getattr(item, "name", "").casefold() == tool_name),
+		None,
+	)
+	runtime_identities = getattr(prepared, "runtime_identities", ())
+	if tool is None or len(runtime_identities) < component_index:
+		return None
+	runtime_identity_value = runtime_identities[component_index - 1]
+	if not isinstance(runtime_identity_value, RuntimeIdentity):
+		return None
+	policy_root = getattr(prepared, "policy_root", None)
+	cache_root = getattr(prepared, "cache_root", None)
+	if not isinstance(policy_root, Path) or not isinstance(cache_root, Path):
+		return None
+	configuration = policy_root / "quality_gate" / "policy" / configuration_name
+	try:
+		policy_digest = hashlib.sha256(configuration.read_bytes()).hexdigest()
+		import_root = component.path.relative_to(actual_root).as_posix()
+	except OSError:
+		return None
+	except ValueError:
+		return None
+
+	repository_identity = _native_cache_repository_identity(runtime_identity_value.repository)
+	cache_runtime_identity = replace(
+		runtime_identity_value,
+		repository=repository_identity,
+	)
+	normalized_options = _normalized_native_tool_options(
+		command, tool_name, configuration_name, policy_digest
+	)
+
+	return NativeToolCacheIdentity(
+		repository=repository_identity,
+		engine_version=__version__,
+		runtime_fingerprint=runtime_fingerprint(cache_runtime_identity),
+		tool=tool_name,
+		tool_version=tool.version,
+		tool_digest=tool.sha256,
+		policy_release=prepared.release_manifest.version,
+		policy_digest=policy_digest,
+		platform=f"{sys.platform}-{platform.machine().casefold()}",
+		python_version=runtime_identity_value.python_version,
+		effective_options=tuple(normalized_options),
+		import_roots=(import_root,),
+	)
+
+
+def _native_cache_repository_identity(repository: str) -> str:
+	"""Use a Git common directory to identify linked worktrees as one source repo."""
+	repository_root = Path(repository)
+	git_path = repository_root / ".git"
+	try:
+		if git_path.is_dir():
+			return str(git_path.resolve())
+		if not git_path.is_file():
+			return str(repository_root.resolve())
+
+		git_pointer = git_path.read_text(encoding="utf-8").strip()
+		git_dir_text = git_pointer.partition(":")
+		if git_dir_text[0].casefold() != "gitdir":
+			return str(repository_root.resolve())
+		git_dir = Path(git_dir_text[2].strip())
+		if not git_dir.is_absolute():
+			git_dir = repository_root / git_dir
+		git_dir = git_dir.resolve()
+		common_dir_file = git_dir / "commondir"
+		if not common_dir_file.is_file():
+			return str(git_dir)
+		common_dir = Path(common_dir_file.read_text(encoding="utf-8").strip())
+		if not common_dir.is_absolute():
+			common_dir = git_dir / common_dir
+		return str(common_dir.resolve())
+	except (OSError, RuntimeError, UnicodeError, ValueError):
+		return str(repository_root.resolve())
+
+
+_PYTHON_MODULE_COMMAND_LENGTH = 3
+
+
+def _normalized_native_tool_options(
+	command: list[str],
+	tool_name: Literal["ruff", "mypy"],
+	configuration_name: str,
+	policy_digest: str,
+) -> list[str]:
+	arguments = command[1:]
+	if (
+		len(command) >= _PYTHON_MODULE_COMMAND_LENGTH
+		and command[1] == "-m"
+		and command[2] == tool_name
+	):
+		arguments = command[_PYTHON_MODULE_COMMAND_LENGTH:]
+	normalized_options: list[str] = []
+	configuration_next = False
+	for argument in arguments:
+		if configuration_next:
+			normalized_options.append(f"<policy:{configuration_name}:{policy_digest}>")
+			configuration_next = False
+		elif argument in {"--config", "--config-file"}:
+			normalized_options.append(argument)
+			configuration_next = True
+		else:
+			normalized_options.append(argument.replace("\\", "/"))
+	return normalized_options
+
+
 def _execute_commands(
 	actual_root: Path,
 	environment: dict[str, str],
 	commands: list[tuple[str, list[str], int]],
 	component_timeout: int,
 	deadline: float,
+	*,
+	prepared: PreparedEnvironment | None = None,
+	component: PythonComponent | None = None,
+	component_index: int | None = None,
 ) -> tuple[list[str], list[QualityGateError], dict[str, str]]:
 	executed: list[str] = []
 	run_errors: list[QualityGateError] = []
@@ -1526,19 +1673,65 @@ def _execute_commands(
 	for check_id, command, timeout in commands:
 		executed.append(check_id)
 		try:
-			command_environment = (
-				_ruff_environment(environment)
-				if check_id.endswith((".ruff", ".format"))
-				else environment
+			tool_configuration = _native_tool_configuration(check_id)
+			tool_environment_key = tool_configuration[2] if tool_configuration is not None else None
+			identity = (
+				_native_cache_identity(
+					actual_root, check_id, command, prepared, component, component_index
+				)
+				if prepared is not None
+				and component is not None
+				and component_index is not None
+				and tool_environment_key is not None
+				else None
 			)
-			output = run(
-				command,
-				actual_root,
-				command_environment,
-				timeout=_remaining(deadline, max(timeout, component_timeout)),
-			)
+			selection_context: AbstractContextManager[NativeToolCacheSelection | None] | None = None
+			if identity is not None and prepared is not None and tool_environment_key is not None:
+				private_path = Path(environment[tool_environment_key])
+				selection_context = NativeToolCache(prepared.cache_root).lease(
+					identity, private_path
+				)
+			if selection_context is None:
+				selection_context = nullcontext(None)
+			with selection_context as selection:
+				private_path = (
+					Path(environment[tool_environment_key])
+					if tool_environment_key is not None
+					else actual_root
+				)
+				source_workspace = (
+					native_tool_source_workspace(selection, actual_root, private_path)
+					if selection is not None
+					else nullcontext((None, actual_root))
+				)
+				with source_workspace as (effective_selection, command_root):
+					command_base_environment = dict(environment)
+					if effective_selection is not None and tool_environment_key is not None:
+						command_base_environment[tool_environment_key] = str(
+							effective_selection.path
+						)
+					command_environment = (
+						_ruff_environment(command_base_environment)
+						if tool_configuration is not None and tool_configuration[0] == "ruff"
+						else command_base_environment
+					)
+					output = run(
+						command,
+						command_root,
+						command_environment,
+						timeout=_remaining(deadline, max(timeout, component_timeout)),
+					)
 			if output and check_id.endswith(".coverage_report"):
 				run_outputs[check_id] = output
+		except NativeToolCacheError as error:
+			run_errors.append(
+				QualityGateError(
+					f"native tool source workspace is unavailable: {error.reason}",
+					check_id=check_id,
+					exit_code=EXIT_UNCHECKED,
+					recovery_action="restore private tool execution and retry the quality gate",
+				)
+			)
 		except QualityGateError as error:
 			error.check_id = check_id
 			run_errors.append(error)
@@ -1697,6 +1890,9 @@ def _run_python_checks(
 				),
 				component.timeout_seconds,
 				deadline,
+				prepared=prepared,
+				component=component,
+				component_index=component_index,
 			)
 			executed.extend(component_executed)
 			run_errors.extend(component_errors)

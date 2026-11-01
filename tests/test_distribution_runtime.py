@@ -84,6 +84,31 @@ def test_sync_installs_verified_release_and_keeps_previous_for_rollback(tmp_path
 	assert cache.rollback().name == "v2.0.0"
 
 
+def test_prepare_preserves_lexical_policy_cache_root_for_native_cache(tmp_path: Path) -> None:
+	repository_root = Path(__file__).parents[1].resolve()
+	cache_target = tmp_path / "policy-cache-target"
+	cache_target.mkdir()
+	release_source = tmp_path / "release-source"
+	release_source.mkdir()
+	_release(release_source)
+	PolicyCache(cache_target).sync(release_source)
+	cache_link = tmp_path / "policy-cache-link"
+	try:
+		cache_link.symlink_to(cache_target, target_is_directory=True)
+	except OSError:
+		pytest.skip("directory symlinks are unavailable for this temporary directory")
+
+	prepared = prepare_bootstrap(
+		repository_root,
+		policy_release="v2.0.0",
+		cache_dir=cache_link,
+		repository_root=repository_root,
+	)
+
+	assert prepared.cache_root == cache_link
+	assert prepared.cache_root.resolve() == cache_target.resolve()
+
+
 def test_sync_installs_a_verified_zip_release(tmp_path: Path) -> None:
 	source = tmp_path / "source"
 	source.mkdir()
