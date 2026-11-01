@@ -1612,8 +1612,36 @@ def test_cleanup_area_recovery_restores_nonempty_quarantined_directory(tmp_path:
 		os.close(cleanup_descriptor)
 
 
+def test_removal_rescans_tree_after_repeated_nonempty_errors(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	temp_root = tmp_path / "temp"
+	workspace = temp_root / "qg-retry"
+	victim = workspace / "victim"
+	victim.mkdir(parents=True)
+	identity = victim.lstat()
+	original_remove = temp_workspace._remove_collected_directory
+	transient_errors = 8
+	attempts = 0
+
+	def fail_first_removals(path: Path, expected: os.stat_result) -> None:
+		nonlocal attempts
+		if path == victim and attempts < transient_errors:
+			attempts += 1
+			raise OSError(errno.ENOTEMPTY, "directory not empty", os.fspath(path))
+		original_remove(path, expected)
+
+	monkeypatch.setattr(temp_workspace, "_remove_collected_directory", fail_first_removals)
+
+	temp_workspace._remove_entry(victim, expected_identity=identity)
+
+	assert attempts == transient_errors
+	assert not victim.exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX quarantine uses directory descriptors")
-def test_removal_rescans_directory_when_entry_appears_after_quarantine(
+def test_removal_rescans_directory_when_entries_keep_appearing_after_quarantine(
 	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1624,7 +1652,8 @@ def test_removal_rescans_directory_when_entry_appears_after_quarantine(
 	victim.mkdir()
 	identity = victim.lstat()
 	original_move = temp_workspace._rename_entry_to_cleanup_area
-	injected = False
+	late_entry_count = 8
+	injected_entries = 0
 
 	def add_entry_after_quarantine(
 		path: Path,
@@ -1632,11 +1661,12 @@ def test_removal_rescans_directory_when_entry_appears_after_quarantine(
 		parent_descriptor: int,
 		cleanup_descriptor: int,
 	) -> None:
-		nonlocal injected
+		nonlocal injected_entries
 		original_move(path, quarantine_name, parent_descriptor, cleanup_descriptor)
-		if path != victim or injected:
+		if path != victim or injected_entries == late_entry_count:
 			return
-		injected = True
+		late_entry_name = f"late-entry-{injected_entries}"
+		injected_entries += 1
 		directory_descriptor = os.open(
 			quarantine_name,
 			os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -1644,7 +1674,7 @@ def test_removal_rescans_directory_when_entry_appears_after_quarantine(
 		)
 		try:
 			file_descriptor = os.open(
-				"late-entry",
+				late_entry_name,
 				os.O_WRONLY | os.O_CREAT | os.O_EXCL,
 				0o600,
 				dir_fd=directory_descriptor,
@@ -1658,7 +1688,7 @@ def test_removal_rescans_directory_when_entry_appears_after_quarantine(
 
 	temp_workspace._remove_entry(victim, expected_identity=identity)
 
-	assert injected
+	assert injected_entries == late_entry_count
 	assert not victim.exists()
 
 

@@ -174,18 +174,7 @@ def candidate_typing_cache(
 ) -> Iterator[Path]:
 	from test_edit_check import prepare_edit_cache
 
-	cache_parent = typing_policy.parent.parent
-	if os.name == "nt":
-		temp_parent = Path(tempfile.gettempdir()).parent
-		if (
-			temp_parent.is_dir()
-			and os.access(temp_parent, os.W_OK)
-			and len(os.fspath(temp_parent)) < len(os.fspath(cache_parent))
-		):
-			# Keep the candidate runtime short enough for Windows to open mypy's typeshed files.
-			cache_parent = temp_parent
-	if is_link_or_reparse(cache_parent.lstat()) or not cache_parent.is_dir():
-		raise AssertionError("Candidate typing cache requires an ordinary parent directory.")
+	cache_parent = _candidate_typing_cache_parent(typing_policy)
 	with tempfile.TemporaryDirectory(prefix="qg-candidate-", dir=cache_parent) as directory:
 		cache = Path(directory).resolve()
 		prepare_edit_cache(cache, "v4.6.0")
@@ -232,6 +221,57 @@ def candidate_typing_cache(
 		assert verified.version == "v4.6.0"
 		assert (candidate_root / product.path).read_bytes() == candidate_engine_wheel.read_bytes()
 		yield cache
+
+
+def _candidate_typing_cache_parent(typing_policy: Path) -> Path:
+	cache_parent = typing_policy.parent.parent
+	if os.name == "nt":
+		temp_parent = Path(tempfile.gettempdir()).parent
+		try:
+			temp_parent_identity = temp_parent.lstat()
+		except OSError:
+			temp_parent_identity = None
+		if (
+			temp_parent_identity is not None
+			and not is_link_or_reparse(temp_parent_identity)
+			and temp_parent.is_dir()
+			and os.access(temp_parent, os.W_OK)
+			and len(os.fspath(temp_parent)) < len(os.fspath(cache_parent))
+		):
+			# Keep the candidate runtime short enough for Windows to open mypy's typeshed files.
+			cache_parent = temp_parent
+	if is_link_or_reparse(cache_parent.lstat()) or not cache_parent.is_dir():
+		raise AssertionError("Candidate typing cache requires an ordinary parent directory.")
+	return cache_parent
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows candidate temp parent selection only")
+def test_candidate_typing_cache_parent_falls_back_from_reparse_temp_parent(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	policy_cache = tmp_path / "policy-cache"
+	policy_cache.mkdir()
+	typing_policy = policy_cache / "releases/v4.6.0"
+	temp_parent = tmp_path / "short"
+	temp_directory = temp_parent / "temp"
+	temp_directory.mkdir(parents=True)
+	assert len(os.fspath(temp_parent)) < len(os.fspath(policy_cache))
+	monkeypatch.setattr(tempfile, "gettempdir", lambda: os.fspath(temp_directory))
+	reparse_identity = temp_parent.lstat()
+	original_is_link_or_reparse = is_link_or_reparse
+
+	def mark_temp_parent_as_reparse(metadata: os.stat_result) -> bool:
+		if (metadata.st_dev, metadata.st_ino) == (
+			reparse_identity.st_dev,
+			reparse_identity.st_ino,
+		):
+			return True
+		return original_is_link_or_reparse(metadata)
+
+	monkeypatch.setattr(sys.modules[__name__], "is_link_or_reparse", mark_temp_parent_as_reparse)
+
+	assert _candidate_typing_cache_parent(typing_policy) == policy_cache
 
 
 def _candidate_mypy_dependency_replacements(
