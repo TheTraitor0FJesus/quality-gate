@@ -2,7 +2,7 @@
 
 import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -18,6 +18,7 @@ from test_release_rollout import (
 from quality_gate import consumer_rollout
 from quality_gate.consumer_rollout import load_consumers, update_workflow_references
 from quality_gate.publication import PublicationError
+from quality_gate.publication_github import GitHubCLI
 from quality_gate.release_rollout import RolloutError, _update_rollout
 
 
@@ -71,21 +72,34 @@ def test_newer_release_refreshes_same_open_pull_request_without_touching_main() 
 	client = _fake_client()
 	main_sha = client.refs["main"]
 
+	def command(arguments: Sequence[str], *, content: bytes | None = None, limit: int) -> bytes:
+		path = arguments[2].removeprefix(f"repos/{client.repository}") or "/"
+		method = arguments[arguments.index("--method") + 1]
+		if method == "GET":
+			return json.dumps(client.get(path)).encode()
+		assert content is not None
+		payload = json.loads(content)
+		if method == "POST":
+			return json.dumps(client.post(path, payload)).encode()
+		assert method == "PATCH"
+		return json.dumps(client.patch(path, payload)).encode()
+
+	github = GitHubCLI(client.repository, timeout_seconds=60, command=command)
 	first = _update_rollout(
-		client,
+		github,
 		"TheTraitor0FJesus",
 		"ARGUS_TG",
 		"4.2.1",
 		PROVIDER_SHA,
-		lambda api, tree: _workflow_update(api, tree, "4.2.1", PROVIDER_SHA),
+		lambda api, tree: _workflow_update(client, tree, "4.2.1", PROVIDER_SHA),
 	)
 	second = _update_rollout(
-		client,
+		github,
 		"TheTraitor0FJesus",
 		"ARGUS_TG",
 		"4.2.2",
 		NEXT_PROVIDER_SHA,
-		lambda api, tree: _workflow_update(api, tree, "4.2.2", NEXT_PROVIDER_SHA),
+		lambda api, tree: _workflow_update(client, tree, "4.2.2", NEXT_PROVIDER_SHA),
 	)
 
 	assert first == "created pull request #1"

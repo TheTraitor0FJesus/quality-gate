@@ -167,6 +167,28 @@ def test_api_errors_are_not_interpreted_as_absent_resources() -> None:
 
 @pytest.mark.parametrize(
 	("method", "path"),
+	[
+		("GET", "/../other/releases"),
+		("GET", "/compare/" + "a" * 40 + "..." + "b" * 40 + "/../releases"),
+		("GET", "/compare/main...feature"),
+		("GET", "/compare/" + "a" * 40 + "...." + "b" * 40),
+		("GET", "/compare/" + "a" * 40 + "..." + "b" * 40 + "?path=../other"),
+		("POST", "/compare/" + "a" * 40 + "..." + "b" * 40),
+	],
+)
+def test_compare_exception_preserves_api_path_rejections(method: str, path: str) -> None:
+	command = Command([])
+	api = GitHubCLI("o/r", timeout_seconds=120, command=command)
+	with pytest.raises(PublicationError, match="invalid repository API path"):
+		if method == "GET":
+			api.get(path)
+		else:
+			api.post(path, {})
+	assert command.calls == []
+
+
+@pytest.mark.parametrize(
+	("method", "path"),
 	[("GET", "/git/commits/" + "a" * 40), ("POST", "/git/commits")],
 )
 def test_commit_api_error_objects_remain_fail_closed(method: str, path: str) -> None:
