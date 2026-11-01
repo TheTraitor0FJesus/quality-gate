@@ -76,7 +76,7 @@ _PUBLICATION_LINK_SETTLE_ATTEMPTS = 100
 _PUBLICATION_LINK_SETTLE_DELAY_SECONDS = 0.001
 _SINGLE_LINK_COUNT = 1
 _PUBLICATION_TRANSITION_LINK_COUNT = 2
-_TREE_REMOVAL_MAX_RESCANS = 16
+_DIRECTORY_REMOVAL_MAX_RESCANS = 16
 _PRIVATE_DIRECTORY_OWNER_ACCESS = 0o300
 _TEMP_ENVIRONMENT = ("TMP", "TEMP", "TMPDIR")
 _active_workspace: ContextVar[tuple[Path, Path] | None] = ContextVar(
@@ -958,43 +958,61 @@ def _remove_entry(path: Path, *, expected_identity: os.stat_result | None = None
 
 
 def _remove_tree(path: Path, identity: os.stat_result) -> None:
-	rescans = 0
-	while True:
-		directories, deferred_root_controls = _scan_tree_for_removal(path, identity)
-		rescan = False
-		for directory, expected in reversed(directories[1:]):
-			try:
-				_remove_collected_directory(directory, expected)
-			except OSError as error:
-				if not _can_rescan_tree(error, rescans):
-					raise
-				rescans += 1
-				rescan = True
-				break
-		if rescan:
-			continue
-		for child_path, child_identity in deferred_root_controls:
-			_remove_scanned_child(
-				path,
-				identity,
-				child_path,
-				child_identity,
-				[],
-				root_control=True,
-			)
-		if directories:
-			try:
-				_remove_collected_directory(*directories[0])
-			except OSError as error:
-				if not _can_rescan_tree(error, rescans):
-					raise
-				rescans += 1
-				continue
-		return
+	pending = [(path, identity)]
+	rescans: dict[tuple[Path, int, int], int] = {}
+	while pending:
+		tree_path, tree_identity = pending.pop()
+		_remove_tree_attempt(tree_path, tree_identity, pending, rescans)
 
 
-def _can_rescan_tree(error: OSError, rescans: int) -> bool:
-	return error.errno in {errno.ENOTEMPTY, errno.EEXIST} and rescans < _TREE_REMOVAL_MAX_RESCANS
+def _remove_tree_attempt(
+	tree_path: Path,
+	tree_identity: os.stat_result,
+	pending: list[tuple[Path, os.stat_result]],
+	rescans: dict[tuple[Path, int, int], int],
+) -> None:
+	directories, deferred_root_controls = _scan_tree_for_removal(tree_path, tree_identity)
+	for directory, expected in reversed(directories[1:]):
+		if not _remove_collected_directory_with_retry(directory, expected, rescans):
+			# Retry only the raced subtree; unrelated directories have separate budgets.
+			pending.extend(((tree_path, tree_identity), (directory, expected)))
+			return
+	for child_path, child_identity in deferred_root_controls:
+		_remove_scanned_child(
+			tree_path,
+			tree_identity,
+			child_path,
+			child_identity,
+			[],
+			root_control=True,
+		)
+	if directories:
+		root_path, root_identity = directories[0]
+		if not _remove_collected_directory_with_retry(root_path, root_identity, rescans):
+			pending.append((root_path, root_identity))
+
+
+def _remove_collected_directory_with_retry(
+	path: Path,
+	expected: os.stat_result,
+	rescans: dict[tuple[Path, int, int], int],
+) -> bool:
+	key = (path, expected.st_dev, expected.st_ino)
+	try:
+		_remove_collected_directory(path, expected)
+	except OSError as error:
+		if not _can_rescan_directory(error, rescans.get(key, 0)):
+			raise
+		rescans[key] = rescans.get(key, 0) + 1
+		return False
+	rescans.pop(key, None)
+	return True
+
+
+def _can_rescan_directory(error: OSError, rescans: int) -> bool:
+	return (
+		error.errno in {errno.ENOTEMPTY, errno.EEXIST} and rescans < _DIRECTORY_REMOVAL_MAX_RESCANS
+	)
 
 
 def _scan_tree_for_removal(

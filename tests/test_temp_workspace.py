@@ -1692,6 +1692,35 @@ def test_removal_rescans_directory_when_entries_keep_appearing_after_quarantine(
 	assert not victim.exists()
 
 
+def test_temporary_workspace_cleanup_retries_each_directory_independently(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	monkeypatch.setattr(temp_workspace, "_user_state_directory", lambda: tmp_path / "state")
+	original_remove = temp_workspace._remove_collected_directory
+	victims: set[Path] = set()
+	interrupted: set[Path] = set()
+
+	def interrupt_each_directory_once(path: Path, expected: os.stat_result) -> None:
+		if path in victims and path not in interrupted:
+			interrupted.add(path)
+			raise OSError(errno.ENOTEMPTY, "directory not empty", os.fspath(path))
+		original_remove(path, expected)
+
+	monkeypatch.setattr(
+		temp_workspace, "_remove_collected_directory", interrupt_each_directory_once
+	)
+
+	with temporary_workspace(tmp_path / "repository") as workspace:
+		for index in range(temp_workspace._DIRECTORY_REMOVAL_MAX_RESCANS + 8):
+			victim = workspace / f"victim-{index}"
+			victim.mkdir()
+			victims.add(victim)
+
+	assert interrupted == victims
+	assert not workspace.exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows deletion uses file-handle identity")
 @pytest.mark.parametrize("entry_kind", ["file", "link", "directory"])
 def test_removal_preserves_entry_replaced_after_identity_check(
