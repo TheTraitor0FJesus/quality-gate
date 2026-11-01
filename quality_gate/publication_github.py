@@ -1027,7 +1027,11 @@ class GitHubCLI:
 	def _arguments(
 		self, path: str, method: str, *, allow_escape_sequences: bool = False
 	) -> list[str]:
-		if not path.startswith("/") or ".." in path or "\\" in path:
+		is_commit_comparison = (
+			method == "GET"
+			and re.fullmatch(r"/compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}", path) is not None
+		)
+		if not path.startswith("/") or (".." in path and not is_commit_comparison) or "\\" in path:
 			raise PublicationError("invalid repository API path")
 		endpoint = f"repos/{self.repository}" + ("" if path == "/" else path)
 		arguments = [
