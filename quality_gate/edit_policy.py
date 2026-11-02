@@ -45,9 +45,8 @@ def select_release(cache: PolicyCache, version: str) -> tuple[Path, ReleaseManif
 	if not root.is_dir():
 		raise EditError("release")
 	for path in (root, *root.rglob("*")):
-		if (
-			path.is_symlink()
-			or getattr(path.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+		if path.is_symlink() or getattr(path.lstat(), "st_file_attributes", 0) & getattr(
+			stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
 		):
 			raise EditError("release")
 	manifest = verify_release(root)

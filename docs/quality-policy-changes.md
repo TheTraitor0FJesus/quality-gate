@@ -75,6 +75,13 @@ Projects may keep pytest markers, test discovery, package metadata, and dependen
 
 ## Working-tree policy selection
 
+The additive [edit-integrity interface](edit-integrity.md) shares the normal
+Gate's conflict-marker and exact standard-waiver resolver on explicit complete
+bytes. NUL and invalid UTF-8 retain the Gate's non-text treatment. Its bounded
+touched-file coverage does not expand into a Git or history scan. The normal
+Gate marker scan also returns `unchecked` for unreadable or oversized input;
+its streaming limits are recorded in the [architecture map](architecture.md).
+
 The additive [edit-types interface](edit-types.md) runs whole affected typed
 components against the exact released mypy policy. Its bounded source,
 configuration, dependency, runtime and tool evidence must remain fresh at
@@ -95,9 +102,13 @@ must carry that correction explicitly; immutable old releases remain unchanged.
 
 The additive working-tree [edit-check interface](edit-check.md) reuses the exact released Ruff
 policy and tool without changing ordinary Gate scope or rule selection. Its explicit automatic
-fix allowlist contains only safe `I001`; `F401` remains unfixable. The final full-file lint still
-checks every released enabled rule. Interface-engine updates do not activate new consumer policy
-pins, and unsupported pins fail closed rather than falling back to baseline.
+fix allowlist contains only safe `I001`; `F401` remains unfixable. The explicit `phase: "write"`
+runs only those fixes and formatting; `phase: "validate"` runs the read-only final lint and format
+checks after the writer. Omitting `phase` preserves the earlier synchronous writer-and-diagnostics
+behavior. The final validation checks every released enabled rule. Interface-engine updates do not
+activate new consumer policy pins, and unsupported pins fail closed rather than falling back to
+baseline. Host use of these phases requires an immutable engine release that implements them; keep
+activation pending until that release is published and verified.
 
 ## Ruff policy selection
 

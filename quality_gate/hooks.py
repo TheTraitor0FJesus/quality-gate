@@ -7,11 +7,12 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .contracts import load_manifest
+from .admission import AdmissionError, queue_timeout_seconds, running_in_ci
+from .contracts import ValidationError, load_manifest, parse_manifest
 
 _LOGGER = logging.getLogger(__name__)
 PUSH_FIELD_COUNT = 4
@@ -131,15 +132,47 @@ def pre_push(repository: Path, remote: str, payload: str) -> int:
 	return 1
 
 
+def commit_gate_timeout_seconds(
+	staged_manifest: bytes,
+	*,
+	environment: Mapping[str, str] | None = None,
+) -> int:
+	"""Return the native hook's outer deadline from its staged schema 2 manifest."""
+	try:
+		manifest = parse_manifest(staged_manifest.decode("utf-8"))
+	except UnicodeError as error:
+		raise ValidationError("manifest", "cannot read valid UTF-8 TOML") from error
+	return _commit_gate_timeout(manifest.repository.gate_timeout_seconds, environment)
+
+
+def _commit_gate_timeout(
+	gate_timeout_seconds: int, environment: Mapping[str, str] | None = None
+) -> int:
+	if (
+		isinstance(gate_timeout_seconds, bool)
+		or not isinstance(gate_timeout_seconds, int)
+		or gate_timeout_seconds <= 0
+	):
+		raise ValueError("gate timeout must be a positive integer")
+	if running_in_ci(environment):
+		return gate_timeout_seconds
+	return gate_timeout_seconds + queue_timeout_seconds(environment)
+
+
 def run_commit_gate(
 	repository: Path,
 	runtime_root: Path,
 	*,
 	timeout_seconds: int | None = None,
+	staged_manifest: bytes | None = None,
 ) -> int:
-	"""Run the selected cached runtime for a staged commit and return its exit code."""
+	"""Run the selected cached runtime for a staged commit and return its exit code.
+
+	Callers with the captured index manifest pass it as ``staged_manifest`` so the
+	outer deadline matches the candidate that the CLI will check.
+	"""
 	repository = repository.resolve()
-	if not (repository / MANIFEST_NAME).is_file():
+	if staged_manifest is None and not (repository / MANIFEST_NAME).is_file():
 		return 0
 	python_candidates = (
 		runtime_root / ".venv" / "Scripts" / "python.exe",
@@ -152,9 +185,24 @@ def run_commit_gate(
 			f"Restore {runtime_root} and retry the commit.\n"
 		)
 		return 2
-	if timeout_seconds is None:
-		timeout_seconds = load_manifest(repository).repository.gate_timeout_seconds
+	if staged_manifest is not None and timeout_seconds is not None:
+		raise ValueError("provide either a staged manifest or a gate timeout, not both")
 	environment = os.environ.copy()
+	try:
+		if staged_manifest is not None:
+			outer_timeout = commit_gate_timeout_seconds(staged_manifest, environment=environment)
+		else:
+			gate_timeout = (
+				load_manifest(repository).repository.gate_timeout_seconds
+				if timeout_seconds is None
+				else timeout_seconds
+			)
+			outer_timeout = _commit_gate_timeout(gate_timeout, environment)
+	except AdmissionError as error:
+		sys.stderr.write(
+			f"QUALITY GATE UNCHECKED: {error}. Correct the local queue setting and retry.\n"
+		)
+		return 2
 	existing_pythonpath = environment.get("PYTHONPATH")
 	environment["PYTHONPATH"] = (
 		str(runtime_root)
@@ -175,13 +223,13 @@ def run_commit_gate(
 			cwd=runtime_root,
 			env=environment,
 			check=False,
-			timeout=timeout_seconds,
+			timeout=outer_timeout,
 		)
 	except subprocess.TimeoutExpired:
 		_LOGGER.warning("native commit gate timed out", exc_info=True)
 		sys.stderr.write(
 			"QUALITY GATE UNCHECKED: verification timed out after "
-			f"{timeout_seconds} seconds. Inspect the selected runtime and retry the commit.\n"
+			f"{outer_timeout} seconds. Inspect the selected runtime and retry the commit.\n"
 		)
 		return 2
 	return result.returncode

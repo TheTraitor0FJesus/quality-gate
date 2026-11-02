@@ -226,12 +226,19 @@ class CheckResult:
 	recovery_action: str | None = None
 	waiver_target: str | None = None
 	_secrets: tuple[str, ...] = field(default=(), repr=False, compare=False)
+	omitted_findings: int | None = 0
 
 	def __post_init__(self) -> None:
 		if not _CHECK_ID.fullmatch(self.check_id):
 			raise ValueError(f"invalid check id: {self.check_id!r}")
 		if not self.summary.strip():
 			raise ValueError("check summaries must not be empty")
+		if self.omitted_findings is not None and (
+			not isinstance(self.omitted_findings, int)
+			or isinstance(self.omitted_findings, bool)
+			or self.omitted_findings < 0
+		):
+			raise ValueError("omitted finding count must be a non-negative integer or unknown")
 		if (
 			self.status in {Status.FAILED, Status.UNCHECKED, Status.NOT_APPLICABLE}
 			and not self.recovery_action
@@ -245,6 +252,8 @@ class CheckResult:
 			raise ValueError("waived results require one exact target")
 		if self.status is Status.PASSED and self.findings:
 			raise ValueError("passed results cannot contain findings")
+		if self.status is Status.PASSED and self.omitted_findings != 0:
+			raise ValueError("passed results cannot contain omitted findings")
 
 	@property
 	def ordered_findings(self) -> tuple[Finding, ...]:

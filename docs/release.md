@@ -37,7 +37,41 @@ making the release candidate depend on its own unpublished wheel.
 
 ## Product verification
 
-The v3.1.0 candidate adds [whole-scope typing](edit-types.md), preserving schema 1
+The published v4.0.0 release changes normal `check` and `audit` output to summarize
+passed statuses. Failed and unchecked statuses remain visible, and `--verbose` returns
+the complete status map and safely collected findings. This is MAJOR relative to
+published v3.2.0 because tools that parse individual success lines must use
+`--verbose`. The checks, first `Quality Gate: <exit_code>` line, and exit-code
+precedence stay the same.
+
+The release also adds v4.0.0 policy support to the edit commands and prints the
+release audit report in CI logs. The [provider v4.0.0 acceptance record](audits/provider-v4.0.0-acceptance.md)
+records its immutable release evidence.
+
+The published v4.1.0 release adds optional `phase: write` and `phase: validate` requests to the
+working-tree Ruff interface. Requests without a phase preserve the synchronous behavior. Phase
+requests require engine v4.1.0 or newer; older exact policy pins and hosts that keep phase-less
+requests remain compatible. Host activation stays separate. This is MINOR relative to published
+v4.0.0. The [provider v4.1.0 acceptance record](audits/provider-v4.1.0-acceptance.md) records its
+immutable release evidence and current self-policy activation.
+
+The published v4.2.0 release adds a user-local queue for full Gate runs. Two runs may proceed across
+repositories for the same user; later runs wait up to 120 seconds by default and return `unchecked`
+without starting when the wait budget expires. `QUALITY_GATE_QUEUE_TIMEOUT_SECONDS` configures the
+wait. Ruff uses four worker threads by default, adjustable with `QUALITY_GATE_RUFF_THREADS`. CI
+skips the local queue. Provider budgets are 30 minutes for pytest, 40 minutes for the Gate, and
+50 minutes for CI. Before activating v4.2.0 in a native commit hook, its external timeout bridge must
+cover the full Gate and configured queue wait. This is MINOR relative to published v4.1.0. The
+[provider v4.2.0 acceptance record](audits/provider-v4.2.0-acceptance.md) records its immutable
+release evidence and self-policy activation.
+
+The v3.2.0 release added [read-only touched-file integrity](edit-integrity.md)
+and retained the v3.1.0 typing interface, including its separately selected
+background schema. This was MINOR relative to published v3.1.0. The
+[integrity provider evidence](audits/edit-integrity-provider.md) records that
+candidate's source verification; it does not certify host activation.
+
+The v3.1.0 release added [whole-scope typing](edit-types.md), preserving schema 1
 and adding the separately selected schema 2 background/cancellation envelope.
 It also adds the default-true manifest typing opt-out to the new policy. This is
 MINOR relative to published v3.0.0; older exact policy pins remain supported and
@@ -55,7 +89,7 @@ actual-secret fingerprints in the shared scanner transport. Persisted waivers fo
 the old redacted placeholder require explicit review and reissue, so this is MAJOR
 relative to v2.6.2. Interface schemas and detector rules remain unchanged. Both edit
 interfaces retain exact v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2 policy compatibility and
-support the published v3.0.0 policy.
+support the published v3.0.0, v3.1.0, v3.2.0, v4.0.0, v4.1.0, and v4.2.0 policies.
 The source policy pin stays on its current published release; activation uses the separate route above. Host
 installation/activation and the initial v2.4.2 consumer's `edit-setup` remain separate post-publication
 work; the provider acceptance record does not establish installed host-event acceptance.
@@ -76,12 +110,26 @@ each product job syncs the platform archive for the source manifest's pinned pol
 isolated cache, preserving both the published baseline and the release candidate.
 `quality_gate.temp_workspace` scopes check, parity, publisher, and release-process temporary files
 under the checked repository's ignored `temp/` directory. A read-only checkout or candidate
-snapshot uses a private hashed workspace per repository under the user-local system temporary directory. Release cache
-staging and atomic replacement files remain beside their persistent targets. Release verification
-defaults to this run workspace; the explicit `--workspace-parent` option remains available when an
-operator needs a shorter path.
+snapshot uses a private hashed workspace per repository under the user-local system temporary
+directory. Release cache staging and atomic replacement files remain beside their persistent
+targets. Release verification defaults to this run workspace; the explicit `--workspace-parent`
+option remains available when an operator needs a shorter path. On Windows, the release controller
+measures the resolved final workspace path, including existing junctions and symlinks, and rejects
+paths longer than 180 characters before artifact synchronization or audit. Its error reports the
+actual length, limit, minimum shortening, and the option to shorten or move the worktree directory.
+The provider's pytest collection preflight exercises the same nested temporary-workspace creation
+for every release-test `tmp_path` before tests run. This limit applies to release workspaces only; it
+is not a general checkout-length limit for consumers.
+
+Provider verification budgets are nested: the Python test stage is limited to 30 minutes, the
+complete Quality Gate to 40 minutes, and the reusable CI job to 50 minutes including bootstrap and
+cleanup. Local provider verification requires an explicit 50-minute aggregate executor budget;
+the ordinary 25-minute test-runner budget is insufficient for these inner limits.
 
 The `Verify package` step and artifact upload must succeed for each platform before publication.
+The artifact audit streams its redacted report to the job log, including when it fails.
+Candidate compatibility tests exercise the current product policy as well as historical pins;
+the source manifest's published pin alone cannot establish candidate-policy compatibility.
 The full-suite subprocess excludes the parent PR's history-selection variables so disposable
 test repositories select their own history. The build process retains Actions context for evidence.
 
@@ -165,6 +213,6 @@ retains projection and timeout checks. Existing adapter, distribution, installat
 failure-injection tests remain the product evidence; test doubles never replace the actual platform
 acceptance in the final release workflow.
 
-The release preserves the schema 2 CLI, v2 hook/runtime contract, platform ZIP delivery, consumer
+The release preserves the schema 2 CLI, schema 2 hook/runtime contract, platform ZIP delivery, consumer
 activation, rollback, cache retention, and backup responsibilities. Publishing the provider does
 not automatically change consumer workflow pins or deploy services.

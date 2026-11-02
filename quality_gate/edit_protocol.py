@@ -25,7 +25,19 @@ MAX_BACKGROUND_DEADLINE_MS = 30_000
 BACKGROUND_SCHEMA = 2
 DELIVERY_RESERVE_SECONDS = 0.05
 SUPPORTED_POLICIES = frozenset(
-	{"v2.4.2", "v2.5.0", "v2.6.0", "v2.6.1", "v2.6.2", "v3.0.0", "v3.1.0"}
+	{
+		"v2.4.2",
+		"v2.5.0",
+		"v2.6.0",
+		"v2.6.1",
+		"v2.6.2",
+		"v3.0.0",
+		"v3.1.0",
+		"v3.2.0",
+		"v4.0.0",
+		"v4.1.0",
+		"v4.2.0",
+	}
 )
 SAFE_FIXES = ("I001",)
 RECOVERY = {
@@ -84,15 +96,18 @@ def encode(result: dict[str, Any]) -> bytes:
 	return encoded
 
 
-def decode_request(payload: bytes, *, secrets: bool = False, types: bool = False) -> dict[str, Any]:
+def decode_request(
+	payload: bytes, *, secrets: bool = False, types: bool = False, integrity: bool = False
+) -> dict[str, Any]:
 	"""Validate the envelope before selecting files or prerequisites."""
+	read_only = _read_only_reader(secrets, integrity, types)
 	try:
 		request = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
 	except (UnicodeError, ValueError, RecursionError) as error:
 		raise EditError("invalid_request") from error
 	if len(payload) > MAX_REQUEST_BYTES or not isinstance(request, dict):
 		raise EditError("invalid_request")
-	background = _validate_envelope(request, types=types)
+	background = _validate_envelope(request, secrets=secrets, types=types, integrity=integrity)
 	deadline = request.get("deadline_unix_ms")
 	if type(deadline) is not int:
 		raise EditError("invalid_request")
@@ -104,21 +119,32 @@ def decode_request(payload: bytes, *, secrets: bool = False, types: bool = False
 	):
 		raise EditError("invalid_request")
 	if "baseline" in request:
-		_validate_baseline(request["baseline"], secrets=secrets or types)
+		_validate_baseline(request["baseline"], read_only=read_only)
 	remaining_ms = deadline - int(time.time() * 1000)
 	if remaining_ms <= DELIVERY_RESERVE_SECONDS * 1000:
 		deadline_error = EditError("deadline")
 		if background:
 			deadline_error.background = background_identity(request)
 		raise deadline_error
-	if remaining_ms > (MAX_BACKGROUND_DEADLINE_MS if background else MAX_DEADLINE_MS):
+	read_only_ruff = not read_only and request.get("phase") == "validate"
+	maximum_deadline_ms = (
+		MAX_BACKGROUND_DEADLINE_MS if background or read_only_ruff else MAX_DEADLINE_MS
+	)
+	if remaining_ms > maximum_deadline_ms:
 		raise EditError("invalid_request")
 	return request
 
 
-def _validate_envelope(request: dict[str, Any], *, types: bool) -> bool:
+def _validate_envelope(
+	request: dict[str, Any], *, secrets: bool, types: bool, integrity: bool = False
+) -> bool:
+	read_only = _read_only_reader(secrets, integrity, types)
 	allowed = {"schema", "root", "files", "deadline_unix_ms", "baseline", "cache_dir"}
 	background = types and request.get("schema") == BACKGROUND_SCHEMA
+	if not read_only:
+		allowed.add("phase")
+	if "phase" in request and (read_only or request.get("phase") not in {"write", "validate"}):
+		raise EditError("invalid_request")
 	if background:
 		allowed |= {"mode", "event_id", "cancel_path"}
 		_validate_background(request)
@@ -154,8 +180,14 @@ def background_identity(request: dict[str, Any] | None) -> dict[str, Any]:
 	return {}
 
 
-def _validate_baseline(baseline: object, *, secrets: bool = False) -> None:
-	fields = {"policy_release"} if secrets else {"policy_release", "python", "python_version"}
+def _read_only_reader(secrets: bool, integrity: bool, types: bool) -> bool:
+	if sum((secrets, integrity, types)) > 1:
+		raise EditError("invalid_request")
+	return secrets or integrity or types
+
+
+def _validate_baseline(baseline: object, *, read_only: bool = False) -> None:
+	fields = {"policy_release"} if read_only else {"policy_release", "python", "python_version"}
 	if (
 		not isinstance(baseline, dict)
 		or set(baseline) != fields

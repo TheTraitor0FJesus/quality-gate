@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from quality_gate import runner
+from quality_gate import ci_parity, runner
 from quality_gate.ci_parity import compare_results
 from quality_gate.distribution import DistributionError, PolicyCache
 
@@ -136,9 +136,10 @@ def _build_wheel(tmp_path: Path) -> Path:
 		),
 	)
 	_make_writable(source)
+	build_python = Path(sys.base_prefix) / ("python.exe" if os.name == "nt" else "bin/python3")
 	result = subprocess.run(
 		[
-			sys.executable,
+			str(build_python),
 			"-m",
 			"pip",
 			"wheel",
@@ -304,7 +305,7 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert 'QUALITY_GATE_WHEEL="$(python .quality-gate-ci/quality_gate/ci_release.py' in workflow
 	assert "manifest_python.outputs.versions" in workflow
 	assert 'default: "3.12"' not in workflow
-	assert manifest["quality"]["policy_release"] == "v3.1.0"
+	assert manifest["quality"]["policy_release"] == "v4.2.0"
 	version = tomllib.loads((REPOSITORY / ".release" / "version.toml").read_text(encoding="utf-8"))
 	assert template["quality"]["policy_release"] == f"v{version['version']}"
 	assert fixture["quality"]["policy_release"] == manifest["quality"]["policy_release"]
@@ -359,7 +360,7 @@ def test_reusable_workflow_has_one_stable_job_and_detects_private_push_bypass() 
 	assert "- main" in workflow
 	assert "name: Quality Gate" in workflow
 	assert "github.event.repository.default_branch" in workflow
-	assert "timeout-minutes: 25" in workflow
+	assert "timeout-minutes: 50" in workflow
 	assert (
 		"group: quality-${{ github.workflow }}-${{ github.ref }}-"
 		"${{ inputs['runner-os'] || 'ubuntu-latest' }}" in workflow
@@ -367,6 +368,17 @@ def test_reusable_workflow_has_one_stable_job_and_detects_private_push_bypass() 
 	assert "cancel-in-progress: true" in workflow
 	assert "Default-branch pushes are detection-only" in workflow
 	assert "private GitHub Free repositories" in workflow
+
+
+def test_provider_verification_budgets_fit_the_50_minute_ci_job() -> None:
+	"""Keep nested Python and Gate deadlines below the workflow's outer timeout."""
+	manifest = tomllib.loads((REPOSITORY / "quality-gate.toml").read_text(encoding="utf-8"))
+	defaults = manifest["repository"]["defaults"]
+
+	assert defaults["test_timeout_seconds"] == 30 * 60
+	assert defaults["gate_timeout_seconds"] == 40 * 60
+	assert defaults["test_timeout_seconds"] < defaults["gate_timeout_seconds"] < 50 * 60
+	assert "timeout-minutes: 50" in WORKFLOW.read_text(encoding="utf-8")
 
 
 def test_dependabot_updates_pinned_actions_weekly_without_auto_merge() -> None:
@@ -391,6 +403,51 @@ def test_ci_and_local_parity_uses_one_cli_verdict_contract() -> None:
 	assert '--base "$QUALITY_GATE_BASE" --head "$QUALITY_GATE_HEAD"' in workflow
 	assert 'quality-gate check --head "$GITHUB_SHA"' in workflow
 	assert "quality-gate check --verbose" not in workflow
+
+
+def test_parity_requests_verbose_status_lines_for_the_complete_check_map(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+	"""Verify parity requests the full status listing that its parser consumes."""
+
+	invocations: list[list[str]] = []
+
+	def locate_executable(_name: str, *, path: str | None) -> str:
+		assert path == "isolated-path"
+		return "quality-gate"
+
+	def run_gate(
+		command: list[str],
+		**_kwargs: object,
+	) -> subprocess.CompletedProcess[str]:
+		invocations.append(command)
+		return subprocess.CompletedProcess(
+			command,
+			0,
+			stdout=(
+				"first.check: passed - complete\nsecond.check: unchecked - runtime unavailable\n"
+			),
+			stderr="",
+		)
+
+	monkeypatch.setattr(ci_parity.shutil, "which", locate_executable)
+	monkeypatch.setattr(ci_parity.subprocess, "run", run_gate)
+
+	result = ci_parity._gate(
+		{"PATH": "isolated-path"},
+		tmp_path,
+		"--base",
+		"BASE",
+		"--head",
+		"HEAD",
+	)
+
+	assert result.returncode == 0
+	assert invocations[0][3:5] == ["check", "--verbose"]
+	assert ci_parity._surface(result.stdout) == {
+		"first.check": "passed",
+		"second.check": "unchecked",
+	}
 
 
 def test_platform_parity_workflow_executes_the_gate_on_windows_and_linux() -> None:

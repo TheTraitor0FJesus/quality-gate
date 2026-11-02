@@ -16,10 +16,17 @@ import threading
 import time
 import tokenize
 import tomllib
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from .admission import (
+	AdmissionError,
+	child_admission_environment,
+	gate_admission,
+	running_in_ci,
+)
 from .contracts import (
 	CheckResult,
 	Finding,
@@ -47,6 +54,9 @@ POLICY_DIR = Path(__file__).resolve().parent / "policy"
 EXIT_UNCHECKED = 2
 MAX_COMMAND_OUTPUT_CHARS = 16_384
 MAX_COMMAND_OUTPUT_BYTES = MAX_COMMAND_OUTPUT_CHARS * 4 + 1
+RUFF_THREADS_ENV = "QUALITY_GATE_RUFF_THREADS"
+DEFAULT_RUFF_THREADS = 4
+MAX_RUFF_THREADS = 64
 MAX_DEPTRY_REPORT_BYTES = 1024 * 1024
 MAX_DEPTRY_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_DEPTRY_TEXT_CHARS = 1000
@@ -928,6 +938,8 @@ def _safe_environment(temporary_path: str) -> dict[str, str]:
 		"LC_ALL",
 		"PATHEXT",
 		"PATH",
+		"QUALITY_GATE_QUEUE_TIMEOUT_SECONDS",
+		"QUALITY_GATE_RUFF_THREADS",
 		"SYSTEMROOT",
 		"WINDIR",
 	}
@@ -947,7 +959,26 @@ def _safe_environment(temporary_path: str) -> dict[str, str]:
 	)
 	if os.name == "nt":
 		environment["USERPROFILE"] = temporary_path
+	environment.update(child_admission_environment())
 	return environment
+
+
+def _ruff_environment(environment: dict[str, str]) -> dict[str, str]:
+	raw = os.environ.get(RUFF_THREADS_ENV)
+	if raw is None:
+		threads = DEFAULT_RUFF_THREADS
+	elif not re.fullmatch(r"[0-9]{1,2}", raw) or not 1 <= int(raw) <= MAX_RUFF_THREADS:
+		raise QualityGateError(
+			f"{RUFF_THREADS_ENV} must be an integer from 1 through {MAX_RUFF_THREADS}",
+			check_id="runtime.ruff_threads",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action=(
+				f"set {RUFF_THREADS_ENV} to a whole number from 1 through {MAX_RUFF_THREADS}"
+			),
+		)
+	else:
+		threads = int(raw)
+	return environment | {"RAYON_NUM_THREADS": str(threads)}
 
 
 def _runtime_python(prepared: PreparedEnvironment, component_index: int) -> Path:
@@ -1495,10 +1526,15 @@ def _execute_commands(
 	for check_id, command, timeout in commands:
 		executed.append(check_id)
 		try:
+			command_environment = (
+				_ruff_environment(environment)
+				if check_id.endswith((".ruff", ".format"))
+				else environment
+			)
 			output = run(
 				command,
 				actual_root,
-				environment,
+				command_environment,
 				timeout=_remaining(deadline, max(timeout, component_timeout)),
 			)
 			if output and check_id.endswith(".coverage_report"):
@@ -1928,18 +1964,28 @@ def _run_snapshot(
 ) -> Verdict:
 	"""Run one candidate snapshot and convert snapshot failures to a verdict."""
 	try:
-		with temporary_workspace(actual_root):
-			with candidate_snapshot(actual_root) as snapshot:
-				verdict = _check_snapshot(
-					snapshot.root,
-					verbose=verbose,
-					repository_root=actual_root,
-					index_file=getattr(snapshot, "repository_index", None),
-					base=base,
-					head=head,
-					mode=mode,
-					policy_release=policy_release,
-				)
+		admission = nullcontext() if running_in_ci() else gate_admission()
+		with admission:
+			with temporary_workspace(actual_root):
+				with candidate_snapshot(actual_root) as snapshot:
+					verdict = _check_snapshot(
+						snapshot.root,
+						verbose=verbose,
+						repository_root=actual_root,
+						index_file=getattr(snapshot, "repository_index", None),
+						base=base,
+						head=head,
+						mode=mode,
+						policy_release=policy_release,
+					)
+	except AdmissionError as error:
+		quality_error = QualityGateError(
+			str(error),
+			check_id="runtime.admission",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action=error.recovery_action,
+		)
+		verdict = Verdict((_error_result(quality_error),))
 	except SnapshotError as error:
 		quality_error = QualityGateError(
 			error.message,

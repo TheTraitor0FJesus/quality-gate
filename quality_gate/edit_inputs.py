@@ -49,9 +49,8 @@ def regular_path(root: Path, relative: str, *, optional: bool = False) -> Path:
 			if optional:
 				return root.joinpath(*parts)
 			raise EditError("io") from None
-		if (
-			stat.S_ISLNK(metadata.st_mode)
-			or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+		if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & getattr(
+			stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
 		):
 			raise EditError("unsafe_path")
 	if not path.is_file() or path.stat().st_nlink != 1:

@@ -26,32 +26,59 @@ ignored `temp/` directory, removes stale inactive runs when it starts, and remov
 directory when it exits. Read-only checkouts and candidate snapshots use a private hashed workspace
 per repository under the user-local system temporary directory. Every consumer repository must ignore its root
 `temp/` directory in `.gitignore` (for example, with `/temp/`). Cache staging and atomic replacement
-files remain beside their persistent targets. `sync`, `setup`, rollback, confirmed prune, and
-`format`, `edit-setup`, and `edit-check` are the explicit mutation commands.
+files remain beside their persistent targets. `sync`, `setup`, rollback, confirmed prune,
+`format`, and `edit-setup` are explicit mutation commands. An `edit-check` request with
+`phase: "write"` applies approved Ruff fixes and formatting only; `phase: "validate"` is
+read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnostics behavior.
 
 1. Run `quality-gate validate` after editing `quality-gate.toml`.
-2. Run `quality-gate doctor` to inspect the selected release and component runtimes.
+2. Run `quality-gate doctor` to verify the selected release and component runtimes are available.
 3. For changes to this repository's source or policy, run the current-source `quality-gate check`
    before committing. For a consumer implementation, complete staged verification through its
    active workflow; its commit-hook Quality Gate satisfies this step. For standalone verification,
-   run `quality-gate check` directly. Use `--verbose` only when the compact report is not sufficient.
+   run `quality-gate check` directly. The default report preserves every observed failed and
+   unchecked check status while bounding finding details. Known and unknown upstream omissions are
+   identified explicitly. Use `--verbose` for every status and all safely collected redacted
+   findings.
 4. Use `quality-gate format <explicit-path>...`, stage the result, and rerun the current-source
    `quality-gate check`
    for Quality Gate changes or return to the active workflow for consumer changes.
-5. Use `quality-gate version` to confirm which installed policy engine is executing.
+5. The `quality-gate version` command prints the installed engine package version. The repository's
+   `quality-gate.toml` selects the policy release; `quality-gate doctor` checks that release and its
+   runtimes but does not print its version. `quality-gate setup` prints the selected release when it
+   prepares the policy and runtimes.
 
-The native pre-commit wrapper reads the staged manifest, verifies its exact cached v2 wheel, and
-calls the release-backed gate without importing mutable repository source. The native pre-push
-wrapper blocks updates and deletion of the remote default branch when Git can prove its name.
+For this provider, the Python test stage has a 30-minute limit, the complete Gate has a 40-minute
+limit, and the reusable CI job has a 50-minute outer limit. The job limit includes bootstrap and
+cleanup. Local verification requires an explicit 50-minute aggregate executor budget as well.
+
+The native pre-commit wrapper reads the staged manifest, resolves `quality.policy_release`, verifies
+that exact cached release, and calls the Gate without importing mutable repository source. The
+wrapper has no separate policy-version pin. If CI reports a v2 release, inspect the
+`policy_bootstrap` output and the staged manifest. The bootstrap release is used only when this
+repository's selected release API returns 404. The native pre-push wrapper blocks updates and
+deletion of the remote default branch when Git can prove its name.
+
+Queue-aware releases admit two independent local full Gate runs across repositories for the
+current user. Waiting continues automatically when a slot opens and has a separate configurable
+budget. Ruff children default to four worker threads. See [Local Gate queue](local-gate-queue.md)
+for settings, nested execution, and the native-wrapper activation requirement. Source changes do
+not activate this behavior in an older immutable consumer release.
 
 ## Manifest maintenance
 
-For synchronous post-edit Ruff checks, use the separate [working-tree interface](edit-check.md).
-It checks explicit complete working-tree files, including unmanaged and non-Git projects, with a
-versioned JSON result and a shared caller deadline. `edit-setup` explicitly provisions the selected
-release's native Ruff; `edit-check` performs no downloads, dependency installation or environment
-creation. Its supervisor removes its isolated same-volume workspace after completion or timeout.
-It is an explicit writer and does not replace staged/full Gate verification. Keep the interface
+For post-edit Ruff checks, use the separate [working-tree interface](edit-check.md). Its explicit
+`phase: "write"` applies approved fixes and formatting synchronously to explicit complete
+working-tree files, including unmanaged and non-Git projects, without running final diagnostics.
+After those writes finish, `phase: "validate"` runs the final lint and format checks without changing
+project files; the host may run this phase in the shared bounded background worker. It accepts the
+shared 30-second work limit while the writer keeps its 10-second limit. Omitting `phase` preserves
+the earlier synchronous writer-and-diagnostics behavior. Each phase returns a versioned JSON result
+for the exact selected policy and content. The read-only phase requires a published, verified engine
+release that implements it. Publication alone does not install the engine or accept host activation.
+`edit-setup` explicitly provisions the selected release's native Ruff; neither phase downloads tools,
+installs dependencies or creates runtimes. The supervisor removes its temporary workspace after
+completion or timeout. These phases do not replace staged/full Gate verification. Keep the interface
 engine identity separate from the consumer policy pin; consult its supported-release matrix before
 activation, including when the selected policy predates the command.
 
@@ -60,6 +87,13 @@ For read-only touched-content secrets, use the separate
 exact waivers without a Python runtime, performs no setup/download/history scan,
 and requires current raw-byte identities. Its local development seam is distinct
 from installed immutable-release activation.
+
+For read-only touched-file conflict markers, use the separate
+[edit-integrity interface](edit-integrity.md). It shares the normal Gate's exact
+marker and standard-waiver semantics, checks only explicit complete files, and
+uses the selected immutable policy without a scanner or Python runtime. The host
+must preserve its common post-Ruff deadline and validate every returned identity;
+provider publication does not activate or enable the host hook.
 
 For read-only whole-component typing, use [edit-types](edit-types.md). Schema 1
 uses the remaining common synchronous deadline. Schema 2 supports an explicitly
@@ -107,8 +141,9 @@ quality-gate doctor
 ```
 
 Use `quality-gate sync --prune` to preview cleanup and add `--confirm` only after reviewing the
-preview. A missing release, runtime, tool, Python version, unreadable tree, timeout, or shallow
-history is `unchecked`; it blocks completion and requires the recovery action in the report.
+preview. A missing release, runtime, tool, Python version, unreadable tree, exceeded scan limit,
+timeout, or shallow history is `unchecked`; it blocks completion and requires the recovery
+action in the report.
 Never treat an `unchecked` result as a pass.
 
 ## Consumer release update

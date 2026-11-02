@@ -13,10 +13,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from quality_gate import runner
 from quality_gate.cli import main
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import ExternalTool, ReleaseFile, ReleaseManifest
+from quality_gate.temp_workspace import TemporaryWorkspaceError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -139,9 +141,16 @@ def _patch_runtime(
 
 
 def _invoke(
-	root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+	root: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+	*,
+	verbose: bool = False,
 ) -> tuple[int, str]:
-	monkeypatch.setattr(sys, "argv", ["quality-gate", "--root", str(root), "check"])
+	arguments = ["quality-gate", "--root", str(root), "check"]
+	if verbose:
+		arguments.append("--verbose")
+	monkeypatch.setattr(sys, "argv", arguments)
 	result = main()
 	return result, capsys.readouterr().out
 
@@ -202,7 +211,7 @@ def _deptry_issue(code: str, module: str, path: str, line: int | None) -> dict[s
 	}
 
 
-def test_cli_checks_all_declared_components_and_collapses_passed_output(
+def test_cli_summarizes_declared_components_without_individual_passed_lines(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
 	root = _disposable_repository(tmp_path, "multi-component")
@@ -212,11 +221,12 @@ def test_cli_checks_all_declared_components_and_collapses_passed_output(
 	result, output = _invoke(root, monkeypatch, capsys)
 
 	assert result == 0
-	assert "python.component_1.ruff: passed" in output
-	assert "python.component_2.ruff: passed" in output
-	assert "python.component_1.pytest: not_applicable" in output
-	assert "python.component_2.pytest: not_applicable" in output
-	assert "  - " not in output
+	assert output.splitlines()[0] == "Quality Gate: 0"
+	assert "Observed results:" in output
+	assert "python.component_1.ruff: passed" not in output
+	assert "python.component_2.ruff: passed" not in output
+	assert "python.component_1.pytest: not_applicable" not in output
+	assert "python.component_2.pytest: not_applicable" not in output
 	assert len([command for command in seen_commands if "ruff" in command]) == (
 		EXPECTED_MULTI_COMPONENT_RUFF_CHECKS
 	)
@@ -269,7 +279,7 @@ expires_on = "2027-09-02"
 	)
 	assert _git(root, "add", ".").returncode == 0
 
-	result, output = _invoke(root, monkeypatch, capsys)
+	result, output = _invoke(root, monkeypatch, capsys, verbose=True)
 
 	assert result == 0
 	assert "python.component_1.deptry: waived" in output
@@ -432,7 +442,7 @@ def test_cli_rejects_native_deptry_suppressions(
 	_patch_deptry_process(monkeypatch, [], returncode=0)
 	assert _git(root, "add", ".").returncode == 0
 
-	result, output = _invoke(root, monkeypatch, capsys)
+	result, output = _invoke(root, monkeypatch, capsys, verbose=True)
 
 	assert result in {1, EXIT_UNCHECKED}
 	assert "python.component_1.deptry: passed" not in output
@@ -451,7 +461,7 @@ def test_cli_does_not_treat_string_literals_as_inline_suppressions(
 	_patch_deptry_process(monkeypatch, [], returncode=0)
 	assert _git(root, "add", ".").returncode == 0
 
-	result, output = _invoke(root, monkeypatch, capsys)
+	result, output = _invoke(root, monkeypatch, capsys, verbose=True)
 
 	assert result == 0
 	assert "python.component_1.deptry: passed" in output
@@ -570,7 +580,7 @@ def test_cli_ignores_development_imports_in_nested_test_directories(
 	_patch_runtime(monkeypatch, root, [], None)
 	assert _git(root, "add", ".").returncode == 0
 
-	result, output = _invoke(root, monkeypatch, capsys)
+	result, output = _invoke(root, monkeypatch, capsys, verbose=True)
 
 	assert result == 0
 	assert "python.component_1.deptry: passed" in output
@@ -645,7 +655,7 @@ def test_cli_uses_pinned_deptry_for_invalid_and_corrected_candidates(
 	)
 	assert _git(root, "add", "pyproject.toml").returncode == 0
 
-	passed_result, passed_output = _invoke(root, monkeypatch, capsys)
+	passed_result, passed_output = _invoke(root, monkeypatch, capsys, verbose=True)
 
 	assert passed_result == 0
 	assert "python.component_1.deptry: passed" in passed_output
@@ -682,7 +692,7 @@ def test_cli_explicitly_excludes_notebooks_from_dependency_hygiene(
 	_patch_runtime(monkeypatch, root, [], None)
 	assert _git(root, "add", ".").returncode == 0
 
-	result, output = _invoke(root, monkeypatch, capsys)
+	result, output = _invoke(root, monkeypatch, capsys, verbose=True)
 
 	assert result == 0, output
 	assert "python.component_1.deptry: passed" in output
@@ -740,7 +750,7 @@ def test_cli_blocks_and_accepts_the_staged_python_policy_candidate(
 	)
 	assert _git(root, "add", "app/app.py").returncode == 0
 
-	passed_result, passed_output = _invoke(root, monkeypatch, capsys)
+	passed_result, passed_output = _invoke(root, monkeypatch, capsys, verbose=True)
 
 	assert passed_result == 0
 	assert "python.component_1.ruff: passed" in passed_output
@@ -755,7 +765,8 @@ def test_cli_reports_explicitly_not_applicable_tests_without_blocking(
 	result, output = _invoke(root, monkeypatch, capsys)
 
 	assert result == 0
-	assert "python.component_1.pytest: not_applicable" in output
+	assert "not applicable" in output
+	assert "python.component_1.pytest: not_applicable" not in output
 
 
 def test_cli_reports_pytest_collection_failure_as_unchecked(
@@ -794,6 +805,17 @@ def test_cli_reports_timeout_as_unchecked_without_a_failed_verdict(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
 	root = _disposable_repository(tmp_path, "python-tests")
+	manifest = root / "quality-gate.toml"
+	manifest_text = manifest.read_text(encoding="utf-8")
+	assert 'required_documents = ["quality-gate.toml"]' in manifest_text
+	manifest.write_text(
+		manifest_text.replace(
+			'required_documents = ["quality-gate.toml"]',
+			'required_documents = ["quality-gate.toml", "docs/missing.md"]',
+		),
+		encoding="utf-8",
+	)
+	assert _git(root, "add", "quality-gate.toml").returncode == 0
 
 	def time_out(
 		command: list[str],
@@ -814,8 +836,36 @@ def test_cli_reports_timeout_as_unchecked_without_a_failed_verdict(
 	result, output = _invoke(root, monkeypatch, capsys)
 
 	assert result == EXIT_UNCHECKED
+	assert "manifest.documents: failed" in output
+	assert "docs/missing.md" in output
 	assert "python.component_1.pytest: unchecked" in output
 	assert "python.component_1.pytest: failed" not in output
+
+
+@pytest.mark.parametrize("command", ["check", "audit"])
+def test_cli_renders_early_workspace_unavailability_as_unchecked(
+	command: str,
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+) -> None:
+	root = _disposable_repository(tmp_path, "valid")
+
+	def unavailable_workspace(_root: Path) -> object:
+		raise TemporaryWorkspaceError("repository workspace unavailable")
+
+	monkeypatch.setattr(
+		"quality_gate.temp_workspace.temporary_workspace", unavailable_workspace
+	)
+	monkeypatch.setattr(sys, "argv", ["quality-gate", "--root", str(root), command])
+
+	result = main()
+	output = capsys.readouterr().out
+
+	assert result == EXIT_UNCHECKED
+	assert output.splitlines()[0] == "Quality Gate: 2"
+	assert "temporary.workspace: unchecked - repository workspace unavailable" in output
+	assert "restore a writable repository temp directory" in output
 
 
 def test_cli_uses_a_sanitized_environment_and_redacts_secret_output(
@@ -870,8 +920,9 @@ def test_cli_prints_report_only_coverage_when_provider_is_pinned(
 	result, output = _invoke(root, monkeypatch, capsys)
 
 	assert result == 0
-	assert "python.component_1.coverage_report: passed" in output
 	assert "coverage report: TOTAL 10 1 90%" in output
+	assert "Report-only: python.component_1.coverage_report" in output
+	assert "python.component_1.coverage_report: passed" not in output
 	assert secret not in output
 	assert "threshold" not in output.casefold()
 
@@ -899,9 +950,8 @@ def test_cli_does_not_enforce_report_only_coverage_failures(
 	result, output = _invoke(root, monkeypatch, capsys)
 
 	assert result == 0
-	assert "python.component_1.coverage: passed" in output
-	assert "python.component_1.coverage_report: passed" in output
 	assert "coverage report unavailable; report-only: coverage provider failed" in output
+	assert "python.component_1.coverage_report: passed" not in output
 
 
 @pytest.mark.parametrize("separator", ["/", "\\"])
