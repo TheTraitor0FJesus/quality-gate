@@ -136,6 +136,20 @@ def _unified_archive(
 			archive.writestr("unexpected.txt", b"unexpected")
 
 
+def _mismatch_unified_member_checksum(path: Path, member_path: str) -> None:
+	with zipfile.ZipFile(path) as archive:
+		members = [(member.filename, archive.read(member)) for member in archive.infolist()]
+	assert any(name == member_path for name, _content in members)
+	with zipfile.ZipFile(path, "w") as archive:
+		for name, content in members:
+			archive.writestr(
+				name,
+				b"member content changed without updating release.toml"
+				if name == member_path
+				else content,
+			)
+
+
 def test_ci_release_verifier_accepts_an_exact_unified_inventory(tmp_path: Path) -> None:
 	archive = tmp_path / "quality-gate-v2.0.6-Windows.zip"
 	metadata = tmp_path / "release.json"
@@ -153,6 +167,53 @@ def test_ci_release_verifier_accepts_an_exact_unified_inventory(tmp_path: Path) 
 	)
 
 	assert wheel == target / "quality_gate-2.0.6-py3-none-any.whl"
+
+
+@pytest.mark.parametrize(
+	("member_path", "diagnostic"),
+	[
+		("quality_gate-2.0.6-py3-none-any.whl", "release wheel checksum mismatch"),
+		(
+			"quality_gate/policy/ruff.toml",
+			"release file checksum mismatch: quality_gate/policy/ruff.toml",
+		),
+		("gitleaks.exe", "release file checksum mismatch: gitleaks.exe"),
+	],
+	ids=["wheel", "policy-file", "native-tool"],
+)
+@pytest.mark.parametrize("existing_target", [False, True], ids=["new-target", "existing-target"])
+def test_ci_release_verifier_rejects_member_checksum_mismatch_before_extraction(
+	member_path: str,
+	diagnostic: str,
+	existing_target: bool,
+	tmp_path: Path,
+) -> None:
+	archive = tmp_path / "quality-gate-v2.0.6-Windows.zip"
+	metadata = tmp_path / "release.json"
+	target = tmp_path / "member-mismatch"
+	_unified_archive(archive)
+	_mismatch_unified_member_checksum(archive, member_path)
+	_write_metadata(metadata, _metadata(archive, release="v2.0.6", asset=archive.name))
+	sentinel = target / "preserved.txt"
+	if existing_target:
+		target.mkdir()
+		sentinel.write_bytes(b"preserve existing contents")
+
+	with pytest.raises(ci_release.CiReleaseError) as error:
+		ci_release.verify_release_asset(
+			metadata,
+			archive,
+			target,
+			expected_release="v2.0.6",
+			expected_name=archive.name,
+		)
+
+	assert str(error.value) == diagnostic
+	if existing_target:
+		assert list(target.iterdir()) == [sentinel]
+		assert sentinel.read_bytes() == b"preserve existing contents"
+	else:
+		assert not target.exists()
 
 
 @pytest.mark.parametrize("limited_resource", ["entries", "size"])

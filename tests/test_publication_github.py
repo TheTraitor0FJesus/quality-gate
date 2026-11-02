@@ -1000,9 +1000,12 @@ def test_image_writer_cli_passes_the_original_pull_request_number(
 ) -> None:
 	from quality_gate import publication_cli
 
+	calls: list[tuple[int, int, Path]] = []
+
 	class Publisher:
 		@staticmethod
 		def write_images(_pr: int, _candidate_id: int, _output: Path) -> dict[str, str]:
+			calls.append((_pr, _candidate_id, _output))
 			return {"status": "images-written", "version": "2.3.0"}
 
 	monkeypatch.setattr(publication_cli, "_publisher", lambda _root: Publisher())
@@ -1021,6 +1024,7 @@ def test_image_writer_cli_passes_the_original_pull_request_number(
 		== 0
 	)
 	assert '"status": "images-written"' in capsys.readouterr().out
+	assert calls == [(7, 9, tmp_path)]
 
 
 def test_job_log_download_retries_escape_guard_with_gh_opt_in() -> None:
