@@ -27,9 +27,12 @@ For this repository, use the executable declaration format in the shared publish
    only when the complete, stable changed-file list consists of workflow YAML files directly under
    `.github/workflows/`, including any previous paths for renames. Mixed or uncertain file lists
    still require an explicit decision.
-5. Complete the current-source staged Quality Gate and required review. The read-only
-   `.github/workflows/release-validation.yml` caller checks opened, synchronize, reopened, and edited
-   PRs targeting `main`. Publication is authorized only by the owner's final default-branch merge.
+5. Complete the required review. The authorized commit hook runs the local staged Quality Gate, and
+   the read-only `.github/workflows/release-validation.yml` caller checks opened, synchronize,
+   reopened, and edited PRs targeting `main`. This release procedure does not require a separate
+   current-source Gate. The only routine pre-review Gate outside the hook is the one explicitly
+   required by `$implement`; a direct user request can also request a standalone check. Publication
+   is authorized only by the owner's final default-branch merge.
 
 After publication, update the provider's own `quality.policy_release` to the newly published release
 in a separate no-release PR. This activates the new policy for subsequent provider checks without

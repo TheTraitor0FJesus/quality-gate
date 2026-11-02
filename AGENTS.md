@@ -24,7 +24,14 @@ Before a non-trivial codebase question, design task, or code change, read [the a
 
 Before changing the runner, a shared tool policy, the manifest contract, or the reusable CI workflow, read [the quality policy change guide](docs/quality-policy-changes.md). Consumers select an immutable policy release and a pinned reusable-workflow SHA; activation requires an explicit consumer update, as described in [the agent reference](docs/agent-reference.md).
 
-This repository's commit hook runs the pinned released Quality Gate. Source or policy changes also require a current-source `quality-gate check` before committing; see [verification details](docs/agent-reference.md#normal-operation).
+This repository's commit hook runs the pinned released Quality Gate against staged changes. Run a
+standalone Gate only when task instructions explicitly require a pre-review full check
+or the user directly requests one; generic verification, review, PR, release, or policy-change
+guidance does not authorize it. After fixing a failed staged Gate, if an authorized commit is next,
+run only focused checks outside hook coverage, then retry the commit and let its hook verify the
+corrected staged candidate. For an authorized standalone staged Gate, dispatch the configured
+test-runner with `scope.kind = "quality-gate"` and `snapshot = "staged"`. See
+[verification details](docs/agent-reference.md#normal-operation).
 
 Before full-suite, audit or release verification, size test, Gate, runner, hook and CI timeout budgets for the operation, allowing outer budgets to cover inner work and cleanup; edit-hook deadlines retain their separate contract.
 

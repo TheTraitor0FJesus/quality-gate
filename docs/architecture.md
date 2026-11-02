@@ -116,7 +116,11 @@ Use this map before non-trivial codebase questions, design work, or code changes
   specific to release workspaces and does not limit consumer checkout paths.
 - **Release and runtime preparation** — `quality-gate sync` → verified immutable release cache → `quality-gate setup` → repository-keyed runtime fingerprint → isolated Python environment; `quality-gate doctor` reports missing prerequisites as unchecked.
 - **Project bootstrap** — `$setup-repo` → `quality-gate.toml` and a CI caller → reusable `quality.yml`.
-- **Unified agent verification** — typed test-runner `scope: full` → repository-owned supplemental tests when declared → one staged Quality Gate; without a manifest, ordinary complete-suite discovery remains in use.
+- **Agent verification**: typed test-runner `scope: full` validates the manifest, runs pytest
+  for each applicable Python component's declared test paths, and runs declared supplemental
+  tests against the working tree. The separate `scope: quality-gate` runs the staged Gate only
+  when explicitly requested by the task procedure or user. Without a manifest, ordinary
+  complete-suite discovery remains in use.
 - **Provider policy activation** — verified publication → `quality-gate-release-published` repository event → serialized provider activation PR → human review and merge. Consumers use the same event through their separate rollout workflow.
 - **Owner-merged publication** — `release-validation.yml` validates open default-target PRs through
   `release-prepare.yml`; after owner merge, `release.yml` calls shared preparation to resolve the
