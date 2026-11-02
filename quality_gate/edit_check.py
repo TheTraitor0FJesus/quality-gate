@@ -330,8 +330,6 @@ class Invocation:
 				"--fix",
 				"--fixable",
 				",".join(SAFE_FIXES),
-				"--unfixable",
-				"F401",
 				"--no-unsafe-fixes",
 				"--output-format",
 				"json",

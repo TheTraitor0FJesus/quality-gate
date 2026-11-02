@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quality-gate"
-version = "4.2.0"
+version = "4.6.0"
 description = "One quality contract for local Git hooks and GitHub CI."
 requires-python = ">=3.11"
 
 [project.optional-dependencies]
 tools = [
     "deptry==0.25.1",
-    "mypy==2.3.1",
+    "mypy==2.4.0",
     "pytest==9.1.1",
-    "ruff==0.16.4",
+    "ruff==0.17.2",
 ]
 test = ["deptry==0.25.1", "pytest==9.1.1"]
 

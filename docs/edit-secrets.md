@@ -164,8 +164,8 @@ starts in the entry function. The host measures outer launch-to-delivery time.
 ## Materialization and compatibility
 
 The supported exact pins are v2.4.2, v2.5.0, v2.6.0, v2.6.1, v2.6.2 and v3.0.0.
-Published v3.1.0, v3.2.0, v4.0.0, and v4.1.0 are also supported. The v4.2.0
-candidate adds its own pin, which becomes usable after immutable publication.
+Published v3.1.0, v3.2.0, v4.0.0, v4.1.0, and v4.2.1 are also supported. The
+v4.3.0 candidate adds its own pin, which becomes usable after immutable publication.
 The complete immutable release inventory is verified offline without repairing
 or quarantining it. Its native Gitleaks 8.30.1 and embedded policy are selected;
 there is no dependency setup, download, Python runtime probe, history scan,
@@ -185,8 +185,11 @@ including configurations containing both `[extend]` and `[EXTEND]`.
 UTF-8, ASCII and UTF-8 BOM are supported without decoding or rewriting scanner
 input. Invalid UTF-8, NUL-bearing/binary and UTF-16/32 inputs are coverage
 unchecked rather than silently accepted. All requested text extensions are
-eligible. There is no supplemental detector in this provider. Preserve legacy
-host protection separately until its narrow remaining coverage is reviewed.
+eligible. There is no supplemental detector in this provider. Before retiring legacy
+host scanning, verify its remaining coverage separately from Gitleaks: legacy patterns
+can detect short credential-like values and isolated private-key headers that the
+selected defaults do not detect. Keep any reviewed supplemental findings and waivers
+distinct from Gate findings, and preserve the host's sensitive-file access protection.
 
 The exact scanner runs with bounded trace diagnostics in memory. The provider
 recognizes only its pinned lifecycle/severity format, requires the completed
@@ -223,4 +226,5 @@ separately from detector/path parity. Release preparation and consumer rollout
 must explicitly carry this correction. Local candidate tests do not authorize
 immutable publication or host activation.
 
-The provider acceptance record is [here](audits/edit-secrets-provider.md).
+Follow the [interface verification requirements](release.md#working-tree-interface-verification)
+before host activation.

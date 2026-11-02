@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import re
-import stat
 import tokenize
 import tomllib
 import unicodedata
@@ -24,6 +23,7 @@ from .edit_protocol import (
 	MAX_TOTAL_BYTES,
 	EditError,
 )
+from .path_safety import is_link_or_reparse
 
 _MAX_IMPORT_NAMES = 256
 _MAX_IMPORT_SEGMENTS = 32
@@ -49,9 +49,7 @@ def regular_path(root: Path, relative: str, *, optional: bool = False) -> Path:
 			if optional:
 				return root.joinpath(*parts)
 			raise EditError("io") from None
-		if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & getattr(
-			stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
-		):
+		if is_link_or_reparse(metadata):
 			raise EditError("unsafe_path")
 	if not path.is_file() or path.stat().st_nlink != 1:
 		raise EditError("unsafe_path")

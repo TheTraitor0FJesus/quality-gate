@@ -6,6 +6,16 @@ Python 3.11+ CLI providing a shared quality contract for local Git hooks and Git
 
 `quality_gate/` contains the CLI, runner, release machinery, and shared `policy/`; `tests/` contains tests; `templates/` contains consumer configuration; `.github/workflows/` contains CI; `docs/` contains project contracts.
 
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues are the required tracker for project specifications and implementation tickets. See `docs/agents/issue-tracker.md`.
+
+### Quality contract
+
+When adding, moving, or removing a Python component, its test directory, or its development requirements file, update `quality-gate.toml` in the same change. Keep shared Ruff and mypy policy and quality CI in Quality Gate; do not add project-local overrides or duplicate quality CI jobs.
+
 ### When answering codebase questions, designing, or changing code
 
 Before a non-trivial codebase question, design task, or code change, read [the architecture map](docs/architecture.md). Use it to navigate, then verify relevant claims in code, the source of truth. In the same change, update the map when code makes one of its facts, links, or search routes inaccurate.
@@ -18,9 +28,7 @@ This repository's commit hook runs the pinned released Quality Gate. Source or p
 
 Before full-suite, audit or release verification, size test, Gate, runner, hook and CI timeout budgets for the operation, allowing outer budgets to cover inner work and cleanup; edit-hook deadlines retain their separate contract.
 
-## When planning, publishing, or starting issue work
-
-Read [the local issue tracker procedure](docs/agents/issue-tracker.md) before this work.
+## Release and public contract changes
 
 When preparing a pull request, changing a public contract, or configuring release setup, read
 [the local release contract](docs/release.md). The local contract owns this repository's executable

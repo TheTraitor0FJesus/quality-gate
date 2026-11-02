@@ -318,8 +318,11 @@ class ArtifactReader:
 	@staticmethod
 	def same_execution(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
 		"""Identify a successful job record reused unchanged by a later run attempt."""
+		if left.get("id") != right.get("id"):
+			runner_id = left.get("runner_id")
+			if type(runner_id) is not int or runner_id <= 0 or runner_id != right.get("runner_id"):
+				return False
 		keys = (
-			"id",
 			"run_id",
 			"head_sha",
 			"name",

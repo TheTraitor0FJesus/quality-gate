@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import importlib.metadata
 import json
 import os
 import shutil
@@ -15,19 +13,33 @@ import tempfile
 import time
 import zipfile
 from collections.abc import Iterator
+from functools import lru_cache
+from importlib.metadata import Distribution
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from quality_gate import __version__
 from quality_gate.contracts import load_manifest
-from quality_gate.distribution import default_cache_root
-from quality_gate.edit_check import Invocation, execute as execute_edit_check
+from quality_gate.distribution import (
+	DistributionError,
+	ExternalTool,
+	ReleaseManifest,
+	default_cache_root,
+	verify_release,
+)
+from quality_gate.distribution import (
+	verify_release as verify_release_cache,
+)
+from quality_gate.edit_check import Invocation
+from quality_gate.edit_check import execute as execute_edit_check
 from quality_gate.edit_inputs import Configuration
 from quality_gate.edit_protocol import (
-	EditError,
 	SUPPORTED_POLICIES as EDIT_SUPPORTED_POLICIES,
+)
+from quality_gate.edit_protocol import (
+	EditError,
 	decode_request,
 )
 from quality_gate.release_contract import (
@@ -58,12 +70,34 @@ RELEASED_EDIT_POLICIES = frozenset(
 		"v3.2.0",
 		"v4.0.0",
 		"v4.1.0",
+		"v4.2.0",
+		"v4.2.1",
+		"v4.3.0",
+		"v4.4.0",
+		"v4.5.0",
 	}
 )
 
 
 def test_supported_policy_matrix_keeps_all_released_pins() -> None:
 	assert EDIT_SUPPORTED_POLICIES == RELEASED_EDIT_POLICIES | {f"v{__version__}"}
+
+
+def assert_project_files_after_cleanup(root: Path, *names: str) -> None:
+	assert {item.name for item in root.iterdir()} == {*names, "temp"}
+	temp_root = root / "temp"
+	if os.name == "nt":
+		assert {item.name for item in temp_root.iterdir()} == {".quality-gate.lock"}
+		return
+	entries = list(temp_root.iterdir())
+	areas = [item for item in entries if item.name.startswith(".quality-gate-cleanup-")]
+	assert len(areas) == 1
+	area = areas[0]
+	assert {item.name for item in entries} == {".quality-gate.lock", area.name}
+	assert area.is_dir() and not area.is_symlink()
+	assert area.stat().st_mode & 0o077 == 0
+	assert {item.name for item in area.iterdir()} == {".quality-gate-cleanup-area"}
+	assert (area / ".quality-gate-cleanup-area").is_file()
 
 
 @pytest.mark.parametrize(
@@ -90,9 +124,52 @@ def digest(content: bytes) -> str:
 	return hashlib.sha256(content).hexdigest()
 
 
+@lru_cache(maxsize=8)
+def _selected_ruff_artifact(
+	configured_release_path: Path | None,
+	selected_cache_path: Path,
+	pinned_release: str,
+) -> tuple[ExternalTool, bytes]:
+	# Release audits select the candidate explicitly while the source manifest remains pinned.
+	release_paths: list[tuple[Path, bool]] = []
+	if configured_release_path is not None:
+		release_paths.append((configured_release_path, True))
+	if configured_release_path != selected_cache_path:
+		release_paths.append((selected_cache_path, False))
+
+	last_error: DistributionError | OSError | None = None
+	for release_path, is_configured in release_paths:
+		try:
+			manifest = verify_release(release_path)
+			if not is_configured and manifest.version != pinned_release:
+				last_error = DistributionError(
+					f"cached release {pinned_release} contains manifest {manifest.version}"
+				)
+				continue
+			ruff = next((tool for tool in manifest.tools if tool.name == "ruff"), None)
+			if ruff is None:
+				last_error = DistributionError(
+					f"selected release {manifest.version} does not declare Ruff"
+				)
+				continue
+			content = (release_path / ruff.path).read_bytes()
+			if digest(content) != ruff.sha256:
+				last_error = DistributionError(f"release checksum mismatch: {ruff.path}")
+				continue
+			return ruff, content
+		except (DistributionError, OSError) as error:
+			last_error = error
+
+	error = last_error or DistributionError(f"pinned release {pinned_release} is unavailable")
+	raise AssertionError(
+		f"Prepare the pinned policy release {pinned_release} in the local cache with "
+		f"quality-gate sync and quality-gate setup before running this suite: {error}"
+	) from error
+
+
 @pytest.fixture(scope="module")
 def edit_cache() -> Iterator[Path]:
-	"""Immutable test infrastructure: real pinned Ruff, synthetic other inventory."""
+	"""Immutable test infrastructure: selected release Ruff, synthetic other inventory."""
 	# Avoid ensurepip's Windows path limit inside Gate's nested temporary workspace.
 	parent = Path(os.environ["SYSTEMROOT"]) / "Temp" if os.name == "nt" else None
 	with tempfile.TemporaryDirectory(prefix="quality-gate-edit-", dir=parent) as directory:
@@ -100,6 +177,13 @@ def edit_cache() -> Iterator[Path]:
 
 
 def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
+	selected_release = load_manifest(REPOSITORY).policy_release
+	configured_policy_root = os.environ.get("QUALITY_GATE_POLICY_ROOT")
+	configured_release_root = Path(configured_policy_root) if configured_policy_root else None
+	selected_cache_root = default_cache_root() / "releases" / selected_release
+	ruff_tool, ruff_content = _selected_ruff_artifact(
+		configured_release_root, selected_cache_root, selected_release
+	)
 	release = cache / "releases" / version
 	release.mkdir(parents=True)
 	files = {
@@ -135,35 +219,19 @@ def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
 		)
 	platform = "windows" if os.name == "nt" else "linux"
 	for name, tool_version in UNIFIED_RELEASE_TOOLS.items():
-		path = UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform].get(
-			name, f"{name}-{tool_version}-py3-none-any.whl"
+		source_tool = ruff_tool if name == "ruff" else None
+		path = (
+			source_tool.path
+			if source_tool is not None
+			else UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform].get(
+				name, f"{name}-{tool_version}-py3-none-any.whl"
+			)
 		)
-		content = b"tool fixture"
-		if name == "ruff":
-			wheel = next((default_cache_root() / "releases" / "v2.4.2").glob("ruff-*.whl"), None)
-			if wheel is not None:
-				content = wheel.read_bytes()
-			else:
-				distribution = importlib.metadata.distribution("ruff")
-				assert distribution.version == "0.16.4", (
-					"Prepare the release-pinned Ruff before running this suite"
-				)
-				binary = next(
-					item for item in distribution.files or [] if item.name in {"ruff", "ruff.exe"}
-				)
-				with zipfile.ZipFile(release / path, "w") as archive:
-					binary_content = Path(str(distribution.locate_file(binary))).read_bytes()
-					archive.writestr(f"ruff/{binary.name}", binary_content)
-					encoded_digest = (
-						base64.urlsafe_b64encode(hashlib.sha256(binary_content).digest())
-						.decode()
-						.rstrip("=")
-					)
-					archive.writestr(
-						f"ruff-{tool_version}.dist-info/RECORD",
-						f"ruff/{binary.name},sha256={encoded_digest},{len(binary_content)}\n",
-					)
-				content = (release / path).read_bytes()
+		if source_tool is not None:
+			tool_version = source_tool.version
+			content = ruff_content
+		else:
+			content = b"tool fixture"
 		(release / path).write_bytes(content)
 		manifest.extend(
 			[
@@ -193,6 +261,133 @@ def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
 	)
 	assert result.returncode == 0, result.stdout + result.stderr
 	return cache
+
+
+def test_prepare_edit_cache_uses_selected_release_ruff_not_dev_distribution(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+	import importlib.metadata
+
+	selected_release = load_manifest(REPOSITORY).policy_release
+	isolated_cache = tmp_path / "default-cache"
+	platform = "windows" if os.name == "nt" else "linux"
+	tool_version = UNIFIED_RELEASE_TOOLS["ruff"]
+	tool_path = UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform].get(
+		"ruff", f"ruff-{tool_version}-py3-none-any.whl"
+	)
+	source_content = b"verified selected-release Ruff artifact"
+	source_tool = ExternalTool("ruff", tool_version, tool_path, digest(source_content))
+	source_manifest = ReleaseManifest(selected_release, (), (source_tool,))
+	source_root = tmp_path / "selected-release" / selected_release
+	(source_root / source_tool.path).parent.mkdir(parents=True)
+	(source_root / source_tool.path).write_bytes(source_content)
+	verified_paths: list[Path] = []
+
+	def verify_selected_release(path: Path) -> ReleaseManifest:
+		verified_paths.append(path)
+		assert path == source_root
+		return source_manifest
+
+	monkeypatch.setattr(sys.modules[__name__], "default_cache_root", lambda: isolated_cache)
+	monkeypatch.setenv("QUALITY_GATE_POLICY_ROOT", str(source_root))
+	monkeypatch.setattr(sys.modules[__name__], "verify_release", verify_selected_release)
+
+	looked_up_distributions: list[str] = []
+	dev_ruff = cast(Distribution, type("DevRuff", (), {"version": "0.17.2"})())
+	original_distribution = importlib.metadata.distribution
+
+	def distribution(name: str) -> Distribution:
+		looked_up_distributions.append(name)
+		if name == "ruff":
+			return dev_ruff
+		return original_distribution(name)
+
+	monkeypatch.setattr(importlib.metadata, "distribution", distribution)
+	monkeypatch.setattr(
+		subprocess,
+		"run",
+		lambda command, **kwargs: subprocess.CompletedProcess(command, 0, b"", b""),
+	)
+
+	cache = prepare_edit_cache(tmp_path / "fixture", "v3.1.0")
+	generated = verify_release_cache(cache / "releases" / "v3.1.0")
+	generated_tool = next(tool for tool in generated.tools if tool.name == "ruff")
+
+	assert generated.version == "v3.1.0"
+	assert generated_tool.version == source_tool.version
+	assert generated_tool.path == source_tool.path
+	assert (cache / "releases" / "v3.1.0" / generated_tool.path).read_bytes() == source_content
+	assert "ruff" not in looked_up_distributions
+	assert verified_paths == [source_root]
+
+
+def test_prepare_edit_cache_uses_candidate_when_configured_root_is_selected(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+	selected_release = load_manifest(REPOSITORY).policy_release
+	candidate_release = "v0.0.1" if selected_release != "v0.0.1" else "v0.0.2"
+	platform = "windows" if os.name == "nt" else "linux"
+	tool_version = UNIFIED_RELEASE_TOOLS["ruff"]
+	tool_path = UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform].get(
+		"ruff", f"ruff-{tool_version}-py3-none-any.whl"
+	)
+	candidate_content = b"verified candidate Ruff artifact"
+	candidate_tool = ExternalTool("ruff", tool_version, tool_path, digest(candidate_content))
+	cache_root = tmp_path / "default-cache"
+	candidate_root = tmp_path / "candidate-release" / candidate_release
+	artifact = candidate_root / tool_path
+	artifact.parent.mkdir(parents=True)
+	artifact.write_bytes(candidate_content)
+	candidate_manifest = ReleaseManifest(candidate_release, (), (candidate_tool,))
+	verified_paths: list[Path] = []
+
+	def verify_release_for_test(path: Path) -> ReleaseManifest:
+		verified_paths.append(path)
+		assert path == candidate_root
+		return candidate_manifest
+
+	monkeypatch.setenv("QUALITY_GATE_POLICY_ROOT", str(candidate_root))
+	monkeypatch.setattr(sys.modules[__name__], "default_cache_root", lambda: cache_root)
+	monkeypatch.setattr(sys.modules[__name__], "verify_release", verify_release_for_test)
+	monkeypatch.setattr(
+		subprocess,
+		"run",
+		lambda command, **kwargs: subprocess.CompletedProcess(command, 0, b"", b""),
+	)
+
+	cache = prepare_edit_cache(tmp_path / "fixture", "v3.1.0")
+	generated = verify_release_cache(cache / "releases" / "v3.1.0")
+	generated_tool = next(tool for tool in generated.tools if tool.name == "ruff")
+
+	assert generated_tool.version == candidate_tool.version
+	assert generated_tool.path == candidate_tool.path
+	assert (cache / "releases" / "v3.1.0" / generated_tool.path).read_bytes() == candidate_content
+	assert verified_paths == [candidate_root]
+
+
+@pytest.mark.parametrize("release_state", ["missing", "corrupt"])
+def test_prepare_edit_cache_requires_selected_verified_release(
+	monkeypatch: pytest.MonkeyPatch, tmp_path: Path, release_state: str
+) -> None:
+	selected_release = load_manifest(REPOSITORY).policy_release
+	cache_root = tmp_path / "policy-cache"
+	manifest_path = cache_root / "releases" / selected_release / "release.toml"
+	corrupt_manifest = '[release]\nversion = "invalid"\n'
+	if release_state == "corrupt":
+		manifest_path.parent.mkdir(parents=True)
+		manifest_path.write_text(corrupt_manifest, encoding="utf-8")
+	monkeypatch.delenv("QUALITY_GATE_POLICY_ROOT", raising=False)
+	monkeypatch.setattr(sys.modules[__name__], "default_cache_root", lambda: cache_root)
+
+	with pytest.raises(AssertionError, match=r"quality-gate sync.*quality-gate setup"):
+		prepare_edit_cache(tmp_path / "fixture", "v3.1.0")
+
+	assert not (tmp_path / "fixture").exists()
+	if release_state == "corrupt":
+		assert manifest_path.read_text(encoding="utf-8") == corrupt_manifest
+		assert not (cache_root / "quarantine").exists()
+	else:
+		assert not cache_root.exists()
 
 
 @pytest.fixture(scope="module")
@@ -269,13 +464,11 @@ def test_wheel_exposes_read_only_edits_without_extraction(
 		"not_applicable",
 	), result
 	assert result["writes_may_have_occurred"] is False
-	assert not list(project.iterdir())
+	assert_project_files_after_cleanup(project)
 	assert digest(engine_wheel.read_bytes()) == wheel_hash
 
 
-@pytest.mark.parametrize(
-	"policy", sorted(EDIT_SUPPORTED_POLICIES)
-)
+@pytest.mark.parametrize("policy", sorted(EDIT_SUPPORTED_POLICIES))
 @pytest.mark.parametrize("module", ["quality_gate.cli", "quality_gate.edit_cli"])
 def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 	tmp_path: Path,
@@ -287,7 +480,7 @@ def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 	project = tmp_path / "project with spaces"
 	project.mkdir()
 	path = project / "example.py"
-	path.write_bytes(b"import sys\nimport os\n\nvalue=  1\n")
+	path.write_bytes(b"import sys\nimport os\n\nvalue= (os.name, sys.version)\n")
 	launcher = tmp_path / "launcher"
 	launcher.mkdir()
 	payload = request(project, wheel_cache, "example.py")
@@ -318,17 +511,17 @@ def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 		)
 		assert completed.stderr == b"", completed.stderr.decode(errors="replace")
 		result = json.loads(completed.stdout)
-		assert completed.returncode == 1, result
-		assert result["status"] == "failed"
+		assert completed.returncode == 0, result
+		assert result["status"] == "passed"
 		assert result["engine_version"] == __version__
-		assert {finding["rule"] for finding in result["files"][0]["findings"]} == {"F401"}
+		assert result["files"][0]["findings"] == []
 		assert result["files"][0]["input_sha256"] == payload["files"][0]["sha256"]
 		assert result["files"][0]["sha256"] == digest(path.read_bytes())
 		assert result["files"][0]["format"] == "passed"
 		assert result["selections"][0]["policy_release"] == policy
 		assert result["process_count"] == expected_processes
-	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = 1\n"
-	assert {item.name for item in project.iterdir()} == {"example.py"}
+	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = (os.name, sys.version)\n"
+	assert_project_files_after_cleanup(project, "example.py")
 	assert list(launcher.iterdir()) == []
 	assert digest(engine_wheel.read_bytes()) == wheel_hash
 
@@ -370,7 +563,10 @@ def invoke(payload: object) -> tuple[int, dict[str, Any]]:
 
 @pytest.mark.parametrize(
 	("initial", "expected_exit", "expected_rules"),
-	[(b"value=  1\n", 0, set()), (b"import os\n\nvalue=  1\n", 1, {"F401"})],
+	[
+		(b"value=  1\n", 0, set()),
+		(b"value= missing_name\n", 1, {"F821"}),
+	],
 )
 def test_unchanged_final_result_reuses_verified_selection(
 	tmp_path: Path,
@@ -409,31 +605,35 @@ def test_import_layout_change_invalidates_reuse(
 ) -> None:
 	module_name = module_path.removesuffix(".pyi").removesuffix(".py").replace("/", ".")
 	path = tmp_path / "example.py"
-	path.write_bytes(f"import {module_name}\nimport alpha\n".encode())
+	path.write_bytes(
+		f"import {module_name}\nimport alpha\n\nvalue = ({module_name}, alpha)\n".encode()
+	)
 	first_exit, first = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert first_exit == 1, first
+	assert first_exit == 0, first
 	warm_exit, warm = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert warm_exit == 1 and warm["process_count"] == REUSED_PROCESSES, warm
+	assert warm_exit == 0 and warm["process_count"] == REUSED_PROCESSES, warm
 	module = tmp_path / module_path
 	module.parent.mkdir(parents=True, exist_ok=True)
 	module.write_bytes(b"# Local module appeared after the previous checks.\n")
 	changed_exit, changed = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert changed_exit == 1, changed
+	assert changed_exit == 0, changed
 	assert changed["process_count"] == FRESH_PROCESSES
-	assert path.read_bytes() == f"import alpha\n\nimport {module_name}\n".encode()
+	assert path.read_bytes() == (
+		f"import alpha\n\nimport {module_name}\n\nvalue = ({module_name}, alpha)\n".encode()
+	)
 	assert changed["files"][0]["sha256"] == digest(path.read_bytes())
-	assert {finding["rule"] for finding in changed["files"][0]["findings"]} == {"F401"}
+	assert changed["files"][0]["findings"] == []
 	assert module.read_bytes() == b"# Local module appeared after the previous checks.\n"
 
 
 def test_policy_selection_change_requires_fresh_ruff(tmp_path: Path, wheel_cache: Path) -> None:
-	(tmp_path / "example.py").write_bytes(b"import os\n")
+	(tmp_path / "example.py").write_bytes(b"import os\nvalue = os.name\n")
 	for policy in sorted(EDIT_SUPPORTED_POLICIES):
 		for expected_processes in (FRESH_PROCESSES, REUSED_PROCESSES):
 			payload = request(tmp_path, wheel_cache, "example.py")
 			payload["baseline"]["policy_release"] = policy
 			exit_code, result = invoke(payload)
-			assert exit_code == 1, result
+			assert exit_code == 0, result
 			assert result["process_count"] == expected_processes
 			assert result["selections"][0]["policy_release"] == policy
 
@@ -460,7 +660,7 @@ def test_working_tree_changes_invalidate_reuse(
 	tmp_path: Path, edit_cache: Path, change: str
 ) -> None:
 	path = tmp_path / "example.py"
-	path.write_bytes(b"import os\n\nvalue = 1\n")
+	path.write_bytes(b"import os\n\nvalue = os.name\n")
 	manifest = tmp_path / "quality-gate.toml"
 	manifest.write_text(
 		'[quality]\nschema = 2\npolicy_release = "v2.4.2"\n'
@@ -469,7 +669,7 @@ def test_working_tree_changes_invalidate_reuse(
 		encoding="utf-8",
 	)
 	exit_code, original = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert exit_code == 1, original
+	assert exit_code == 0, original
 	if change == "file":
 		path.write_bytes(b"import os\n\nvalue=  2\n")
 	elif change == "waiver":
@@ -482,9 +682,9 @@ def test_working_tree_changes_invalidate_reuse(
 	else:
 		(tmp_path / change).write_bytes(b"# Working-tree configuration changed.\n")
 	exit_code, changed = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert exit_code == 1, changed
+	assert exit_code == 0, changed
 	assert changed["process_count"] == FRESH_PROCESSES
-	assert {finding["rule"] for finding in changed["files"][0]["findings"]} == {"F401"}
+	assert changed["files"][0]["findings"] == []
 	assert changed["files"][0]["sha256"] == digest(path.read_bytes())
 	if change != "file":
 		assert changed["inputs"] != original["inputs"]
@@ -497,7 +697,7 @@ def test_corrupt_reuse_cannot_supply_a_clean_verdict(
 	tmp_path: Path, edit_cache: Path, failure: str
 ) -> None:
 	path = tmp_path / "example.py"
-	path.write_bytes(b"import os\n\nvalue = 1\n")
+	path.write_bytes(b"value = missing_name\n")
 	exit_code, first = invoke(request(tmp_path, edit_cache, "example.py"))
 	assert exit_code == 1, first
 	cache = tmp_path.parent / f"{tmp_path.name}-user-cache" / "quality-gate/edit-results-v1"
@@ -522,9 +722,9 @@ def test_corrupt_reuse_cannot_supply_a_clean_verdict(
 	exit_code, checked = invoke(request(tmp_path, edit_cache, "example.py"))
 	assert exit_code == 1, checked
 	assert checked["process_count"] == FRESH_PROCESSES
-	assert {finding["rule"] for finding in checked["files"][0]["findings"]} == {"F401"}
+	assert {finding["rule"] for finding in checked["files"][0]["findings"]} == {"F821"}
 	assert checked["files"][0]["sha256"] == digest(path.read_bytes())
-	assert path.read_bytes() == b"import os\n\nvalue = 1\n"
+	assert path.read_bytes() == b"value = missing_name\n"
 
 
 def test_invalid_request_is_unchecked_and_does_not_echo_input() -> None:
@@ -572,11 +772,45 @@ def test_invalid_envelope_is_source_free(tmp_path: Path, field: str, value: obje
 	assert list(tmp_path.iterdir()) == []
 
 
-def test_safe_fixes_keep_unused_import_and_format_residual_lint(
+def test_write_phase_removes_safe_f401_unused_import_from_module(
 	tmp_path: Path, edit_cache: Path
 ) -> None:
 	path = tmp_path / "example.py"
-	path.write_text("import sys\nimport os\n\nvalue=  1\n", encoding="utf-8")
+	path.write_bytes(b"import os\nvalue=1\n")
+	payload = request(tmp_path, edit_cache, "example.py")
+	payload["phase"] = "write"
+
+	exit_code, result = invoke(payload)
+
+	assert exit_code == 0, result
+	assert result["status"] == "passed"
+	assert path.read_bytes() == b"value = 1\n"
+
+
+def test_write_phase_preserves_explicit_public_reexport_in_init(
+	tmp_path: Path, edit_cache: Path
+) -> None:
+	package = tmp_path / "sample_package"
+	package.mkdir()
+	path = package / "__init__.py"
+	original = b"from .api import public_name as public_name\n"
+	path.write_bytes(original)
+	(package / "api.py").write_bytes(b"public_name = 1\n")
+	payload = request(tmp_path, edit_cache, "sample_package/__init__.py")
+	payload["phase"] = "write"
+
+	exit_code, result = invoke(payload)
+
+	assert exit_code == 0, result
+	assert result["status"] == "passed"
+	assert path.read_bytes() == original
+
+
+def test_safe_fixes_remove_unused_import_and_report_residual_lint(
+	tmp_path: Path, edit_cache: Path
+) -> None:
+	path = tmp_path / "example.py"
+	path.write_text("import sys\nimport os\n\nvalue= missing_name\n", encoding="utf-8")
 	unrelated = tmp_path / "unrelated.py"
 	unrelated.write_bytes(b"other=   2\n")
 	exit_code, result = invoke(request(tmp_path, edit_cache, "example.py"))
@@ -584,11 +818,11 @@ def test_safe_fixes_keep_unused_import_and_format_residual_lint(
 	assert result["status"] == "failed"
 	assert "phase" not in result
 	file = result["files"][0]
-	assert {finding["rule"] for finding in file["findings"]} == {"F401"}
+	assert {finding["rule"] for finding in file["findings"]} == {"F821"}
 	assert file["format"] == "passed"
 	assert file["coverage"] == "baseline"
 	assert file["sha256"] == digest(path.read_bytes())
-	assert path.read_text(encoding="utf-8") == "import os\nimport sys\n\nvalue = 1\n"
+	assert path.read_text(encoding="utf-8") == "value = missing_name\n"
 	assert unrelated.read_bytes() == b"other=   2\n"
 	path.write_text("import os\nimport sys\n\nvalue = (os.name, sys.version)\n", encoding="utf-8")
 	assert invoke(request(tmp_path, edit_cache, "example.py"))[0] == 0
@@ -619,7 +853,7 @@ def test_read_only_validation_reports_final_ruff_findings_without_writing(
 	assert file["format"] == "failed"
 	assert path.read_bytes() == original
 	assert path.stat().st_mtime_ns == original_mtime
-	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+	assert_project_files_after_cleanup(tmp_path, "example.py")
 
 
 @pytest.mark.parametrize("policy", sorted(EDIT_SUPPORTED_POLICIES))
@@ -648,7 +882,7 @@ def test_read_only_validation_supports_every_policy_pin(
 	assert file["changed"] is False
 	assert path.read_bytes() == original
 	assert path.stat().st_mtime_ns == original_mtime
-	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+	assert_project_files_after_cleanup(tmp_path, "example.py")
 
 
 @pytest.mark.parametrize("changed_input", ["source", "configuration"])
@@ -670,7 +904,9 @@ def test_read_only_validation_rejects_inputs_changed_during_checks(
 	original_run = Invocation.run
 	changed = False
 
-	def run_then_change(self: Invocation, command: list[str], *, cwd: Path) -> tuple[int, bytes, bytes]:
+	def run_then_change(
+		self: Invocation, command: list[str], *, cwd: Path
+	) -> tuple[int, bytes, bytes]:
 		nonlocal changed
 		result = original_run(self, command, cwd=cwd)
 		if command[1] == "format" and "--check" in command and not changed:
@@ -686,9 +922,7 @@ def test_read_only_validation_rejects_inputs_changed_during_checks(
 		prefix="quality-gate-validate-test-", dir=tmp_path_factory.getbasetemp()
 	) as directory:
 		with pytest.raises(EditError, match="stale_input"):
-			execute_edit_check(
-				payload, time.monotonic() + 25, Path(directory)
-			)
+			execute_edit_check(payload, time.monotonic() + 25, Path(directory))
 
 	assert changed
 	assert path.read_bytes() == (b"value = 2\n" if changed_input == "source" else original)
@@ -701,7 +935,7 @@ def test_write_phase_applies_only_safe_fixes_and_formatting(
 	tmp_path: Path, edit_cache: Path
 ) -> None:
 	path = tmp_path / "example.py"
-	original = b"import sys\nimport os\n\nvalue=  1\n"
+	original = b"import sys\nimport os\n\nvalue= (os.name, sys.version)\n"
 	path.write_bytes(original)
 	payload = request(tmp_path, edit_cache, "example.py")
 	payload["phase"] = "write"
@@ -718,9 +952,9 @@ def test_write_phase_applies_only_safe_fixes_and_formatting(
 	assert file["changed"] is True
 	assert file["findings"] == []
 	assert file["format"] == "passed"
-	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = 1\n"
+	assert path.read_bytes() == b"import os\nimport sys\n\nvalue = (os.name, sys.version)\n"
 	assert "F401" not in json.dumps(result)
-	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+	assert_project_files_after_cleanup(tmp_path, "example.py")
 
 
 def test_read_only_validation_keeps_unchecked_prerequisites_incomplete(
@@ -740,7 +974,7 @@ def test_read_only_validation_keeps_unchecked_prerequisites_incomplete(
 	assert result["phase"] == "validate"
 	assert result["writes_may_have_occurred"] is False
 	assert path.read_bytes() == original
-	assert {item.name for item in tmp_path.iterdir()} == {"example.py"}
+	assert_project_files_after_cleanup(tmp_path, "example.py")
 
 
 def test_unknown_edit_phase_is_rejected_without_falling_back_to_writer(
@@ -985,9 +1219,9 @@ def test_working_tree_is_checked_without_reading_or_rewriting_index(
 	index_before = (tmp_path / ".git/index").read_bytes()
 	path.write_bytes(b"import os\nvalue=  2\n")
 	exit_code, result = invoke(request(tmp_path, edit_cache, "example.py"))
-	assert exit_code == 1, result
-	assert {item["rule"] for item in result["files"][0]["findings"]} == {"F401"}
-	assert path.read_bytes() == b"import os\n\nvalue = 2\n"
+	assert exit_code == 0, result
+	assert result["files"][0]["findings"] == []
+	assert path.read_bytes() == b"value = 2\n"
 	assert (tmp_path / ".git/index").read_bytes() == index_before
 	process = subprocess.run(
 		["git", "-C", str(tmp_path), "show", ":example.py"], capture_output=True, check=False
@@ -1191,7 +1425,7 @@ time.sleep(30)
 		assert time.monotonic() - started < deadline_seconds + TIMEOUT_WITH_CLEANUP_SECONDS
 		assert not process_alive(pid)
 		assert (tmp_path / "example.py").read_bytes() == b"value=  1\n"
-		assert not list(tmp_path.glob(".quality-gate-edit-*"))
+		assert not list(tmp_path.glob("temp/qg-*"))
 	finally:
 		if process_alive(pid):
 			os.kill(pid, signal.SIGTERM)
@@ -1337,7 +1571,7 @@ def test_result_delivery_obeys_the_same_deadline(tmp_path: Path, edit_cache: Pat
 		except subprocess.TimeoutExpired:
 			pytest.fail("Result delivery blocked beyond the invocation deadline")
 		assert exit_code == EXIT_UNCHECKED
-		assert not list(tmp_path.glob(".quality-gate-edit-*"))
+		assert not list(tmp_path.glob("temp/qg-*"))
 	finally:
 		if process.poll() is None:
 			process.kill()

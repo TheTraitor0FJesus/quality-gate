@@ -132,8 +132,10 @@ and baseline `.venv` ownership before opening environment evidence paths.
 
 `components[].path` is root-relative (`.` for unmanaged), `coverage` is `managed`
 or `baseline`, and `selection` is a zero-based index or null for an opt-out.
-`inventory` contains every analyzed `.py`/`.pyi` source; `directories` captures
-the scanned directory membership, including empty directories. `scope_sha256`
+`inventory` contains every analyzed `.py`/`.pyi` source; for managed coverage it
+is the union of `component.path` and the component's declared `source_roots`.
+`directories` captures the complete scanned directory membership for those roots,
+including empty directories. `scope_sha256`
 hashes `{inventory,directories}`. `dependency_inputs` uses raw-byte hashes of
 declared dependency files. A diagnostic has exactly `path`, positive integer
 `line`/`column` (one-based), and nonempty mypy `code`. It can refer to an unchanged
@@ -144,7 +146,12 @@ are nonnegative integers. `import_count` counts static import statements in the
 analyzed source, not mypy's transitive dependency graph size.
 
 `freshness_sha256` hashes `{root,root_identity,files,configuration,selections,components}`
-with component `analysis_ms` removed. The host first validates schema, request
+with component `analysis_ms` removed. The result keeps the existing wire shape:
+there is no separate `source_roots` component key. A host verifier obtains the
+roots from the verified working-tree manifest, matched by component name and path,
+then requires `directories` to be exactly the recursive closure of `component.path`
+and those roots. It rejects missing, extra or undeclared directory locations. The
+host first validates schema, request
 coverage and selection indices, then rechecks root stat, request absences/hashes,
 configuration, environment tree and source inventory. To detect added/deleted
 sources, it re-enumerates each recorded directory and compares its immediate
@@ -152,7 +159,8 @@ sources, it re-enumerates each recorded directory and compares its immediate
 result. This is a fixed filesystem freshness operation, not policy routing.
 The coverage-specific exclusion set below applies identically to recorded and
 rechecked directory entries. Every component has its own root directory record
-and exactly one directory record for every reachable included child directory;
+for `component.path` and one root record per declared source root, plus exactly one
+directory record for every reachable included child directory;
 duplicate paths, missing children, orphan records, duplicate entries and an
 inventory inconsistent with the directory records invalidate the certificate.
 Every included `.py`/`.pyi` entry has exactly one inventory record, including a
@@ -198,14 +206,20 @@ Configuration names are exactly `quality-gate.toml`, `pyproject.toml`, `mypy.ini
 `poetry.lock`, `Pipfile`, `Pipfile.lock`. Capture all eleven names at the project
 root, including absent records, and `pyproject.toml`, `mypy.ini`, `.mypy.ini`,
 `setup.cfg`, `quality-gate.toml` in every included source directory and its ancestors
-inside root. Union these with every affected component's declared dependency
-inputs, request configuration/dependency paths, and ancestor `__init__.py`/
-`__init__.pyi` files above a component root (record absent ancestors too).
-Deduplicate by relative path. Configuration mutation routes all components;
+inside root. Hash each existing `py.typed` marker in included source directories.
+Also capture `__init__.py`, `__init__.pyi` and `py.typed` at every managed component
+and source-root ancestor, including absent paths. Union these with every affected
+component's declared dependency inputs and request configuration/dependency paths.
+Deduplicate by relative path. Directory membership records absent markers inside
+included source directories. Configuration mutation routes all components;
 declared dependency mutation routes all components declaring that input. A deleted
 Python path routes by its lexical component membership. Unrecognized non-Python
 paths are inapplicable. Project mypy config does not override released policy;
 malformed or ambiguous dependency/project settings are unchecked.
+
+The host's `configuration_paths()` must use the same marker rule: include existing
+`py.typed` files in scanned directories and present or absent `py.typed` paths at
+component/source-root ancestors.
 
 `environment` has exactly absolute canonical directory `path`, `sha256`, integer
 `file_count`, integer `bytes`. `environment_sha256` equals its `sha256`. Compute
@@ -230,12 +244,17 @@ isolated probe's actual base Python executable as
 the environment. Hash the canonical JSON array of records with the identity
 serialization above. Cap at 20,000 records and 512 MiB total bytes; check the
 remaining deadline while walking and reading. An empty/missing `pyvenv.cfg`,
-`include-system-site-packages` other than false, unexpected site paths, `.pth`
-files or editable dependency contexts are unchecked. A `.pth` containing only
-blank lines or comments is allowed; executable/path-bearing `.pth` is unchecked.
-The probe runs isolated
-with `-I -S -B` and emits only standard-library metadata; mypy gets explicit
-verified site directories without executing site startup or project plugins.
+`include-system-site-packages` other than false, unexpected site paths, unknown
+or changed `.pth` files, or editable dependency contexts are unchecked. Blank
+and `#` comment-only `.pth` lines remain allowed. The managed runtime also allows
+the exact known payloads for `a1_coverage.pth`, `pytest-cov.pth`, and
+`distutils-precedence.pth`; each payload is hashed after CRLF-to-LF
+normalization (the observed coverage file uses CRLF). Their contents are
+validated, never executed: the probe runs isolated with `-I -S -B`. Mypy gets
+explicit verified site directories without executing site startup or project
+plugins. Any other executable or path-bearing entry, malformed content, or
+changed payload remains unchecked; review and update the allowlist only when a
+managed dependency payload changes.
 The host performs the same tree operation for final delivery freshness; caps
 bound work, not a latency guarantee. Measure provider initial/final and host
 rehash together before activation.
@@ -272,7 +291,7 @@ The provider checks it before launch, at most every 50 ms while waiting for its
 worker, and before delivery. Cancellation terminates/reaps the owned worker and
 descendant tree before returning `unchecked`, `reason: "cancelled"`, exit 2.
 Work has one absolute deadline at most 30 seconds ahead, including startup and
-provider evidence; owned cleanup has the same separate maximum three seconds.
+freshness evidence; owned cleanup has the same separate maximum three seconds.
 Neither this allowance nor a later delivery event grants schema 1 more time.
 
 Every valid schema 2 response has all schema 1 result fields, `schema: 2`, and
@@ -306,25 +325,26 @@ supported; overflow is unchecked, never truncated success.
 
 ## Scope, prerequisites and compatibility
 
-The published v4.0.0 engine supports exact policies through v4.0.0. The
-published v4.1.0 engine retains those policies and adds v4.1.0. The v4.2.0
-candidate retains supported exact policies through v4.1.0 and adds its own
-v4.2.0 policy after immutable publication.
+The published v4.5.0 engine retains the released exact policy matrix through
+v4.5.0. This v4.6.0 candidate retains every historical supported pin and adds
+its own v4.6.0 policy for isolated candidate-only testing. A candidate wheel may
+use v4.6.0 only when its verified cache contains that exact immutable policy.
 
 Managed: use the working-tree manifest's exact release, each affected component's
 declared Python and already prepared Gate runtime/dependencies. Analyze the whole
-component, including unchanged consumers. Python paths route by component path;
-manifest and recognized configuration changes route every component, and declared
-dependency changes route their consumers. Deletions retain their old path for
-routing and must still be absent at completion. Files outside managed components
-are explicitly inapplicable; they do not override a component's opt-out.
+component, including unchanged consumers. Python paths route by component path
+and each managed component's declared `source_roots`; manifest and recognized
+configuration changes route every component, and declared dependency changes
+route their consumers. Deletions retain their old path for routing and must still
+be absent at completion. Files outside managed components are explicitly
+inapplicable; they do not override a component's opt-out.
 
 Policy v3.1.0 added optional schema 2 `python[].typecheck: boolean` (default
 true). Full Gate and edits honor false. Policies through v3.0.0 do not support
 this field: explicitly using it with an older selected policy is unchecked,
 including explicit true. Existing manifests without it retain their exact
-v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2/v3.0.0 policy selection. The provider manifest
-selects v4.1.0. Host activation remains a separate operation.
+v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2/v3.0.0 policy selection. Host activation
+remains a separate operation.
 
 Managed discovery matches the pinned mypy directory discovery: skip names starting
 `.` and names `__pycache__`, `site-packages`, `node_modules`; include `build`,
@@ -345,12 +365,88 @@ The exact released `mypy.ini` is used, including `follow_imports=skip` and
 `ignore_missing_imports=True`; no typing waivers are added. An import prerequisite
 preflight statically checks available source/stub/dependency context without
 executing project imports or plugins. Missing/ambiguous context is unchecked.
-This preflight does not tighten the released checker flags. External implementation
-bodies skipped by the policy, untyped functions allowed by it, dynamic imports and
-runtime-dependent typing remain policy limits, not demonstrated correctness.
+Before mypy runs, the import-context preflight requires imported modules to be
+available from captured component sources, the standard library, typeshed, an
+installed typed package, an installed `*-stubs` package, or a declared local stub
+root. Missing typing context returns `dependencies`, even when the selected mypy
+flags use `ignore_missing_imports = true`. The preflight does not change the flags
+passed to mypy. External implementation bodies skipped by the policy, untyped
+functions allowed by it, dynamic imports and runtime-dependent typing remain policy
+limits, not demonstrated correctness.
+
+Managed components may declare local stubs with `stub_roots` in their `python[]`
+manifest table. Each entry is a unique POSIX-relative directory path from the
+component root, such as `stub_roots = ["stubs"]`. The directory must exist and be
+inside the component tree captured by the provider. Absolute paths, traversal,
+missing directories, and paths outside the component make the result unchecked.
+The provider passes these roots from its captured component snapshot to isolated
+mypy through `MYPYPATH`, separated with the platform's path separator. Stub `.pyi`
+files are part of component inventory and directory evidence, so
+content or membership changes invalidate freshness. Unmanaged projects do not accept
+local stub roots. Installed typed dependencies and `*-stubs` packages continue to
+resolve from the selected environment. The setting requires policy v3.2.0 or newer.
+
+Managed components may declare `source_roots` as unique repository-root-relative
+POSIX directory trees, for example `source_roots = ["scripts", "apscheduler"]`. The
+roots are captured together with `component.path` using the same managed
+exclusions, source/byte/directory limits and read-only isolated snapshot. They
+must exist as ordinary directories inside the repository. Absolute paths,
+traversal, links, duplicate or overlapping roots, and overlap with the component
+path are unchecked. A component with `path = "."` cannot declare source roots.
+Source roots are sorted for deterministic evidence; separate
+components may declare the same shared tree.
+
+The provider preflights imports against repository-qualified module names and
+source-root-relative names, then adds only the isolated captured project tree,
+declared source roots and component-local stub roots to `MYPYPATH`. This supports
+layouts such as `bot` importing `scripts.rendering`, with a repository-root
+`apscheduler` stub package; it never searches arbitrary working-tree modules.
+Changes to shared files, additions/removals/renames, package initializers,
+`py.typed` contents and import-resolution configuration invalidate the result.
+`.pyi` and existing `py.typed` bytes are hashed; marker additions/removals inside
+included directories are covered by directory membership. Do not put raw
+`.pyi` or `py.typed` paths in `dependency_inputs`. Keep dependency metadata to the
+project's supported requirements files or its single `pyproject.toml`. This
+setting requires policy v4.6.0 or newer.
+
+An ARGUS-style managed component can declare its existing sibling trees directly:
+
+```toml
+[[python]]
+name = "bot"
+path = "bot"
+python_version = "3.12"
+dependency_inputs = ["bot/requirements.txt", "bot/requirements-dev.txt"]
+test_paths = ["bot/tests"]
+tests_applicable = true
+source_roots = ["scripts", "apscheduler"]
+```
+
+Use only the requirements files that the consumer maintains. If its dependency
+source is `pyproject.toml`, declare that file alone instead of mixing it with
+requirements inputs. Keep APScheduler in the real dependency metadata and place
+its local `.pyi` files and `py.typed` marker under the repository-root `apscheduler/`.
+In the current ARGUS layout, the root `pyproject.toml` describes the separate stub
+distribution; the bot still declares its dependencies through the two bot requirements
+files, so do not add that `pyproject.toml` to the bot's `dependency_inputs`. After
+publication and the consumer's explicit policy/workflow update, use the v4.6.0 Windows
+asset and prepare the consumer:
+
+```powershell
+quality-gate sync --url https://github.com/TheTraitor0FJesus/quality-gate/releases/download/v4.6.0/quality-gate-v4.6.0-Windows.zip --version v4.6.0
+quality-gate edit-setup --policy-release v4.6.0
+quality-gate setup
+quality-gate doctor
+```
+
+Do not add stub paths to
+`dependency_inputs` or select the candidate before publication.
 
 Setup is explicit: sync the exact immutable policy, run managed `setup` and
 `doctor`; unmanaged users prepare `.venv` and its declared dependencies/stubs
 explicitly. Editing uses no global Python fallback. Corrupt installed tools or
-changed dependencies require explicit repair/setup. Analysis caches and measured
-cold/warm behavior are documented in the provider evidence before release.
+changed dependencies require explicit repair/setup. Mypy analysis caches are private
+to one invocation and removed with its workspace; there is no persistent typing-result
+cache, incremental database or daemon. Warm filesystem pages do not reuse prior analysis.
+Follow the [interface verification requirements](release.md#working-tree-interface-verification)
+for same-release parity, cold/warm measurements and host activation.

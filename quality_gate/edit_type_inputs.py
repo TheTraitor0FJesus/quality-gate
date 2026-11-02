@@ -16,6 +16,7 @@ from .distribution import default_cache_root
 from .edit_inputs import SourceFile, read_bounded, regular_path
 from .edit_policy import file_sha256, sha256
 from .edit_protocol import FIRST_PRINTABLE_CHARACTER, MAX_FILES, MAX_PATH_CHARS, EditError
+from .path_safety import is_link_or_reparse, is_reparse_point
 
 MAX_SOURCES = 1024
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
@@ -32,11 +33,11 @@ class CancellationSignal:
 		cache = Path(request.get("cache_dir", default_cache_root()))
 		root = Path(request["root"]).resolve(strict=True)
 		for parent in (cache, *cache.parents):
-			if parent.is_symlink() or (
-				parent.exists()
-				and getattr(parent.lstat(), "st_file_attributes", 0)
-				& stat.FILE_ATTRIBUTE_REPARSE_POINT
-			):
+			try:
+				metadata = parent.lstat()
+			except FileNotFoundError:
+				continue
+			if is_link_or_reparse(metadata):
 				raise EditError("unsafe_path")
 		self.cache = cache.resolve()
 		self.relative = f"edit-types-events/{request['event_id']}.cancel"
@@ -47,11 +48,11 @@ class CancellationSignal:
 			raise EditError("unsafe_path")
 
 	def __call__(self) -> bool:
-		if self.cache.exists() and (
-			self.cache.is_symlink()
-			or getattr(self.cache.lstat(), "st_file_attributes", 0)
-			& stat.FILE_ATTRIBUTE_REPARSE_POINT
-		):
+		try:
+			metadata = self.cache.lstat()
+		except FileNotFoundError:
+			metadata = None
+		if metadata is not None and is_link_or_reparse(metadata):
 			raise EditError("unsafe_path")
 		return regular_path(self.cache, self.relative, optional=True).exists()
 
@@ -114,10 +115,7 @@ def directory_entries(path: Path, *, managed: bool) -> list[dict[str, str]]:
 			continue
 		validate_name(child.name)
 		metadata = child.lstat()
-		if (
-			stat.S_ISLNK(metadata.st_mode)
-			or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
-		):
+		if is_link_or_reparse(metadata):
 			raise EditError("unsafe_path")
 		if stat.S_ISDIR(metadata.st_mode):
 			kind = "directory"
@@ -132,20 +130,29 @@ def directory_entries(path: Path, *, managed: bool) -> list[dict[str, str]]:
 
 
 def inventory(
-	root: Path, relative: str, *, managed: bool, deadline: float
+	root: Path,
+	relative: str,
+	*,
+	managed: bool,
+	deadline: float,
+	source_roots: tuple[str, ...] = (),
 ) -> tuple[list[SourceFile], list[dict[str, Any]]]:
-	start = root if relative == "." else root / relative
-	if not start.is_dir() or start.is_symlink():
-		raise EditError("configuration")
-	queue = [start]
+	_roots, missing_reasons = _inventory_roots(relative, source_roots)
+	queue = [(value, missing_reasons[value]) for value in reversed(_roots)]
 	directories: list[dict[str, Any]] = []
 	sources: list[SourceFile] = []
 	total_bytes = 0
 	record_count = 0
 	while queue:
 		assert_deadline(deadline)
-		directory = queue.pop()
+		relative_directory, missing_reason = queue.pop()
+		directory = _safe_directory(root, relative_directory, missing_reason=missing_reason)
+		before = directory.lstat()
 		entries = directory_entries(directory, managed=managed)
+		current = _safe_directory(root, relative_directory, missing_reason=missing_reason)
+		after = current.lstat()
+		if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+			raise EditError("stale_input")
 		directories.append({"path": directory.relative_to(root).as_posix(), "entries": entries})
 		record_count += 1 + len(entries)
 		if record_count > MAX_ENVIRONMENT_RECORDS:
@@ -153,7 +160,7 @@ def inventory(
 		for entry in entries:
 			path = directory / entry["name"]
 			if entry["kind"] == "directory":
-				queue.append(path)
+				queue.append((path.relative_to(root).as_posix(), missing_reason))
 			elif path.suffix in {".py", ".pyi"}:
 				relative_path = path.relative_to(root).as_posix()
 				content = read_bounded(regular_path(root, relative_path), MAX_SOURCE_BYTES)
@@ -164,6 +171,56 @@ def inventory(
 	return sorted(sources, key=lambda source: source.path), sorted(
 		directories, key=lambda item: item["path"]
 	)
+
+
+def _inventory_roots(
+	relative: str, source_roots: tuple[str, ...]
+) -> tuple[tuple[str, ...], dict[str, str]]:
+	if relative == "." and source_roots:
+		raise EditError("configuration")
+	if any(value == "." for value in source_roots):
+		raise EditError("configuration")
+	_roots = (relative, *source_roots)
+	canonical_roots = tuple(value.casefold() for value in _roots)
+	if len(set(canonical_roots)) != len(canonical_roots) or any(
+		left == right or left.startswith(f"{right}/") or right.startswith(f"{left}/")
+		for index, left in enumerate(canonical_roots)
+		for right in canonical_roots[index + 1 :]
+	):
+		raise EditError("configuration")
+	missing_reasons = {
+		value: "configuration" if index == 0 else "dependencies"
+		for index, value in enumerate(_roots)
+	}
+	return _roots, missing_reasons
+
+
+def _safe_directory(root: Path, relative: str, *, missing_reason: str) -> Path:
+	if relative == ".":
+		parts: tuple[str, ...] = ()
+	else:
+		validate_relative(relative)
+		parts = tuple(relative.split("/"))
+	current = root
+	try:
+		metadata = current.lstat()
+	except FileNotFoundError:
+		raise EditError(missing_reason) from None
+	if is_link_or_reparse(metadata):
+		raise EditError("unsafe_path")
+	if not stat.S_ISDIR(metadata.st_mode):
+		raise EditError(missing_reason)
+	for part in parts:
+		current = current / part
+		try:
+			metadata = current.lstat()
+		except FileNotFoundError:
+			raise EditError(missing_reason) from None
+		if is_link_or_reparse(metadata):
+			raise EditError("unsafe_path")
+		if not stat.S_ISDIR(metadata.st_mode):
+			raise EditError(missing_reason)
+	return current
 
 
 def environment_tree(
@@ -249,7 +306,7 @@ def _ignored_environment_entry(child: os.DirEntry[str]) -> bool:
 def _environment_record(root: Path, path: Path, metadata: os.stat_result) -> dict[str, Any]:
 	if stat.S_ISLNK(metadata.st_mode):
 		return _environment_link(root, path)
-	if getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+	if is_reparse_point(metadata):
 		raise EditError("unsafe_path")
 	if stat.S_ISDIR(metadata.st_mode):
 		return {"path": path.relative_to(root).as_posix(), "kind": "directory"}
@@ -259,11 +316,7 @@ def _environment_record(root: Path, path: Path, metadata: os.stat_result) -> dic
 def _environment_file(root: Path, path: Path, deadline: float) -> dict[str, Any]:
 	assert_deadline(deadline)
 	metadata = path.lstat()
-	if (
-		not stat.S_ISREG(metadata.st_mode)
-		or metadata.st_nlink != 1
-		or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
-	):
+	if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or is_reparse_point(metadata):
 		raise EditError("unsafe_path")
 	return {
 		"path": path.relative_to(root).as_posix(),

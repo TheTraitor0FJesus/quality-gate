@@ -1,0 +1,54 @@
+name: Quality Gate release rollout
+
+on:
+  repository_dispatch:
+    types: [quality-gate-release-published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published release version without the v prefix (recovery only).
+        required: true
+        type: string
+      provider_sha:
+        description: Verified full provider workflow SHA (recovery only).
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gate-provider-activation
+  cancel-in-progress: false
+
+jobs:
+  activate-provider:
+    name: Open provider activation PR
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out Quality Gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create provider-scoped GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.QUALITY_GATE_ROLLOUT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.QUALITY_GATE_ROLLOUT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: quality-gate
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Create or refresh provider activation PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          QUALITY_GATE_RELEASE_VERSION: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.version || inputs.version }}
+          QUALITY_GATE_PROVIDER_SHA: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.provider_sha || inputs.provider_sha }}
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -B -m quality_gate.release_rollout

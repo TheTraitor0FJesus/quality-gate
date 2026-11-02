@@ -22,8 +22,18 @@ test paths, dependency inputs, required documents, workflows, waivers, or supple
 
 Run commands from the repository root. `check`, `audit`, `validate`, `doctor`, and `version` do
 not change tracked project files. Quality Gate puts temporary work under the checked repository's
-ignored `temp/` directory, removes stale inactive runs when it starts, and removes its own run
-directory when it exits. Read-only checkouts and candidate snapshots use a private hashed workspace
+ignored `temp/` directory. At startup it reclaims an inactive `qg-` workspace only when a user-local
+HMAC key validates the root-level owner record and directory identity, the in-directory marker and
+active-lock identities match, and Gate acquires the run lock. A signed cleanup record permits a later
+run to resume after partial removal. A name prefix or marker alone does not authorize deletion.
+Quality Gate preserves foreign entries, ambiguous directories, legacy `.quality-gate-edit-*`
+directories, active runs and the root lock. Each invocation removes only its own workspace when it
+exits. On POSIX, `temp/` also retains a private, authenticated `.quality-gate-cleanup-<key-id>`
+directory for deletion journals. Separate user-state keys use separate areas. A previous authenticated
+area and its journals remain available when that key is restored; untrusted areas are preserved.
+An incomplete older key file is preserved alongside a separate recovery key, so restoring the older
+key permits its signed records to be checked again.
+Read-only checkouts and candidate snapshots use a private hashed workspace
 per repository under the user-local system temporary directory. Every consumer repository must ignore its root
 `temp/` directory in `.gitignore` (for example, with `/temp/`). Cache staging and atomic replacement
 files remain beside their persistent targets. `sync`, `setup`, rollback, confirmed prune,
@@ -33,6 +43,9 @@ read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnos
 
 1. Run `quality-gate validate` after editing `quality-gate.toml`.
 2. Run `quality-gate doctor` to verify the selected release and component runtimes are available.
+   Run `quality-gate setup` after selecting a policy release or adding/changing Python components.
+   Setup provisions the tools and component runtime before editing; edit-time hooks do not
+   install them, and a missing runtime is reported as `unchecked`.
 3. For changes to this repository's source or policy, run the current-source `quality-gate check`
    before committing. For a consumer implementation, complete staged verification through its
    active workflow; its commit-hook Quality Gate satisfies this step. For standalone verification,
@@ -50,7 +63,9 @@ read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnos
 
 For this provider, the Python test stage has a 30-minute limit, the complete Gate has a 40-minute
 limit, and the reusable CI job has a 50-minute outer limit. The job limit includes bootstrap and
-cleanup. Local verification requires an explicit 50-minute aggregate executor budget as well.
+cleanup. Local full-suite and Quality Gate requests use the test runner's fixed 25-minute aggregate
+budget, including all command stages and process-tree cleanup. This aggregate budget is the
+effective local limit when an inner stage has a longer timeout.
 
 The native pre-commit wrapper reads the staged manifest, resolves `quality.policy_release`, verifies
 that exact cached release, and calls the Gate without importing mutable repository source. The
@@ -101,7 +116,7 @@ owned background invocation with cancellation; the host still owns delivery and
 drain. Managed setup prepares the declared component runtime. Unmanaged projects
 explicitly prepare their own `.venv` with the exact released mypy and required
 dependencies/stubs. Editing performs no provisioning. See the
-[provider evidence and activation prerequisites](audits/edit-types-provider.md).
+[interface verification and activation prerequisites](release.md#working-tree-interface-verification).
 
 Policy v3.1.0 adds optional `python[].typecheck` (boolean, default true). False
 produces an explicit mypy `not_applicable` result in full Gate and edit typing;
@@ -130,6 +145,10 @@ After every `quality-gate.toml` edit, run `quality-gate validate`. Use
 [templates/quality-gate.toml](../templates/quality-gate.toml) as the canonical shape; do not create
 a project-local manifest copy in an agent skill.
 
+For each Python component, set `tests_applicable` explicitly. When it is false, keep
+`test_paths` empty and provide a non-empty `tests_reason`; when it is true, declare at least one
+`test_paths` entry and omit `tests_reason`. The validator rejects a false setting without a reason.
+
 ## Setup and unavailable verification
 
 Network access is allowed only in the explicit sync workflow:
@@ -148,21 +167,44 @@ Never treat an `unchecked` result as a pass.
 
 ## Consumer release update
 
-Keep the consumer on its current release while downloading the target immutable asset:
+After verified publication, `consumer-release-rollout.yml` opens or refreshes consumer pull requests
+from `.github/quality-gate-consumers.json`. The registry also lists `quality-gate` with
+`activation: "provider"`; `release-rollout.yml` handles that entry through the existing provider
+activation route, so the generic consumer job creates no duplicate provider PR.
+Consumer PRs update the manifest policy release and every active
+Quality Gate reusable-workflow reference together. They also update setup templates such as
+`skills/setup-repo/assets/quality-workflow.yml`. Review the complete diff and merge it only after the
+consumer checks pass. Rollout PRs are never auto-merged, and the bot never pushes to a default branch.
+
+For a private GitHub Free consumer, required status checks cannot be enforced by branch protection.
+Inspect its Actions results manually before merge. See [integration behavior](integrations.md) for the
+private-repository limitation and service setup.
+
+If the bot misses a release event, first confirm the release was fully published and verified. Then
+run `consumer-release-rollout.yml` manually with the published version and verified helper SHA.
+This recovers the rollout for that release and does not publish another release.
+
+Each matrix job obtains a token scoped to the provider and one consumer. Token creation or rollout
+failure affects only that target; other jobs still run. Each target validates the publication receipt
+and tag before writes, then rejects dynamic or malformed workflow references and missing configured
+pins. An existing branch without its managed open PR requires owner recovery and is never overwritten.
+
+Use the following manual procedure only when rollout automation cannot update a consumer. Keep the
+consumer on its current release while downloading the target immutable asset:
 
 ```text
 quality-gate sync --url <target-release-asset-url> --version <target-version>
 ```
 
-Then change these two independent pins in one feature-branch candidate:
+Then change the policy pin and all active caller references in one feature-branch candidate:
 
 1. Set `quality.policy_release` in `quality-gate.toml` to the target release. This selects the
    local wheel, policy files, scanner, and component tools.
-2. Set the caller workflow `uses` value to the full commit SHA that contains the compatible
-   reusable `.github/workflows/quality.yml`. This selects the CI implementation. Obtain the SHA
-   from the verified release tag or publication record; do not use a tag or branch in the caller.
+2. Set every caller `uses` value for Quality Gate reusable workflows to the same full provider
+   commit SHA that contains the compatible workflow implementation. Obtain the SHA from the verified
+   release record; do not use a tag or branch in a caller.
 
-Run `validate`, `setup`, and `doctor`, then stage the manifest and workflow together. Use one
+Run `validate`, `setup`, and `doctor`, then stage every changed manifest and workflow together. Use one
 typed test-runner `scope: full` request: it runs every declared supplemental test and then the
 staged `quality-gate check`, while a repository without a manifest keeps ordinary complete-suite
 discovery. Commit only after it passes; the native commit hook repeats the staged gate. Push the

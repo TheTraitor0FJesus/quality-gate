@@ -123,8 +123,10 @@ The published v4.1.0 engine retains the exact supported pins above and supports 
 own policy. Older engines do not support newer policy releases or the new `phase`
 request field.
 
-The v4.2.0 engine retains these exact supported pins, including v4.1.0 after publication,
-and adds its own v4.2.0 policy after immutable publication. Other versions remain unsupported.
+The v4.2.1 engine retains these exact supported pins, including v4.2.0, and adds
+its own v4.2.1 policy after immutable publication. The v4.3.0 candidate retains
+those pins and adds its own v4.3.0 policy after immutable publication. Other
+versions remain unsupported.
 
 The compatibility adapter uses schema 2 and the same component path membership and
 released Ruff configuration as these releases. Their Python manifest/runtime/Ruff
@@ -187,17 +189,22 @@ does. Released per-file test exceptions, inline `noqa` and file-level Ruff suppr
 remain active. Typed Gate waivers do not suppress Ruff or formatting in these policies.
 
 Eligible files are batched by selected release and runtime. Work happens on isolated
-copies with the same relative names in a supervisor-owned `.quality-gate-edit-*` directory
-under the explicit root. Keeping this workspace on the same volume permits atomic file
-replacement. The supervisor removes it after stopping the worker, including on timeout.
-For `phase: "validate"`, the temporary workspace is outside the project and the provider
-never publishes staged bytes back to the project. It rechecks current file, configuration,
-release and runtime identities before returning.
+copies with the same relative names in a supervisor-owned `temp/qg-*` directory
+under the explicit root. This uses the shared temporary-workspace manager, including its
+active-run locks, cleanup and system-temp fallback for read-only roots. Keeping a writable
+project's workspace on the same volume permits atomic file replacement. The supervisor
+removes it after stopping the worker, including on timeout; later invocations reclaim
+inactive runs left by abrupt termination while preserving locked active runs.
+The same workspace policy applies to read-only edit commands. For `phase: "validate"`,
+the provider never publishes staged bytes back to the project. It rechecks current file,
+configuration, release and runtime identities before returning. Published engines retain
+their own behavior until consumers explicitly install a release containing this change.
 
 With `phase` omitted, the legacy synchronous writer-and-diagnostics pipeline is:
 
-1. Ruff safe fix: only reviewed `I001` import ordering, `--no-unsafe-fixes`, explicit
-   `F401` unfixable. All other enabled lint rules still run; unused imports survive.
+1. Ruff safe fixes: reviewed `I001` import ordering and unambiguous `F401` unused imports,
+   with `--no-unsafe-fixes` retained. In `__init__.py`, declare intentional public re-exports
+   with a redundant alias or `__all__`; Ruff's unsafe removals remain disabled.
 2. Ruff format, even when the first step reports residual lint errors.
 3. Ruff lint without fixes, JSON findings, then Ruff format `--check` on final bytes.
 
@@ -205,8 +212,8 @@ With `phase: "write"`, the provider runs only the safe fix and format steps abov
 the resulting file identities and an empty findings list; this confirms the writer phase completed,
 not that final lint diagnostics passed. A syntax error that prevents formatting is left for the
 validation phase to report. `phase: "validate"` skips both write steps and runs only Ruff
-`check --no-fix` and `format --check` against the exact current bytes. It preserves fixable findings
-such as `I001` and `F401` for the host to deliver after the writer's automatic edits have finished.
+`check --no-fix` and `format --check` against the exact current bytes. It preserves findings such as
+`I001` and `F401` for the host to deliver after the writer's automatic edits have finished.
 
 No tests, mypy, dependency/history/secret scanning, Git-index candidate, full-repository
 discovery or setup is part of this operation. Relevant working-tree manifest,
@@ -358,5 +365,5 @@ acceptance. No policy pin migration is required, but the host must select the v4
 engine before sending either phase. Provider publication does not activate host settings
 or change consumer pins.
 
-Provider test commands, real release comparison, cleanup, timing evidence and limitations
-are recorded in [the provider acceptance record](audits/edit-check-provider.md).
+Follow the [interface verification requirements](release.md#working-tree-interface-verification)
+for real-wheel parity, host events, latency and cleanup.

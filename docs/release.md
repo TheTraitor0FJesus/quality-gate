@@ -2,8 +2,8 @@
 
 Paths on this page are relative to the repository root. The [shared publisher contract](publication.md)
 owns the PR declaration, reusable interface, evidence schema, publication states, and recovery.
-This page owns Quality Gate's product integration. Resolve the Git skill's preparation policy
-under `CODEX_HOME/skills/git/references/release-policy.md`, or `.codex` under the OS user profile.
+This page owns Quality Gate's product integration. Resolve the PR skill's preparation policy
+under `CODEX_HOME/skills/pr/references/release-policy.md`, or `.codex` under the OS user profile.
 For this repository, use the executable declaration format in the shared publisher contract.
 
 ## Prepare a candidate
@@ -37,63 +37,6 @@ making the release candidate depend on its own unpublished wheel.
 
 ## Product verification
 
-The published v4.0.0 release changes normal `check` and `audit` output to summarize
-passed statuses. Failed and unchecked statuses remain visible, and `--verbose` returns
-the complete status map and safely collected findings. This is MAJOR relative to
-published v3.2.0 because tools that parse individual success lines must use
-`--verbose`. The checks, first `Quality Gate: <exit_code>` line, and exit-code
-precedence stay the same.
-
-The release also adds v4.0.0 policy support to the edit commands and prints the
-release audit report in CI logs. The [provider v4.0.0 acceptance record](audits/provider-v4.0.0-acceptance.md)
-records its immutable release evidence.
-
-The published v4.1.0 release adds optional `phase: write` and `phase: validate` requests to the
-working-tree Ruff interface. Requests without a phase preserve the synchronous behavior. Phase
-requests require engine v4.1.0 or newer; older exact policy pins and hosts that keep phase-less
-requests remain compatible. Host activation stays separate. This is MINOR relative to published
-v4.0.0. The [provider v4.1.0 acceptance record](audits/provider-v4.1.0-acceptance.md) records its
-immutable release evidence and current self-policy activation.
-
-The published v4.2.0 release adds a user-local queue for full Gate runs. Two runs may proceed across
-repositories for the same user; later runs wait up to 120 seconds by default and return `unchecked`
-without starting when the wait budget expires. `QUALITY_GATE_QUEUE_TIMEOUT_SECONDS` configures the
-wait. Ruff uses four worker threads by default, adjustable with `QUALITY_GATE_RUFF_THREADS`. CI
-skips the local queue. Provider budgets are 30 minutes for pytest, 40 minutes for the Gate, and
-50 minutes for CI. Before activating v4.2.0 in a native commit hook, its external timeout bridge must
-cover the full Gate and configured queue wait. This is MINOR relative to published v4.1.0. The
-[provider v4.2.0 acceptance record](audits/provider-v4.2.0-acceptance.md) records its immutable
-release evidence and self-policy activation.
-
-The v3.2.0 release added [read-only touched-file integrity](edit-integrity.md)
-and retained the v3.1.0 typing interface, including its separately selected
-background schema. This was MINOR relative to published v3.1.0. The
-[integrity provider evidence](audits/edit-integrity-provider.md) records that
-candidate's source verification; it does not certify host activation.
-
-The v3.1.0 release added [whole-scope typing](edit-types.md), preserving schema 1
-and adding the separately selected schema 2 background/cancellation envelope.
-It also adds the default-true manifest typing opt-out to the new policy. This is
-MINOR relative to published v3.0.0; older exact policy pins remain supported and
-are not changed automatically. The [typing provider evidence](audits/edit-types-provider.md)
-distinguishes source/parity preparation from immutable publication and host
-acceptance. The normal Windows/Linux exact-source release builds remain required.
-Installed active-turn delivery, Stop/drain and aggregate event profiles require
-the published compatible engine and separate host activation.
-
-The public [working-tree Ruff interface](edit-check.md) was introduced in v2.6.0. The v2.6.1
-release repaired direct wheel execution through the native release launcher. The v2.6.2
-release added transparent provider-owned reuse of complete unchanged-content results.
-The v3.0.0 release added the read-only [secret interface](edit-secrets.md) and fixed
-actual-secret fingerprints in the shared scanner transport. Persisted waivers for
-the old redacted placeholder require explicit review and reissue, so this is MAJOR
-relative to v2.6.2. Interface schemas and detector rules remain unchanged. Both edit
-interfaces retain exact v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2 policy compatibility and
-support the published v3.0.0, v3.1.0, v3.2.0, v4.0.0, v4.1.0, and v4.2.0 policies.
-The source policy pin stays on its current published release; activation uses the separate route above. Host
-installation/activation and the initial v2.4.2 consumer's `edit-setup` remain separate post-publication
-work; the provider acceptance record does not establish installed host-event acceptance.
-
 `.github/workflows/release.yml` connects shared preparation, the existing Windows/Linux package
 verification, and shared publication. Preparation resolves the final merged commit and retains its
 original candidate envelope before either platform starts. No-release and already-complete outcomes
@@ -123,8 +66,9 @@ is not a general checkout-length limit for consumers.
 
 Provider verification budgets are nested: the Python test stage is limited to 30 minutes, the
 complete Quality Gate to 40 minutes, and the reusable CI job to 50 minutes including bootstrap and
-cleanup. Local provider verification requires an explicit 50-minute aggregate executor budget;
-the ordinary 25-minute test-runner budget is insufficient for these inner limits.
+cleanup. Local full-suite and Quality Gate requests use the test runner's fixed 25-minute aggregate
+budget, including all command stages and process-tree cleanup. This aggregate budget is the
+effective local limit when an inner stage has a longer timeout.
 
 The `Verify package` step and artifact upload must succeed for each platform before publication.
 The artifact audit streams its redacted report to the job log, including when it fails.
@@ -143,6 +87,37 @@ The product evidence contains the existing `quality-gate-v{version}-Linux.zip` a
 `quality-gate-v{version}-Windows.zip` identities. The common publisher independently checks each
 Actions run, producing attempt, job, required steps, upload receipt, artifact ID/digest, downloaded
 content, and original candidate digest. Product code owns no second release parser or state machine.
+
+## Working-tree interface verification
+
+When changing an edit implementation or its host wiring, retain real-tool checks through
+the public CLI and the verified wheel on `PYTHONPATH`, without extraction. Compare findings
+and final bytes against the same selected release's ordinary checks; source imports or an
+extracted installation do not establish native-wheel parity. Keep selected-wheel comparisons
+valid with only the supplied candidate in the isolated cache, without a sibling historical
+release. The regression routes are `tests/test_edit_check.py`, `tests/test_edit_secrets.py`,
+`tests/test_edit_types.py`, `tests/test_edit_reuse.py` and `tests/test_edit_integrity.py`.
+
+Full Gate sanitizes the user environment, so `tests/test_edit_integrity_host.py` can skip
+when the installed host adapter is unavailable. For affected host-boundary changes, run
+that module separately through the configured test-runner with the real host available.
+Bind the result to the host source and provider candidate; a substituted wheel launcher
+does not prove installed-release activation, and a targeted run does not replace full Gate.
+
+Before enabling a host mechanism, select the published compatible engine separately from
+the policy pin and finish its explicit setup. Verify real clean/finding/fix events, exact
+request and final-byte identities, feedback delivery, disablement, rollback, reactivation
+and owned-process cleanup. Typing also requires cancellation/replacement, active-turn
+delivery and Stop/drain. Keep the owning host ticket open and the mechanism disabled
+until its installed acceptance criteria pass; provider publication alone completes none
+of these host steps.
+
+Measure complete host event-to-feedback latency for managed and unmanaged one-file and
+ten-file profiles, including a first call and 30 warm calls per profile. Report p50/p95/max,
+engine/policy identities, workload, completed outcomes, skips and cache conditions against
+the host ticket's targets. Include host hashing, launch, all enabled checks and delivery;
+provider-only timings cannot establish the aggregate budget. Retain incomplete work as
+incomplete and obtain the owner's decision before relaxing a target or deadline.
 
 ## Publication and credentials
 
@@ -188,20 +163,71 @@ reusable entry points to that same full SHA; their policy/runtime versions chang
 explicit rollout. A ticket PR or feature merge alone is not a completed provider handoff.
 
 The provider's `quality-gate.toml` stays on the latest published policy until the candidate's policy
-asset is published. After publication, advance the self-policy pin and remove any temporary provider
-workflow waivers used to validate the candidate in a separate no-release PR.
-Update the active provider pin assertion in `tests/test_ci_workflow.py` and waiver assertion
-in `tests/test_integrity.py` in the same candidate. Select the accepted published policy in
-`tests/fixtures/release-parity/quality-gate.toml` as well, so platform parity exercises that
-policy. Preserve the comparator's expected outcomes and the non-gating parity waiver. This
-activation and its fixture update keep the published helper R and product version unchanged.
-Do not make the provider depend on an unpublished policy asset.
+asset is published. Only after the publish job verifies the release does `release.yml` send the
+`quality-gate-release-published` repository event. Its `client_payload` contains plain `version`
+and full lowercase `provider_sha`, for example:
+
+```json
+{"version": "4.2.1", "provider_sha": "0123456789abcdef0123456789abcdef01234567"}
+```
+
+The dispatch job requires successful publication and `build-required` preparation. Failed, skipped,
+no-release, and already-complete publication paths emit no event. Before dispatch, the helper checks
+the stable published release, its retained receipt, and its tag. The payload version must match the
+receipt's candidate version; the SHA must match `verification.provider_sha`, the reusable helper
+that verified publication. A mismatch fails before sending the event.
+
+`release-rollout.yml` consumes that event from the default branch and repeats these identity checks
+before opening or refreshing the provider activation PR. Recovery dispatch accepts the same two
+fields. Configure `QUALITY_GATE_ROLLOUT_APP_CLIENT_ID` as a repository variable and
+`QUALITY_GATE_ROLLOUT_APP_PRIVATE_KEY` as an Actions secret. Install the GitHub App on `quality-gate`
+with Contents and Pull requests write access. The event sender requests only Contents write; the
+activation job also requests Pull requests write. Both installation tokens are scoped to this
+repository. The dispatch and activation jobs keep their built-in `GITHUB_TOKEN` read-only.
+
+The provider activation pull request updates `quality-gate.toml`, the release-parity fixture, and
+active policy-version assertions in `tests/test_ci_workflow.py` and `tests/test_integrity.py`. If a
+release-candidate waiver is temporary, put `# quality-gate-rollout:remove-after-release` immediately
+before its `[[waivers]]` table. The bot removes only marked waiver tables; leave permanent waivers
+unmarked. Preserve comparator outcomes and the permanent non-gating parity waiver. This activation
+keeps the published helper R and product version unchanged and declares `No release`. Repeated
+delivery makes no additional changes. A newer release refreshes the same open PR, while an older
+event cannot downgrade it. A closed PR stays closed for its last selected release; a later release
+can create a new PR. Rollout executions are serialized without cancelling an active update. Human
+review and merge complete activation. Never make the provider depend on an unpublished policy asset.
+
+The consumer registry is `.github/quality-gate-consumers.json`. It includes `quality-gate` with
+`activation: "provider"`, handled only by `release-rollout.yml` as described above. The separate
+`consumer-release-rollout.yml` opens or refreshes one pull request for every other registered
+consumer, updating each policy manifest and all active Quality Gate workflow references to the
+verified helper SHA. It updates both the root manifest and active workflow in `skills` as well as
+`skills/setup-repo/assets/quality-workflow.yml`. Each matrix job obtains a provider/consumer-scoped
+token and validates the published receipt/tag before mutations. Failed targets do not cancel others.
+No bot job writes to a default branch or merges a rollout pull request. A newer release updates the
+existing open pull request; a closed pull request is not reopened for that same version. Human review
+and merge complete activation.
+
+Recover missed consumer rollouts separately with the same verified release identity:
+
+```shell
+gh workflow run consumer-release-rollout.yml --ref <default-branch> -f version=<MAJOR.MINOR.PATCH> -f provider_sha=<verified-full-sha>
+```
+
+If publication succeeds but event dispatch or rollout is unavailable, run `release-rollout.yml`
+manually only with the version and helper SHA from the verified publication record. This recovers the
+same release and does not start a new publication.
+
+```shell
+gh workflow run release-rollout.yml --ref <default-branch> -f version=<MAJOR.MINOR.PATCH> -f provider_sha=<verified-full-sha>
+```
 
 For an existing qualified release, verify its complete retained receipt, exact-source platform
 verification jobs, tag, notes, helper R, and both downloadable ZIP byte digests before recording
 acceptance. Reuse the existing release when only activation, fixtures, tests, or instructions
-change. Record affected qualification reruns and consumer handoff in a provider acceptance audit
-under `docs/audits/`, as in [v2.3.0 acceptance](audits/provider-v2.3.0-acceptance.md); an open
+change. Record affected qualification reruns, release/source and asset identities, consumer
+handoff and unfinished acceptance in the PR or owning GitHub Issue. Release receipts and
+Actions retain publication evidence; keep release history on release pages. Do not create
+per-release acceptance reports or provider preparation journals in the repository. An open
 correction PR remains pending owner integration. The shared
 [caller contract](publication.md#entry-points-and-ownership) also defines Brain's checks-only role.
 
@@ -214,5 +240,5 @@ failure-injection tests remain the product evidence; test doubles never replace 
 acceptance in the final release workflow.
 
 The release preserves the schema 2 CLI, schema 2 hook/runtime contract, platform ZIP delivery, consumer
-activation, rollback, cache retention, and backup responsibilities. Publishing the provider does
-not automatically change consumer workflow pins or deploy services.
+activation, rollback, cache retention, and backup responsibilities. Publishing the provider opens
+reviewed activation pull requests; it does not merge them or deploy consumer services.

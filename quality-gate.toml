@@ -11,7 +11,7 @@ expires_on = "2027-08-26"
 
 [quality]
 schema = 2
-policy_release = "v4.2.0"
+policy_release = "v4.6.0"
 
 [repository]
 name = "quality-gate"
@@ -20,30 +20,30 @@ required_documents = [
     "AGENTS.md",
     ".agents/skills/post-release-quality-gate/SKILL.md",
     ".agents/skills/post-release-quality-gate/agents/openai.yaml",
-    "docs/audits/provider-v4.0.0-acceptance.md",
-    "docs/audits/provider-v4.1.0-acceptance.md",
-    "docs/audits/provider-v4.2.0-acceptance.md",
     ".release/release-tools.toml",
     ".release/release-requirements.txt",
     ".release/version.toml",
     ".release/notes.md",
     ".release/publisher.toml",
+    ".coderabbit.yaml",
     "README.md",
     "docs/agent-reference.md",
+    "docs/integrations.md",
     "docs/edit-check.md",
     "docs/edit-secrets.md",
     "docs/edit-integrity.md",
     "docs/edit-types.md",
-    "docs/audits/edit-types-provider.md",
-    "docs/audits/edit-secrets-provider.md",
-    "docs/audits/edit-integrity-provider.md",
-    "docs/audits/edit-check-provider.md",
     "docs/architecture.md",
     "docs/coding-standards.md",
     "docs/lessons.md",
     "docs/quality-policy-changes.md",
     "docs/release.md",
     "docs/publication.md",
+    ".github/dependabot.yml",
+    ".github/quality-gate-consumers.json",
+    ".github/workflows/consumer-release-rollout.yml",
+    ".github/workflows/dependabot-auto-merge.yml",
+    ".github/workflows/release-rollout.yml",
     ".github/workflows/release.yml",
     ".github/workflows/release-prepare.yml",
     ".github/workflows/release-publish.yml",
@@ -53,6 +53,8 @@ required_documents = [
     "scripts/release_adapter.py",
     "scripts/release_build.py",
     "scripts/release_metadata.py",
+    "quality_gate/release_rollout.py",
+    "quality_gate/consumer_rollout.py",
     "quality-gate.toml",
 ]
 
