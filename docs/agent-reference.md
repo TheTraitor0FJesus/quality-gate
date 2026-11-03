@@ -84,7 +84,7 @@ wrapper has no separate policy-version pin. If CI reports a v2 release, inspect 
 repository's selected release API returns 404. The native pre-push wrapper blocks updates and
 deletion of the remote default branch when Git can prove its name.
 
-Queue-aware releases admit two independent local full Gate runs across repositories for the
+Queue-aware releases admit four independent local full Gate runs across repositories for the
 current user. Waiting continues automatically when a slot opens and has a separate configurable
 budget. Ruff children default to four worker threads. See [Local Gate queue](local-gate-queue.md)
 for settings, nested execution, and the native-wrapper activation requirement. Source changes do

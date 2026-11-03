@@ -22,7 +22,7 @@ from .distribution import default_cache_root
 QUEUE_TIMEOUT_ENV = "QUALITY_GATE_QUEUE_TIMEOUT_SECONDS"
 DEFAULT_QUEUE_TIMEOUT_SECONDS = 120
 MAX_QUEUE_TIMEOUT_SECONDS = 240
-SLOT_COUNT = 2
+SLOT_COUNT = 4
 POLL_INTERVAL_SECONDS = 0.1
 RELEASE_CONTROL_WAIT_SECONDS = 0.5
 _SLOT_LOCK_NAME = ".gate-admission-{slot}.lock"
@@ -40,7 +40,7 @@ _LEASE_ENVIRONMENT = (
 	_LEASE_ROOT_ENVIRONMENT,
 )
 _TOKEN_PATTERN = re.compile(r"^[0-9a-f]{32}$")
-_SLOT_PATTERN = re.compile(r"^[01]$")
+_SLOT_PATTERN = re.compile(r"^[0-3]$")
 _RECORD_PATTERN = re.compile(r"^QG1 ([1-9][0-9]{0,9}) ([0-9a-f]{64})$")
 _active_lease: ContextVar[_Lease | None] = ContextVar("quality_gate_active_lease", default=None)
 
@@ -434,7 +434,7 @@ def _release(lease: _Lease) -> None:
 
 @contextmanager
 def gate_admission(*, cache_root: Path | None = None) -> Iterator[None]:
-	"""Hold one of two machine-local slots for one complete Gate run."""
+	"""Hold one of four machine-local slots for one complete Gate run."""
 	queue_timeout = queue_timeout_seconds()
 	requested_root = cache_root.expanduser().resolve() if cache_root is not None else None
 	active_lease = _active_lease.get()
