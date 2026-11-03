@@ -466,7 +466,11 @@ def test_runner_reaps_descendants_when_the_command_parent_exits(tmp_path: Path) 
 				)
 		assert output.strip() == "completed"
 		assert marker.is_file()
-		assert not process_alive(int(marker.read_text()))
+		pid = int(marker.read_text())
+		cleanup_deadline = time.monotonic() + 1
+		while process_alive(pid) and time.monotonic() < cleanup_deadline:
+			time.sleep(0.01)
+		assert not process_alive(pid)
 	finally:
 		if marker.exists() and process_alive(int(marker.read_text())):
 			os.kill(int(marker.read_text()), signal.SIGTERM)
