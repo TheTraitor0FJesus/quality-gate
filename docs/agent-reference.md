@@ -57,6 +57,10 @@ read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnos
    locally. For a direct user request or the `$implement` pre-review Gate, dispatch a separate
    test-runner request with `scope.kind = "quality-gate"`, `snapshot = "staged"`, a fresh
    `run_id`, and no `command` or `coverage`. This scope runs `quality-gate --root <repo> check`.
+   It runs the installed engine selected by that entry point, not the current checkout source.
+   If current-source verification is explicitly requested, establish and report the engine identity;
+   do not present the installed-engine result as current-source evidence. Use a procedure that
+   explicitly supports the requested source check, or report that it is unavailable.
    The default report preserves every observed failed and
    unchecked check status while bounding finding details. Known and unknown upstream omissions are
    identified explicitly. Use `--verbose` for every status and all safely collected redacted
@@ -71,9 +75,7 @@ read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnos
 
 For this provider, the Python test stage has a 30-minute limit, the complete Gate has a 40-minute
 limit, and the reusable CI job has a 50-minute outer limit. The job limit includes bootstrap and
-cleanup. Local full-suite and Quality Gate requests use the test runner's fixed 35-minute aggregate
-budget, including all command stages and process-tree cleanup. This aggregate budget is the
-effective local limit when an inner stage has a longer timeout.
+cleanup.
 
 The native pre-commit wrapper reads the staged manifest, resolves `quality.policy_release`, verifies
 that exact cached release, and calls the Gate without importing mutable repository source. The
@@ -215,15 +217,16 @@ Then change the policy pin and all active caller references in one feature-branc
    release record; do not use a tag or branch in a caller.
 
 Run `validate`, `setup`, and `doctor`, then stage the manifest and workflow together. If an
-authorized commit is next, rely on its hook for the staged Gate. Declared supplemental tests remain
-enforced by the consumer's CI workflow. Push the feature branch, require the single `Quality Gate`
-pull-request status, and leave approval and merge to a human. Use `scope.kind = "full"`,
-`snapshot = "working-tree"` when complete tests are needed, or a narrower test scope for
-focused checks.
+authorized commit is next, rely on its hook for the staged Gate. Before pushing, run declared
+supplemental tests locally with test-runner `scope.kind = "full"`, `snapshot = "working-tree"`,
+or verify that a separate required CI status runs them. The `Quality Gate` status alone does not
+execute or verify supplemental tests. Push the feature branch, require the `Quality Gate`
+pull-request status and any separate required supplemental-test status, and leave approval and
+merge to a human. Use a narrower test scope for focused checks.
 
 For rollback, restore both pins to the last known-good pair in a new feature-branch candidate and
-run `doctor`; rely on the next commit hook for its staged Gate and the consumer CI workflow for its
-complete tests. `quality-gate sync --rollback` only changes cache retention state; it does not
+run `doctor`; rely on the next commit hook for its staged Gate and run declared supplemental tests
+locally or verify their separate required CI status as above. `quality-gate sync --rollback` only changes cache retention state; it does not
 override `quality.policy_release` or the workflow SHA, so it is not a consumer rollback by itself.
 
 ## Migration, audit, and lessons
