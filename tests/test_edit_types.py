@@ -177,8 +177,8 @@ def candidate_typing_cache(
 	cache_parent = _candidate_typing_cache_parent(typing_policy)
 	with tempfile.TemporaryDirectory(prefix="qg-candidate-", dir=cache_parent) as directory:
 		cache = Path(directory).resolve()
-		prepare_edit_cache(cache, "v4.6.1")
-		candidate_root = cache / "releases/v4.6.1"
+		prepare_edit_cache(cache, "v4.7.0")
+		candidate_root = cache / "releases/v4.7.0"
 		candidate = verify_release(candidate_root)
 		published = verify_release(typing_policy)
 		replacements: dict[str, Path] = {}
@@ -218,7 +218,7 @@ def candidate_typing_cache(
 			shutil.copy2(source_path, candidate_root / relative)
 		_update_candidate_release_digests(candidate_root, replacements)
 		verified = verify_release(candidate_root)
-		assert verified.version == "v4.6.1"
+		assert verified.version == "v4.7.0"
 		assert (candidate_root / product.path).read_bytes() == candidate_engine_wheel.read_bytes()
 		yield cache
 
@@ -1217,7 +1217,7 @@ tests_reason = "Disposable typing integration."
 def _argus_typing_manifest() -> str:
 	return f'''[quality]
 schema = 2
-policy_release = "v4.6.1"
+policy_release = "v4.7.0"
 [repository]
 name = "argus-source-roots"
 domains = ["repository", "python"]
@@ -1312,7 +1312,7 @@ def argus_project(
 def _run_candidate_types(
 	project: Path, cache: Path, wheel: Path, *paths: str, network_guard: bool = True
 ) -> tuple[int, dict[str, Any]]:
-	policy = cache / "releases/v4.6.1"
+	policy = cache / "releases/v4.7.0"
 	return invoke_candidate_wheel(
 		request(project, policy, *paths, background=True), wheel, network_guard=network_guard
 	)
@@ -1374,7 +1374,7 @@ def test_candidate_wheel_checks_argus_sibling_sources_and_local_stubs(
 		network_guard=True,
 	)
 	assert (code, result["status"]) == (1, "failed"), json.dumps(result, indent=2)
-	assert result["engine_version"] == "4.6.1"
+	assert result["engine_version"] == "4.7.0"
 	assert [record["name"] for record in result["components"]] == ["bot", "worker"]
 	component = result["components"][0]
 	assert {item["path"] for item in component["inventory"]} == {
@@ -1391,7 +1391,7 @@ def test_candidate_wheel_checks_argus_sibling_sources_and_local_stubs(
 		{"path": "bot/main.py", "line": 5, "column": 21, "code": "arg-type"}
 	]
 	assert result["selections"][0]["mypy_version"] == "2.3.1"
-	policy = candidate_typing_cache / "releases/v4.6.1"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	candidate = verify_release(policy)
 	mypy = next(item for item in candidate.tools if item.name == "mypy")
 	assert result["selections"][0]["mypy_sha256"] == digest((policy / mypy.path).read_bytes())
@@ -1418,7 +1418,7 @@ def test_candidate_wheel_checks_argus_sibling_sources_and_local_stubs(
 	assert result["components"][0]["diagnostics"] == []
 	assert result["components"][1]["reason"] == "typecheck_disabled"
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.6.1"
+		"v4.7.0"
 	]
 
 
@@ -1511,22 +1511,22 @@ def test_candidate_wheel_runs_ruff_writer_and_validator_with_candidate_only_cach
 	path = project / "example.py"
 	original = b"import os\nimport sys\n\nvalue = (os.name, sys.version)\n"
 	path.write_bytes(original)
-	policy = candidate_typing_cache / "releases/v4.6.1"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	payload = request(project, policy, "example.py")
 	payload["baseline"] = {
-		"policy_release": "v4.6.1",
+		"policy_release": "v4.7.0",
 		"python": sys.executable,
 		"python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
 	}
 	payload["phase"] = phase
 	code, result = invoke_candidate_wheel(payload, candidate_engine_wheel, command="edit-check")
-	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.6.1"), result
-	assert result["selections"][0]["policy_release"] == "v4.6.1"
+	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.7.0"), result
+	assert result["selections"][0]["policy_release"] == "v4.7.0"
 	assert result["files"][0]["format"] == "passed"
 	assert result["files"][0]["sha256"] == digest(original)
 	assert path.read_bytes() == original
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.6.1"
+		"v4.7.0"
 	]
 
 
@@ -1538,16 +1538,16 @@ def test_candidate_wheel_runs_secrets_with_candidate_only_cache(
 	project = tmp_path / "secrets-candidate"
 	project.mkdir()
 	(project / "settings.py").write_text("token = 'ordinary value'\n", encoding="utf-8")
-	policy = candidate_typing_cache / "releases/v4.6.1"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	code, result = invoke_candidate_wheel(
 		request(project, policy, "settings.py"), candidate_engine_wheel, command="edit-secrets"
 	)
-	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.6.1"), result
-	assert result["selections"][0]["policy_release"] == "v4.6.1"
+	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.7.0"), result
+	assert result["selections"][0]["policy_release"] == "v4.7.0"
 	assert result["selections"][0]["scanner_version"] == "8.30.1"
 	assert result["files"][0]["findings"] == []
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.6.1"
+		"v4.7.0"
 	]
 
 
@@ -1559,15 +1559,15 @@ def test_candidate_wheel_runs_integrity_with_candidate_only_cache(
 	project = tmp_path / "integrity-candidate"
 	project.mkdir()
 	(project / "clean.py").write_text("value: int = 1\n", encoding="utf-8")
-	policy = candidate_typing_cache / "releases/v4.6.1"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	code, result = invoke_candidate_wheel(
 		request(project, policy, "clean.py"), candidate_engine_wheel, command="edit-integrity"
 	)
-	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.6.1"), result
-	assert result["selections"][0]["policy_release"] == "v4.6.1"
+	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.7.0"), result
+	assert result["selections"][0]["policy_release"] == "v4.7.0"
 	assert result["files"][0]["status"] == "passed"
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.6.1"
+		"v4.7.0"
 	]
 
 
@@ -1780,7 +1780,7 @@ def test_candidate_cli_fails_closed_for_missing_or_linked_source_roots(
 		except OSError as error:
 			pytest.skip(f"Directory symlinks are unavailable: {error}")
 		(project / "apscheduler").mkdir()
-	cache_policy = candidate_typing_cache / "releases/v4.6.1"
+	cache_policy = candidate_typing_cache / "releases/v4.7.0"
 	code, result = invoke_candidate_wheel(
 		request(project, cache_policy, "bot/main.py", background=True), candidate_engine_wheel
 	)
@@ -1810,7 +1810,7 @@ def test_candidate_cli_fails_closed_for_missing_or_unsafe_component_stub_roots(
 		),
 		encoding="utf-8",
 	)
-	policy = candidate_typing_cache / "releases/v4.6.1"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	code, result = invoke_candidate_wheel(
 		request(project, policy, "bot/main.py", background=True), candidate_engine_wheel
 	)
@@ -1828,7 +1828,7 @@ def test_candidate_cli_does_not_import_undeclared_working_tree_modules(
 		"from unlisted import helper\nvalue: int = helper()\n",
 		encoding="utf-8",
 	)
-	policy = candidate_typing_cache / "releases/v4.6.1"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	code, result = invoke_candidate_wheel(
 		request(argus_project, policy, "bot/main.py", background=True),
 		candidate_engine_wheel,
@@ -1836,7 +1836,7 @@ def test_candidate_cli_does_not_import_undeclared_working_tree_modules(
 	assert (code, result["status"], result["reason"]) == (2, "unchecked", "dependencies"), result
 	assert result["components"] == []
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.6.1"
+		"v4.7.0"
 	]
 
 
