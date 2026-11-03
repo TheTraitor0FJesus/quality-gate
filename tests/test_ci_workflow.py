@@ -132,7 +132,7 @@ def _build_wheel(tmp_path: Path) -> Path:
 		REPOSITORY,
 		source,
 		ignore=shutil.ignore_patterns(
-			".git", ".venv", ".quality-gate-tmp", "build", "*.egg-info", "__pycache__"
+			".git", ".venv", ".quality-gate-tmp", "temp", "build", "*.egg-info", "__pycache__"
 		),
 	)
 	_make_writable(source)

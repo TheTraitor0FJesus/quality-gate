@@ -257,8 +257,8 @@ class Invocation:
 		}
 		if not eligible:
 			return results
-		# Match ordinary Gate's cwd-based first-party import classification without
-		# copying or discovering unrelated source files in the isolated workspace.
+		# Isolated candidates classify first-party imports like a normal Gate run while
+		# copying only the selected files into the workspace.
 		common.extend(
 			[
 				"--config",

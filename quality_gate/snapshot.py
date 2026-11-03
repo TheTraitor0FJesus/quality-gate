@@ -286,7 +286,8 @@ def _make_writable(path: Path) -> None:
 	os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
 
 
-def _remove_snapshot(path: Path) -> None:
+def remove_snapshot(path: Path) -> None:
+	"""Remove an owned snapshot root, retrying its read-only payload as writable."""
 	if not path.exists():
 		return
 	try:
@@ -322,7 +323,7 @@ def _cleanup_after_failure(
 			raise
 		return
 	try:
-		_remove_snapshot(path)
+		remove_snapshot(path)
 	except SnapshotError as cleanup_error:
 		raise cleanup_error from original
 
@@ -917,6 +918,13 @@ class CandidateSnapshot:
 	_source_fingerprint: _IndexFingerprint = field(repr=False)
 	_cleanup_root: Path = field(repr=False)
 
+	@property
+	def index_identity(self) -> str:
+		"""Identify the captured source index without exposing its private fingerprint."""
+		if self._source_fingerprint is None:
+			return "staged Git index identity unavailable"
+		return f"git-index-sha256:{self._source_fingerprint[3].hex()}"
+
 	def assert_unchanged(self) -> None:
 		"""Reject verification when the source Git index changed after snapshot creation."""
 
@@ -957,7 +965,7 @@ def candidate_snapshot(
 		raise primary_error from exc
 	finally:
 		if register_cleanup is None:
-			_remove_snapshot(snapshot._cleanup_root)
+			remove_snapshot(snapshot._cleanup_root)
 		else:
 			original_error = primary_error or sys.exception()
 			try:

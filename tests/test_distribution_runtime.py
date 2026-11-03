@@ -7,6 +7,7 @@ import tempfile
 import time
 import zipfile
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from quality_gate.cli import main
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import DistributionError, PolicyCache
 from quality_gate.launcher import prepare_bootstrap
+from quality_gate.operation import GateOperation
 from quality_gate.runner import EXIT_UNCHECKED
 from quality_gate.runtime import (
 	RuntimeManager,
@@ -82,6 +84,63 @@ def test_sync_installs_verified_release_and_keeps_previous_for_rollback(tmp_path
 	assert cache.select("v2.0.1").is_dir()
 	assert cache.status()["active"] == "v2.0.1"
 	assert cache.rollback().name == "v2.0.0"
+
+
+@pytest.mark.parametrize("phase", ["inventory", "hash"])
+def test_review_policy_validation_is_bounded(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+	source = tmp_path / "source"
+	source.mkdir()
+	_release(source)
+	cache = PolicyCache(tmp_path / "cache")
+	cache.sync(source)
+	selected = cache.select("v2.0.0")
+	(directory := selected / "empty").mkdir()
+	real_glob = Path.rglob
+	real_open = Path.open
+	reads = 0
+
+	class SlowReader:
+		def __init__(self, stream: object) -> None:
+			self.stream = stream
+
+		def read(self, size: int) -> bytes:
+			nonlocal reads
+			reads += 1
+			time.sleep(0.1)
+			return self.stream.read(min(size, 1))
+
+	@contextmanager
+	def slow_open(path: Path, *args: object, **kwargs: object) -> Iterator[object]:
+		with real_open(path, *args, **kwargs) as stream:
+			if path.parent == selected and path.suffix == ".whl" and phase == "hash":
+				yield SlowReader(stream)
+			else:
+				yield stream
+
+	def slow_glob(path: Path, pattern: str) -> Iterator[Path]:
+		if path == selected and phase == "inventory":
+			for _ in range(20):
+				time.sleep(0.05)
+				yield directory
+		yield from real_glob(path, pattern)
+
+	monkeypatch.setattr(Path, "open", slow_open)
+	monkeypatch.setattr(Path, "rglob", slow_glob)
+	gate = GateOperation(tmp_path, "check", timeout_seconds=0.1, cleanup_seconds=1)
+	completed = False
+	started = time.monotonic()
+	with gate:
+		with gate.stage("policy.cache-lookup-validation", "v2.0.0"):
+			cache.select("v2.0.0")
+			completed = True
+	assert gate.timed_out
+	assert not completed
+	assert time.monotonic() - started < 0.5
+	assert selected.is_dir(), "an interrupted validation must not quarantine a valid release"
+	if phase == "hash":
+		assert reads < 6
 
 
 def test_prepare_preserves_lexical_policy_cache_root_for_native_cache(tmp_path: Path) -> None:

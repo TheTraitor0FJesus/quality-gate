@@ -65,8 +65,9 @@ for every release-test `tmp_path` before tests run. This limit applies to releas
 is not a general checkout-length limit for consumers.
 
 Provider verification budgets are nested: the Python test stage is limited to 30 minutes, the
-complete Quality Gate to 40 minutes, and the reusable CI job to 50 minutes including bootstrap and
-cleanup. Local full-suite and Quality Gate requests use the test runner's fixed 25-minute aggregate
+Quality Gate work to 40 minutes plus its shared 120-second cleanup allowance, and the reusable CI
+job to 50 minutes including bootstrap and cleanup. Local full-suite and Quality Gate requests use
+the test runner's current 35-minute aggregate
 budget, including all command stages and process-tree cleanup. This aggregate budget is the
 effective local limit when an inner stage has a longer timeout.
 

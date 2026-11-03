@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .contracts import Manifest, load_manifest
 from .distribution import DistributionError, PolicyCache, ReleaseManifest, load_release_manifest
+from .operation import current_operation
 from .runtime import (
 	RuntimeIdentity,
 	RuntimeInspection,
@@ -17,6 +19,17 @@ from .runtime import (
 )
 
 _POLICY_RELEASE = re.compile(r"^v\d+\.\d+\.\d+$")
+
+
+def _preparation_stage(name: str, scope: str) -> AbstractContextManager[None]:
+	operation = current_operation()
+	return nullcontext() if operation is None else operation.stage(name, scope)
+
+
+def _annotate_tool_cache(stage: str, value: str) -> None:
+	operation = current_operation()
+	if operation is not None:
+		operation.annotate_tool_cache(stage, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,45 +96,69 @@ def _prepare(
 			raise DistributionError("policy release override must use vMAJOR.MINOR.PATCH")
 		manifest = replace(manifest, policy_release=policy_release)
 	cache = PolicyCache(cache_dir)
-	policy_root = cache.select(manifest.policy_release)
-	release_manifest = load_release_manifest(policy_root)
+	policy_stage = "policy.cache-lookup-validation"
+	try:
+		with _preparation_stage(
+			policy_stage, f"immutable policy release {manifest.policy_release}"
+		):
+			policy_root = cache.select(manifest.policy_release)
+	except DistributionError:
+		_annotate_tool_cache(policy_stage, "cache miss or invalid release")
+		raise
+	_annotate_tool_cache(policy_stage, "verified cache hit")
+	validation_stage = "policy.release-manifest-validation"
+	try:
+		with _preparation_stage(validation_stage, "cached immutable release inventory"):
+			release_manifest = load_release_manifest(policy_root)
+	except DistributionError:
+		_annotate_tool_cache(validation_stage, "release validation failed")
+		raise
+	_annotate_tool_cache(validation_stage, "release inventory validated")
 	manager = RuntimeManager(cache)
 	runtimes: list[RuntimeInspection] = []
 	runtime_identities: list[RuntimeIdentity | None] = []
-	for component in manifest.python:
+	for component_index, component in enumerate(manifest.python, start=1):
+		runtime_stage = f"runtime.cache-validation.component_{component_index}"
 		try:
-			identity = runtime_identity(
-				actual_root,
-				manifest,
-				component,
-				repository=str(identity_root),
-			)
-		except RuntimeUnavailable as error:
-			if create_runtimes:
-				raise
-			runtime_identities.append(None)
-			runtimes.append(
-				RuntimeInspection(
-					manager.root / "unavailable" / component.name,
-					None,
-					False,
-					str(error),
-				)
-			)
-			continue
-		runtime_identities.append(identity)
-		if create_runtimes:
-			runtimes.append(
-				manager.ensure(
-					identity_root,
-					manifest,
-					component,
-					policy_root=policy_root,
-					release_manifest=release_manifest,
-				)
-			)
-		else:
-			runtimes.append(manager.inspect(identity_root, identity))
+			with _preparation_stage(runtime_stage, str(component.path).replace("\\", "/")):
+				try:
+					identity = runtime_identity(
+						actual_root,
+						manifest,
+						component,
+						repository=str(identity_root),
+					)
+				except RuntimeUnavailable as error:
+					if create_runtimes:
+						raise
+					runtime_identities.append(None)
+					inspection = RuntimeInspection(
+						manager.root / "unavailable" / component.name,
+						None,
+						False,
+						str(error),
+					)
+				else:
+					runtime_identities.append(identity)
+					inspection = (
+						manager.ensure(
+							identity_root,
+							manifest,
+							component,
+							policy_root=policy_root,
+							release_manifest=release_manifest,
+						)
+						if create_runtimes
+						else manager.inspect(identity_root, identity)
+					)
+		except RuntimeUnavailable:
+			_annotate_tool_cache(runtime_stage, "runtime identity or cache unavailable")
+			raise
+		runtimes.append(inspection)
+		_annotate_tool_cache(
+			runtime_stage,
+			"validated hit" if inspection.current else f"miss or stale: {inspection.reason}",
+		)
 	return PreparedEnvironment(
 		actual_root,
 		manifest,

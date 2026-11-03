@@ -61,9 +61,39 @@ read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnos
    runtimes but does not print its version. `quality-gate setup` prints the selected release when it
    prepares the policy and runtimes.
 
-For this provider, the Python test stage has a 30-minute limit, the complete Gate has a 40-minute
-limit, and the reusable CI job has a 50-minute outer limit. The job limit includes bootstrap and
-cleanup. Local full-suite and Quality Gate requests use the test runner's fixed 25-minute aggregate
+Each `check` or `audit` owns one operation after local admission. Its monotonic work clock starts
+before repository discovery and candidate construction, then covers preparation, readiness probes,
+cache validation, scanners and checks. The staged manifest sets the work limit from that original
+start; workspace lock waits and stale-workspace reclamation use that same deadline, and every child
+process uses the remaining operation time and its existing shorter command cap.
+Local admission keeps its separate queue contract. After work stops, process-tree termination, snapshot,
+workspace, nested tool-temporary, and native-cache staging roots share one separately bounded
+120-second cleanup phase. Native cache leases stay held until that cleanup finishes.
+The final report is rendered only after cleanup settles, and the operation's elapsed duration
+includes that cleanup.
+
+Windows cleanup removes each owned name through its identity-checked handle using POSIX disposition
+when supported. This permits directory removal while a delete-sharing reader still holds a file
+handle. Unsupported systems retain legacy disposition; access errors remain blocking. Immutable
+WinAPI bindings and structure classes are initialized once, while ownership records, file identities
+and attributes are checked afresh. The cleanup allowance covers the entire operation and is never
+renewed per root. Enclosing hook deadlines include this allowance. The test runner's separate
+15-second emergency process-termination reserve remains unchanged.
+
+Reports keep existing check IDs, outcome/status lines and exit precedence. Appended operation and
+check telemetry records monotonic elapsed time, actual scope, stage and execution disposition
+(`executed`, `reused` or `not-run`); outcome remains the check's separate `passed`, `failed`,
+`unchecked` or other status. Readiness, policy/runtime cache lookup and validation, candidate
+preparation and cleanup have their own stage observations. A reused result must carry its original
+execution identity and duration separately from current lookup and validation; the current Gate does
+not implement complete-result reuse or automatic rerun selection. Pytest telemetry retains bounded
+terminal outcome totals when available. Telemetry is additive, redacted and bounded; it does not
+change whether a check is eligible or which exit code wins.
+
+For this provider, the Python test stage has a 30-minute limit, Gate work has a 40-minute
+limit plus the shared cleanup allowance, and the reusable CI job has a 50-minute outer limit.
+The job limit includes bootstrap and cleanup. Local full-suite and Quality Gate requests use the
+test runner's current 35-minute aggregate
 budget, including all command stages and process-tree cleanup. This aggregate budget is the
 effective local limit when an inner stage has a longer timeout.
 
@@ -87,19 +117,29 @@ shared Git directory for linked worktrees, prepared runtime fingerprint and engi
 pinned tool and policy configuration, host platform and Python version, command options, and component
 import root. Worktrees in one clone can share namespaces; separate clones remain isolated. For a
 persistent namespace, the runner copies the current candidate to a stable, read-only source root that
-it owns while holding that namespace's lease. It derives file timestamps from file contents so
-Ruff can reuse entries when equal source bytes arrive in different temporary snapshots, then removes
-the staged source tree after the command. If staging is unsafe or unavailable, the runner uses the
-original snapshot with that Gate run's private cache. The cache directory is under the policy cache's
+it owns while holding that namespace's lease. Gate operations supervise staging against the original
+work deadline, then transfer the validated source root to the shared cleanup phase and keep the lease
+held until cleanup finishes. The runner derives file timestamps from file contents so Ruff can reuse
+entries when equal source bytes arrive in different temporary snapshots. If staging is unsafe or
+unavailable, the runner uses the original snapshot with that Gate run's private cache. Standalone
+callers retain synchronous staging and cleanup. The cache directory is under the policy cache's
 `native-tools/` directory. A bounded OS-lock lease is held while each process runs. Busy,
 inaccessible, unowned, or invalid storage uses the private cache and continues verification.
 Provider-owned entries expire after 30 days and are limited to eight namespaces per repository and
 tool; cleanup skips active leases and removes no unowned entry.
 
 The runner exposes a `NativeToolCacheSelection` record beside each native tool command, with
-`namespace_id`, `storage`, `fallback_reason`, and `selection_duration_ms`. The record is available to
-the caller but does not emit telemetry. It does not prove an internal Ruff or mypy cache hit, and it
-does not identify reuse of a complete check result.
+`namespace_id`, `storage`, `fallback_reason`, and `selection_duration_ms`. During an operation,
+`lookup_ms` reports the total namespace-selection cost, including metadata validation.
+`tool_cache=native-persistent` or `native-private` identifies the selected storage; a bounded
+fallback reason explains private selection. Both paths execute the tool. These observations
+do not prove an internal Ruff or mypy cache hit or reuse of a complete check result.
+Lookup, pruning, namespace preparation and source preparation have separate stage observations.
+Maintenance-lock and namespace-lease waits use the remaining original work budget. Pruning and
+namespace preparation run in bounded children while the parent retains the maintenance lock;
+namespace preparation also retains its namespace lease. Preparation workers do not mark a check as
+executed: that disposition requires the checked tool's own process to start. Standalone cache
+callers retain their existing local waits and synchronous maintenance.
 
 One opt-in measurement used policy v4.2.0, Python 3.12.10, Windows 11, Ruff 0.16.4, and mypy 2.3.1.
 Seven fixture snapshots invoked both tools: one cold snapshot, five warm snapshots, and one snapshot

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import urlparse
 
+from .operation import remaining_timeout
 from .release_contract import ReleaseInventoryError, validate_release_inventory
 from .temp_workspace import SYSTEM_TEMP_DIRECTORY
 
@@ -178,8 +179,14 @@ def load_release_manifest(path: Path) -> ReleaseManifest:
 
 def _sha256(path: Path) -> str:
 	digest = hashlib.sha256()
+	remaining_timeout()
 	with path.open("rb") as stream:
-		for block in iter(lambda: stream.read(1024 * 1024), b""):
+		while True:
+			remaining_timeout()
+			block = stream.read(1024 * 1024)
+			remaining_timeout()
+			if not block:
+				break
 			digest.update(block)
 	return digest.hexdigest()
 
@@ -190,9 +197,15 @@ def _release_platform() -> str:
 
 def verify_release(path: Path, manifest: ReleaseManifest | None = None) -> ReleaseManifest:
 	"""Verify every declared release artifact and external tool."""
+	remaining_timeout()
 	validated = manifest or load_release_manifest(path)
 	root = path.resolve()
-	actual_paths = [item.relative_to(root).as_posix() for item in root.rglob("*") if item.is_file()]
+	actual_paths = []
+	for entry in root.rglob("*"):
+		remaining_timeout()
+		if entry.is_file():
+			actual_paths.append(entry.relative_to(root).as_posix())
+	remaining_timeout()
 	try:
 		validate_release_inventory(
 			validated.version,
@@ -205,6 +218,7 @@ def verify_release(path: Path, manifest: ReleaseManifest | None = None) -> Relea
 		raise DistributionError(str(error)) from error
 	tool_files = tuple(ReleaseFile(tool.path, tool.sha256, "tool") for tool in validated.tools)
 	for item in (*validated.files, *tool_files):
+		remaining_timeout()
 		file_path = path / item.path
 		if not file_path.is_file():
 			raise DistributionError(f"release file is missing: {item.path}")

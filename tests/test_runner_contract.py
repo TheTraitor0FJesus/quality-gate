@@ -70,26 +70,37 @@ def test_missing_explicit_settings_root_does_not_fall_back_to_profile(tmp_path: 
 		_test_runner_instructions(selected_root)
 
 
-def test_prompt_contract_orders_supplementals_before_the_staged_gate() -> None:
+def test_prompt_contract_orders_python_then_supplementals_without_a_staged_gate() -> None:
 	settings_root = _selected_settings_root(os.environ, Path.home())
-	instructions = _test_runner_instructions(settings_root)
+	instructions = " ".join(_test_runner_instructions(settings_root).split())
 	preflight = instructions.index("first select `quality-gate --root <repo> validate`")
-	declarations = instructions.index("read only the validated manifest's `supplemental_tests`")
+	declarations = instructions.index(
+		"read only the validated manifest's `python` and `supplemental_tests` declarations"
+	)
+	python_stage = instructions.index(
+		"For each Python component with `tests_applicable: true`, run one pytest stage"
+	)
 	expansion = instructions.index("expand each validated repository-relative target")
-	collection = instructions.index("Run every declaration even after an earlier failure")
-	gate = instructions.index("always run the staged `quality-gate --root <repo> check`")
+	collection = instructions.index(
+		"Run all applicable Python stages, then every supplemental declaration"
+	)
 
-	assert preflight < declarations < expansion < collection < gate
-	assert "A supplemental failure never suppresses the later staged gate" in instructions
+	assert preflight < declarations < python_stage < expansion < collection
+	assert "even after an earlier completed failure or an unavailable component" in instructions
+	assert "Do not add a repository-wide suite or a Quality Gate check" in instructions
+	assert "Only `scope.kind: quality-gate` selects the staged Gate" in instructions
 
 
 def test_manifestless_full_scope_prompt_contract_keeps_ordinary_suite_discovery() -> None:
 	settings_root = _selected_settings_root(os.environ, Path.home())
-	instructions = _test_runner_instructions(settings_root)
+	instructions = " ".join(_test_runner_instructions(settings_root).split())
 
 	assert "For `full` without `quality-gate.toml`" in instructions
-	assert "ordinary full suite" in instructions
-	assert "Do not discover or run an ordinary full suite in this branch" in instructions
+	assert "for discovered `full` without a manifest, add no selector" in instructions
+	assert (
+		"For manifest-backed `full`, select exactly each component's declared test paths"
+		in instructions
+	)
 
 
 def _git(root: Path, *arguments: str) -> None:

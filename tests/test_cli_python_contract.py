@@ -843,6 +843,31 @@ def test_cli_reports_timeout_as_unchecked_without_a_failed_verdict(
 
 
 @pytest.mark.parametrize("command", ["check", "audit"])
+def test_cli_defers_gate_root_and_workspace_to_the_operation(
+	command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	seen_arguments = []
+
+	def dispatch(arguments: object) -> int:
+		seen_arguments.append(arguments)
+		return 0
+
+	def unexpected_preparation(*_args: object, **_kwargs: object) -> object:
+		pytest.fail("check and audit own repository discovery and workspace lifetime")
+
+	monkeypatch.setattr(sys, "argv", ["quality-gate", command])
+	monkeypatch.setattr("quality_gate.cli._dispatch", dispatch)
+	monkeypatch.setattr("quality_gate.runner.repository_root", unexpected_preparation)
+	monkeypatch.setattr(
+		"quality_gate.temp_workspace.temporary_workspace", unexpected_preparation
+	)
+
+	assert main() == 0
+	assert len(seen_arguments) == 1
+	assert seen_arguments[0].root is None
+
+
+@pytest.mark.parametrize("command", ["check", "audit"])
 def test_cli_renders_early_workspace_unavailability_as_unchecked(
 	command: str,
 	tmp_path: Path,
@@ -851,12 +876,10 @@ def test_cli_renders_early_workspace_unavailability_as_unchecked(
 ) -> None:
 	root = _disposable_repository(tmp_path, "valid")
 
-	def unavailable_workspace(_root: Path) -> object:
+	def unavailable_workspace(_root: Path, **_kwargs: object) -> object:
 		raise TemporaryWorkspaceError("repository workspace unavailable")
 
-	monkeypatch.setattr(
-		"quality_gate.temp_workspace.temporary_workspace", unavailable_workspace
-	)
+	monkeypatch.setattr(runner, "temporary_workspace", unavailable_workspace)
 	monkeypatch.setattr(sys, "argv", ["quality-gate", "--root", str(root), command])
 
 	result = main()

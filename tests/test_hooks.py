@@ -10,6 +10,7 @@ import pytest
 
 from quality_gate.contracts import ValidationError
 from quality_gate.hook_setup import HookIntegrationError, install_hooks
+from quality_gate.operation import OPERATION_CLEANUP_SECONDS
 from quality_gate.hooks import (
 	HookInputError,
 	PushRef,
@@ -244,7 +245,9 @@ def test_run_commit_gate_adds_queue_budget_to_its_outer_timeout(
 ) -> None:
 	gate_timeout_seconds = 5
 	queue_timeout_seconds = 2
-	outer_timeout_seconds = gate_timeout_seconds + queue_timeout_seconds
+	outer_timeout_seconds = (
+		gate_timeout_seconds + queue_timeout_seconds + OPERATION_CLEANUP_SECONDS
+	)
 	runtime_root = tmp_path / "runtime"
 	python = runtime_root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 	python.parent.mkdir(parents=True)
@@ -296,14 +299,14 @@ gate_timeout_seconds = {gate_timeout_seconds}
 			staged_manifest,
 			environment={"QUALITY_GATE_QUEUE_TIMEOUT_SECONDS": str(queue_timeout_seconds)},
 		)
-		== gate_timeout_seconds + queue_timeout_seconds
+		== gate_timeout_seconds + queue_timeout_seconds + OPERATION_CLEANUP_SECONDS
 	)
 	assert (
 		commit_gate_timeout_seconds(
 			staged_manifest,
 			environment={"CI": "true", "QUALITY_GATE_QUEUE_TIMEOUT_SECONDS": "invalid"},
 		)
-		== gate_timeout_seconds
+		== gate_timeout_seconds + OPERATION_CLEANUP_SECONDS
 	)
 	assert (
 		commit_gate_timeout_seconds(
@@ -313,7 +316,7 @@ gate_timeout_seconds = {gate_timeout_seconds}
 				"QUALITY_GATE_QUEUE_TIMEOUT_SECONDS": "invalid",
 			},
 		)
-		== gate_timeout_seconds
+		== gate_timeout_seconds + OPERATION_CLEANUP_SECONDS
 	)
 
 

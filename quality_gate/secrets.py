@@ -15,6 +15,7 @@ from .contracts import CheckResult, Finding, Manifest, Status, fingerprint_secre
 from .distribution import ReleaseManifest
 from .edit_process import run_process
 from .edit_protocol import FIRST_PRINTABLE_CHARACTER, MAX_TOOL_BYTES, EditError
+from .operation import current_operation, run_probe
 
 _SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _GITLEAKS = "gitleaks"
@@ -65,13 +66,23 @@ def _scanner_path(prepared: PreparedScanner) -> Path | None:
 def _run_scanner(command: list[str], root: Path, *, timeout: float) -> tuple[int, bytes]:
 	"""Keep the unredacted fingerprint source only in bounded process memory."""
 	try:
-		code, report, diagnostics = run_process(
-			command,
-			root=root,
-			environment=_scanner_environment(),
-			deadline=time.monotonic() + timeout,
-			own_tree=True,
-		)
+		operation = current_operation()
+		if operation is None:
+			code, report, diagnostics = run_process(
+				command,
+				root=root,
+				environment=_scanner_environment(),
+				deadline=time.monotonic() + timeout,
+				own_tree=True,
+			)
+		else:
+			code, report, diagnostics = operation.run_process(
+				command,
+				root=root,
+				environment=_scanner_environment(),
+				timeout_seconds=timeout,
+				limit=MAX_TOOL_BYTES,
+			)
 		return (-1, b"") if diagnostics else (code, report)
 	except (OSError, EditError):
 		return -1, b""
@@ -273,7 +284,7 @@ def _resolve_commit(repository: Path, reference: str, timeout: int) -> str | Non
 	resolved: set[str] = set()
 	for candidate in dict.fromkeys(refs):
 		try:
-			result = subprocess.run(
+			result = run_probe(
 				[
 					"git",
 					"-C",
@@ -283,8 +294,7 @@ def _resolve_commit(repository: Path, reference: str, timeout: int) -> str | Non
 					"--end-of-options",
 					f"{candidate}^{{commit}}",
 				],
-				capture_output=True,
-				check=False,
+				cwd=repository,
 				timeout=timeout,
 			)
 		except (OSError, subprocess.TimeoutExpired):
@@ -307,10 +317,9 @@ def _resolve_commit(repository: Path, reference: str, timeout: int) -> str | Non
 
 def _is_shallow(repository: Path, timeout: int) -> bool:
 	try:
-		result = subprocess.run(
+		result = run_probe(
 			["git", "-C", str(repository), "rev-parse", "--is-shallow-repository"],
-			capture_output=True,
-			check=False,
+			cwd=repository,
 			timeout=timeout,
 		)
 	except (OSError, subprocess.TimeoutExpired):

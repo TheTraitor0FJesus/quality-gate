@@ -17,7 +17,8 @@ import threading
 import time
 import tokenize
 import tomllib
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -30,6 +31,8 @@ from .admission import (
 	running_in_ci,
 )
 from .contracts import (
+	DEFAULT_COMMAND_TIMEOUT_SECONDS,
+	DEFAULT_GATE_TIMEOUT_SECONDS,
 	CheckResult,
 	Finding,
 	Manifest,
@@ -40,7 +43,9 @@ from .contracts import (
 	load_manifest,
 	redact,
 )
+from .contracts import PythonComponent as ManifestPythonComponent
 from .distribution import DistributionError
+from .edit_protocol import EditError
 from .integrity import documentation_results, git_integrity_results, workflow_result
 from .launcher import PreparedEnvironment, prepare, prepare_bootstrap
 from .lessons import lessons_result
@@ -51,10 +56,17 @@ from .native_cache import (
 	NativeToolCacheSelection,
 	native_tool_source_workspace,
 )
+from .operation import (
+	GateOperation,
+	OperationTimeoutError,
+	current_operation,
+	observe_check,
+	run_probe,
+)
 from .reporting import render
 from .runtime import RuntimeIdentity, RuntimeUnavailable, runtime_fingerprint
 from .secrets import secret_audit_result, secret_candidate_result, secret_history_result
-from .snapshot import SnapshotError, candidate_snapshot
+from .snapshot import CandidateSnapshot, SnapshotError, candidate_snapshot, remove_snapshot
 from .temp_workspace import TemporaryWorkspaceError, temporary_workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -70,6 +82,16 @@ MAX_DEPTRY_REPORT_BYTES = 1024 * 1024
 MAX_DEPTRY_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_DEPTRY_TEXT_CHARS = 1000
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
+CHECK_ID_COMPONENT_PARTS = 3
+_PYTEST_SUMMARY_COUNT = re.compile(
+	(
+		r"\b(?P<count>\d+)\s+"
+		r"(?P<outcome>passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?)\b"
+	),
+	re.IGNORECASE,
+)
+_PYTEST_SUMMARY_DURATION = re.compile(r"\bin\s+\d+(?:\.\d+)?s\b", re.IGNORECASE)
+_PYTEST_NO_TESTS = re.compile(r"\bno tests ran\b", re.IGNORECASE)
 BIOME_POLICY = "biome.toml"
 BIOME_CONFIG = "biome.json"
 BIOME_MAX_FILE_BYTES = 5 * 1024 * 1024
@@ -105,6 +127,185 @@ class QualityGateError(RuntimeError):
 		self.check_id = check_id
 		self.exit_code = exit_code
 		self.recovery_action = recovery_action
+
+
+def _component_check_index(parts: list[str], domain: str) -> int | None:
+	if len(parts) < CHECK_ID_COMPONENT_PARTS:
+		return None
+	if parts[0] != domain or not parts[1].startswith("component_"):
+		return None
+	try:
+		index = int(parts[1].removeprefix("component_")) - 1
+	except ValueError:
+		return None
+	return index if index >= 0 else None
+
+
+def _python_component_check_scope(
+	root: Path, component: ManifestPythonComponent, suffix: str
+) -> str:
+	if suffix.startswith("test_path_"):
+		try:
+			missing_index = int(suffix.removeprefix("test_path_")) - 1
+		except ValueError:
+			missing_index = -1
+		missing_paths = tuple(path for path in component.test_paths if not (root / path).exists())
+		if 0 <= missing_index < len(missing_paths):
+			return missing_paths[missing_index]
+	if suffix in {"pytest", "coverage", "coverage_report"}:
+		test_paths = tuple(path for path in component.test_paths if (root / path).exists())
+		return f"{component.path}; tests={','.join(test_paths)}"
+	if suffix == "deptry":
+		return f"{component.path}; dependencies={','.join(component.dependency_inputs)}"
+	return component.path
+
+
+_FIXED_CHECK_SCOPES = {
+	"manifest.documents": "staged required documents",
+	"secrets.candidate": "staged candidate tree",
+	"secrets.history": "requested base-to-head Git range",
+	"secrets.audit": "all reachable Git history",
+}
+
+
+class _OperationResults(list[CheckResult]):
+	"""Retain each observed check immediately so a later timeout cannot erase it."""
+
+	def __init__(self, root: Path) -> None:
+		super().__init__()
+		self.root = root
+		self.manifest: Manifest | None = None
+
+	def append(self, result: CheckResult) -> None:
+		operation = current_operation()
+		if operation is not None:
+			operation.record_unmeasured_result(result, scope=self.scope_for(result.check_id))
+		super().append(result)
+
+	def extend(self, results: Iterable[CheckResult]) -> None:
+		for result in results:
+			self.append(result)
+
+	def append_not_run(self, check_id: str, scope: str, reason: str) -> None:
+		"""Retain an expected check that a completed prerequisite prevented."""
+		operation = current_operation()
+		if operation is not None:
+			operation.note_not_run(check_id, scope, reason)
+		self.append(
+			CheckResult(
+				check_id,
+				Status.UNCHECKED,
+				reason,
+				recovery_action="complete the prerequisite and rerun the affected checks",
+			)
+		)
+
+	def scope_for(self, check_id: str) -> str:
+		manifest = self.manifest
+		parts = check_id.split(".")
+		python_index = _component_check_index(parts, "python")
+		if (
+			manifest is not None
+			and python_index is not None
+			and python_index < len(manifest.python)
+		):
+			return _python_component_check_scope(self.root, manifest.python[python_index], parts[2])
+		web_index = _component_check_index(parts, "web")
+		if manifest is not None and web_index is not None and web_index < len(manifest.web):
+			return manifest.web[web_index].root
+		if check_id in _FIXED_CHECK_SCOPES:
+			return _FIXED_CHECK_SCOPES[check_id]
+		if check_id.startswith("repository.git."):
+			return "staged repository tree and Git index"
+		if check_id.startswith("repository.documentation."):
+			return "staged repository documentation"
+		if check_id.startswith("web."):
+			return "declared web component assets"
+		if check_id.startswith("python."):
+			return "declared Python components"
+		if check_id.startswith("runtime."):
+			return "selected policy and verification runtimes"
+		return "staged candidate"
+
+
+def _planned_check_scopes(
+	root: Path,
+	manifest: Manifest,
+	components: list[PythonComponent],
+	mode: Literal["check", "audit"],
+	*,
+	prepared: PreparedEnvironment | None = None,
+) -> tuple[tuple[str, str], ...]:
+	scope_resolver = _OperationResults(root)
+	scope_resolver.manifest = manifest
+	checks: list[tuple[str, str]] = [
+		("secrets.candidate", "staged candidate tree"),
+		(
+			("secrets.audit", "all reachable Git history")
+			if mode == "audit"
+			else ("secrets.history", "requested base-to-head Git range")
+		),
+	]
+	for index, component in enumerate(manifest.web, start=1):
+		for suffix in ("biome_lint", "biome_format"):
+			check_id = f"web.component_{index}.{suffix}"
+			checks.append((check_id, component.root))
+	if not components:
+		checks.append(("python.components", "declared Python components"))
+	checks.extend(_planned_python_check_scopes(root, components, prepared))
+	return tuple(
+		(check_id, scope if scope else scope_resolver.scope_for(check_id))
+		for check_id, scope in checks
+	)
+
+
+def _planned_python_check_scopes(
+	root: Path,
+	components: list[PythonComponent],
+	prepared: PreparedEnvironment | None,
+) -> list[tuple[str, str]]:
+	checks: list[tuple[str, str]] = []
+	for index, component in enumerate(components, start=1):
+		prefix = f"python.component_{index}"
+		component_scope = component.path.relative_to(root).as_posix()
+		if not component.path_exists:
+			checks.append((f"{prefix}.path", component_scope))
+		for missing_index, path in enumerate(component.missing_test_paths, start=1):
+			checks.append(
+				(f"{prefix}.test_path_{missing_index}", path.relative_to(root).as_posix())
+			)
+		dependency_inputs = tuple(
+			path.relative_to(root).as_posix() for path in component.dependency_inputs
+		)
+		checks.append(
+			(f"{prefix}.deptry", f"{component_scope}; dependencies={','.join(dependency_inputs)}")
+		)
+		checks.extend(
+			(
+				(f"{prefix}.ruff", component_scope),
+				(f"{prefix}.format", component_scope),
+			)
+		)
+		if component.typecheck:
+			checks.append((f"{prefix}.mypy", component_scope))
+		declared_test_paths = tuple(
+			path.relative_to(root).as_posix()
+			for path in (*component.test_paths, *component.missing_test_paths)
+		)
+		if component.tests is not None:
+			checks.append(
+				(
+					f"{prefix}.pytest",
+					f"{component_scope}; tests={','.join(declared_test_paths)}",
+				)
+			)
+		test_scope = component_scope
+		if component.tests is not None:
+			test_scope = f"{component_scope}; tests={','.join(declared_test_paths)}"
+		checks.append((f"{prefix}.coverage", test_scope))
+		if prepared is not None and component.tests is not None and _has_pinned_coverage(prepared):
+			checks.append((f"{prefix}.coverage_report", test_scope))
+	return checks
 
 
 def emit(message: str) -> None:
@@ -158,13 +359,19 @@ def _manifest_error(error: ValidationError) -> QualityGateError:
 def repository_root(root: Path | None) -> Path:
 	if root is not None:
 		return root.resolve()
-	result = subprocess.run(
-		["git", "rev-parse", "--show-toplevel"],
-		capture_output=True,
-		text=True,
-		encoding="utf-8",
-		check=False,
-	)
+	operation = current_operation()
+	try:
+		result = run_probe(
+			["git", "rev-parse", "--show-toplevel"],
+			timeout=None if operation is None else operation.command_timeout_seconds,
+		)
+	except (OSError, subprocess.TimeoutExpired) as error:
+		raise QualityGateError(
+			"Git could not identify the repository root.",
+			check_id="runtime.repository",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="run the command inside a Git repository or pass --root",
+		) from error
 	if result.returncode:
 		raise QualityGateError(
 			"Run quality-gate inside a Git repository or pass --root.",
@@ -172,7 +379,15 @@ def repository_root(root: Path | None) -> Path:
 			exit_code=2,
 			recovery_action="run the command inside a Git repository or pass --root",
 		)
-	return Path(result.stdout.strip()).resolve()
+	try:
+		return Path(result.stdout.decode("utf-8").strip()).resolve()
+	except (OSError, UnicodeError, RuntimeError) as error:
+		raise QualityGateError(
+			"Git returned an unusable repository root.",
+			check_id="runtime.repository",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="run the command inside a Git repository or pass --root",
+		) from error
 
 
 def relative_path(root: Path, value: object, field: str) -> Path:
@@ -428,15 +643,38 @@ def _web_budget_result(
 	)
 
 
+def _fixed_check_result(result: CheckResult) -> Callable[[], CheckResult]:
+	def check() -> CheckResult:
+		return result
+
+	return check
+
+
+def _web_budget_check(
+	root: Path,
+	component: WebComponent,
+	component_index: int,
+	language: Literal["javascript", "css"],
+) -> Callable[[], CheckResult]:
+	def check() -> CheckResult:
+		return _web_budget_result(root, component, component_index, language=language)
+
+	return check
+
+
 def web_budget_results(root: Path, manifest: Manifest) -> tuple[CheckResult, ...]:
-	return tuple(
-		result
-		for index, component in enumerate(manifest.web, start=1)
-		for result in (
-			_web_budget_result(root, component, index, language="javascript"),
-			_web_budget_result(root, component, index, language="css"),
-		)
-	)
+	results: list[CheckResult] = []
+	for index, component in enumerate(manifest.web, start=1):
+		for language in ("javascript", "css"):
+			check_id = f"web.component_{index}.{language}_budget"
+			results.append(
+				observe_check(
+					check_id,
+					component.root,
+					_web_budget_check(root, component, index, language),
+				)
+			)
+	return tuple(results)
 
 
 def _biome_unchecked_results(
@@ -633,7 +871,8 @@ def _run_web_checks(
 	if not manifest.web:
 		return []
 	commands: list[tuple[str, list[str], int]] = []
-	pre_results: list[CheckResult] = []
+	pre_results = _OperationResults(actual_root)
+	pre_results.manifest = manifest
 	for component_index, component in enumerate(manifest.web, start=1):
 		try:
 			paths = _biome_asset_paths(actual_root, component, component_index)
@@ -652,13 +891,19 @@ def _run_web_checks(
 					),
 				)
 			)
-			pre_results.extend(
-				_biome_unchecked_results(
-					component_index,
-					str(quality_error),
-					recovery_action=quality_error.recovery_action,
+			for result in _biome_unchecked_results(
+				component_index,
+				str(quality_error),
+				recovery_action=quality_error.recovery_action,
+			):
+				pre_results.append(
+					observe_check(
+						result.check_id,
+						component.root,
+						_fixed_check_result(result),
+						process_required=True,
+					)
 				)
-			)
 			continue
 		commands.extend(
 			_biome_component_commands(
@@ -672,6 +917,7 @@ def _run_web_checks(
 			commands,
 			manifest.repository.command_timeout_seconds,
 			deadline,
+			manifest=manifest,
 		)
 	return [*pre_results, *_command_results(executed, errors, {})]
 
@@ -696,7 +942,14 @@ def _web_check_results(
 				recovery_action="restore the pinned Biome policy and retry the quality gate",
 			):
 				if result.check_id not in existing_biome_ids:
-					fallback.append(result)
+					fallback.append(
+						observe_check(
+							result.check_id,
+							manifest.web[component_index - 1].root,
+							_fixed_check_result(result),
+							process_required=True,
+						)
+					)
 					existing_biome_ids.add(result.check_id)
 		return fallback
 
@@ -779,6 +1032,32 @@ def _run_bounded_subprocess(
 	timeout: float | None,
 ) -> tuple[int, str]:
 	"""Run a subprocess while retaining only a bounded amount of output."""
+	operation = current_operation()
+	if operation is not None:
+		try:
+			code, output, diagnostics = operation.run_process(
+				command,
+				root=root,
+				environment=environment,
+				timeout_seconds=timeout,
+				limit=MAX_COMMAND_OUTPUT_BYTES,
+				truncate=True,
+			)
+		except EditError as error:
+			if str(error) == "deadline":
+				raise subprocess.TimeoutExpired(command, timeout or 0) from error
+			raise OutputReadError("owned process output could not be collected") from error
+		return code, decode_subprocess_output(output + diagnostics)
+	return _run_legacy_subprocess(command, root, environment, timeout)
+
+
+def _run_legacy_subprocess(
+	command: list[str],
+	root: Path,
+	environment: dict[str, str],
+	timeout: float | None,
+) -> tuple[int, str]:
+	"""Preserve standalone formatting/tool callers outside an owned Gate operation."""
 	process = subprocess.Popen(
 		command,
 		cwd=root,
@@ -888,11 +1167,43 @@ def _bounded_output(value: str) -> str:
 	"""Limit external command output retained by the gate."""
 	if len(value) <= MAX_COMMAND_OUTPUT_CHARS:
 		return value
-	return value[:MAX_COMMAND_OUTPUT_CHARS] + "\n[output truncated]"
+	marker = "\n[output truncated]\n"
+	available = MAX_COMMAND_OUTPUT_CHARS - len(marker)
+	prefix = available // 2
+	suffix = available - prefix
+	return value[:prefix] + marker + value[-suffix:]
 
 
-def temporary_directory(root: Path) -> tempfile.TemporaryDirectory[str]:
-	return tempfile.TemporaryDirectory(prefix="quality-gate-")
+def _pytest_outcome_summary(output: str) -> str | None:
+	"""Extract bounded test totals from pytest's final terminal summary line."""
+	for line in reversed(output.splitlines()):
+		if not _PYTEST_SUMMARY_DURATION.search(line):
+			continue
+		if _PYTEST_NO_TESTS.search(line):
+			return "0 tests ran"
+		counts = [
+			f"{match.group('count')} {match.group('outcome').lower()}"
+			for match in _PYTEST_SUMMARY_COUNT.finditer(line)
+		]
+		if counts:
+			return ", ".join(counts)
+	return None
+
+
+@contextmanager
+def temporary_directory(root: Path) -> Iterator[str]:
+	operation = current_operation()
+	if operation is None:
+		with tempfile.TemporaryDirectory(prefix="quality-gate-") as directory:
+			yield directory
+		return
+	path = Path(tempfile.mkdtemp(prefix="quality-gate-"))
+	try:
+		operation.register_cleanup(path)
+	except BaseException:
+		remove_snapshot(path)
+		raise
+	yield str(path)
 
 
 def _error_result(error: QualityGateError) -> CheckResult:
@@ -907,6 +1218,9 @@ def _error_result(error: QualityGateError) -> CheckResult:
 
 
 def _remaining(deadline: float, timeout: int) -> float:
+	operation = current_operation()
+	if operation is not None:
+		return operation.remaining(float(timeout))
 	remaining = min(float(timeout), deadline - time.monotonic())
 	if remaining <= 0:
 		raise QualityGateError(
@@ -916,6 +1230,47 @@ def _remaining(deadline: float, timeout: int) -> float:
 			recovery_action="inspect slow checks and retry within the gate time budget",
 		)
 	return remaining
+
+
+def _snapshot_candidate_identity(snapshot: object) -> str:
+	"""Read the snapshot module's public identity without interpreting its storage."""
+	identity = getattr(snapshot, "index_identity", None)
+	if isinstance(identity, str):
+		return identity
+	return "staged Git index identity unavailable"
+
+
+def _configure_operation_budget(repository: Path, operation: GateOperation) -> None:
+	"""Read staged time limits without restarting the operation clock."""
+	try:
+		result = run_probe(
+			["git", "-C", str(repository), "show", f":{MANIFEST_NAME}"],
+			cwd=repository,
+			timeout=operation.command_timeout_seconds,
+		)
+	except (OSError, subprocess.TimeoutExpired):
+		return
+	if result.returncode:
+		return
+	try:
+		value = tomllib.loads(result.stdout.decode("utf-8"))
+	except (UnicodeError, tomllib.TOMLDecodeError):
+		return
+	repository_table = value.get("repository")
+	defaults = repository_table.get("defaults") if isinstance(repository_table, dict) else None
+	if not isinstance(defaults, dict):
+		return
+	gate_timeout = defaults.get("gate_timeout_seconds", DEFAULT_GATE_TIMEOUT_SECONDS)
+	command_timeout = defaults.get("command_timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS)
+	if isinstance(gate_timeout, bool) or not isinstance(gate_timeout, int) or gate_timeout <= 0:
+		gate_timeout = DEFAULT_GATE_TIMEOUT_SECONDS
+	if (
+		isinstance(command_timeout, bool)
+		or not isinstance(command_timeout, int)
+		or command_timeout <= 0
+	):
+		command_timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
+	operation.configure_budget(float(gate_timeout), command_timeout)
 
 
 def _ci_history_refs(base: str | None, head: str | None) -> tuple[str | None, str]:
@@ -1331,6 +1686,38 @@ def _dependency_hygiene_result(
 	deadline: float,
 ) -> CheckResult:
 	check_id = f"python.component_{component_index}.deptry"
+	component_scope = component.path.relative_to(actual_root).as_posix()
+	dependency_scope = ",".join(
+		path.relative_to(actual_root).as_posix() for path in component.dependency_inputs
+	)
+	return observe_check(
+		check_id,
+		f"{component_scope}; dependencies={dependency_scope}",
+		lambda: _dependency_hygiene_result_impl(
+			actual_root,
+			manifest,
+			component,
+			prepared,
+			component_index,
+			python_executable,
+			report_path,
+			deadline,
+		),
+		process_required=True,
+	)
+
+
+def _dependency_hygiene_result_impl(
+	actual_root: Path,
+	manifest: Manifest,
+	component: PythonComponent,
+	prepared: PreparedEnvironment,
+	component_index: int,
+	python_executable: Path | None,
+	report_path: Path,
+	deadline: float,
+) -> CheckResult:
+	check_id = f"python.component_{component_index}.deptry"
 	if not component.dependency_inputs:
 		return CheckResult(
 			check_id,
@@ -1656,6 +2043,34 @@ def _normalized_native_tool_options(
 	return normalized_options
 
 
+def _command_error(
+	check_id: str, error: NativeToolCacheError | QualityGateError
+) -> QualityGateError:
+	if isinstance(error, NativeToolCacheError):
+		return QualityGateError(
+			f"native tool source workspace is unavailable: {error.reason}",
+			check_id=check_id,
+			exit_code=EXIT_UNCHECKED,
+			recovery_action="restore private tool execution and retry the quality gate",
+		)
+	error.check_id = check_id
+	return error
+
+
+def _record_command_result(
+	check_id: str, run_errors: list[QualityGateError], run_outputs: dict[str, str]
+) -> None:
+	operation = current_operation()
+	if operation is not None:
+		operation.record_result(
+			_command_results(
+				[check_id],
+				[error for error in run_errors if error.check_id == check_id],
+				run_outputs,
+			)[0]
+		)
+
+
 def _execute_commands(
 	actual_root: Path,
 	environment: dict[str, str],
@@ -1666,75 +2081,121 @@ def _execute_commands(
 	prepared: PreparedEnvironment | None = None,
 	component: PythonComponent | None = None,
 	component_index: int | None = None,
+	manifest: Manifest | None = None,
 ) -> tuple[list[str], list[QualityGateError], dict[str, str]]:
 	executed: list[str] = []
 	run_errors: list[QualityGateError] = []
 	run_outputs: dict[str, str] = {}
+	operation = current_operation()
+	scope_resolver = _OperationResults(actual_root)
+	scope_resolver.manifest = manifest
 	for check_id, command, timeout in commands:
 		executed.append(check_id)
+		stage = (
+			nullcontext()
+			if operation is None
+			else operation.stage(
+				check_id,
+				scope_resolver.scope_for(check_id),
+				check=True,
+				process_required=True,
+			)
+		)
 		try:
-			tool_configuration = _native_tool_configuration(check_id)
-			tool_environment_key = tool_configuration[2] if tool_configuration is not None else None
-			identity = (
-				_native_cache_identity(
-					actual_root, check_id, command, prepared, component, component_index
-				)
-				if prepared is not None
-				and component is not None
-				and component_index is not None
-				and tool_environment_key is not None
-				else None
-			)
-			selection_context: AbstractContextManager[NativeToolCacheSelection | None] | None = None
-			if identity is not None and prepared is not None and tool_environment_key is not None:
-				private_path = Path(environment[tool_environment_key])
-				selection_context = NativeToolCache(prepared.cache_root).lease(
-					identity, private_path
-				)
-			if selection_context is None:
-				selection_context = nullcontext(None)
-			with selection_context as selection:
-				private_path = (
-					Path(environment[tool_environment_key])
-					if tool_environment_key is not None
-					else actual_root
-				)
-				source_workspace = (
-					native_tool_source_workspace(selection, actual_root, private_path)
-					if selection is not None
-					else nullcontext((None, actual_root))
-				)
-				with source_workspace as (effective_selection, command_root):
-					command_base_environment = dict(environment)
-					if effective_selection is not None and tool_environment_key is not None:
-						command_base_environment[tool_environment_key] = str(
-							effective_selection.path
+			with stage:
+				try:
+					tool_configuration = _native_tool_configuration(check_id)
+					tool_environment_key = (
+						tool_configuration[2] if tool_configuration is not None else None
+					)
+					identity = (
+						_native_cache_identity(
+							actual_root,
+							check_id,
+							command,
+							prepared,
+							component,
+							component_index,
 						)
-					command_environment = (
-						_ruff_environment(command_base_environment)
-						if tool_configuration is not None and tool_configuration[0] == "ruff"
-						else command_base_environment
+						if prepared is not None
+						and component is not None
+						and component_index is not None
+						and tool_environment_key is not None
+						else None
 					)
-					output = run(
-						command,
-						command_root,
-						command_environment,
-						timeout=_remaining(deadline, max(timeout, component_timeout)),
+					selection_context: (
+						AbstractContextManager[NativeToolCacheSelection | None] | None
+					) = None
+					if (
+						identity is not None
+						and prepared is not None
+						and tool_environment_key is not None
+					):
+						private_path = Path(environment[tool_environment_key])
+						selection_context = NativeToolCache(prepared.cache_root).lease(
+							identity, private_path, operation=operation
+						)
+					if selection_context is None:
+						selection_context = nullcontext(None)
+					with selection_context as selection:
+						private_path = (
+							Path(environment[tool_environment_key])
+							if tool_environment_key is not None
+							else actual_root
+						)
+						source_workspace = (
+							native_tool_source_workspace(
+								selection,
+								actual_root,
+								private_path,
+								operation=operation,
+							)
+							if selection is not None
+							else nullcontext((None, actual_root))
+						)
+						with source_workspace as (effective_selection, command_root):
+							if effective_selection is not None and operation is not None:
+								operation.record_native_cache_selection(effective_selection)
+							command_base_environment = dict(environment)
+							if effective_selection is not None and tool_environment_key is not None:
+								command_base_environment[tool_environment_key] = str(
+									effective_selection.path
+								)
+							command_environment = (
+								_ruff_environment(command_base_environment)
+								if tool_configuration is not None
+								and tool_configuration[0] == "ruff"
+								else command_base_environment
+							)
+							output = run(
+								command,
+								command_root,
+								command_environment,
+								timeout=_remaining(deadline, min(timeout, component_timeout)),
+							)
+					if output and check_id.endswith((".coverage_report", ".pytest")):
+						run_outputs[check_id] = output
+				except (NativeToolCacheError, QualityGateError) as error:
+					run_errors.append(_command_error(check_id, error))
+		except OperationTimeoutError as error:
+			if not any(
+				item.check_id == check_id and item.exit_code != EXIT_UNCHECKED
+				for item in run_errors
+			):
+				run_errors.append(
+					QualityGateError(
+						str(error),
+						check_id=check_id,
+						exit_code=EXIT_UNCHECKED,
+						recovery_action=(
+							"inspect the current and last completed stages; "
+							"restore the budget and retry"
+						),
 					)
-			if output and check_id.endswith(".coverage_report"):
-				run_outputs[check_id] = output
-		except NativeToolCacheError as error:
-			run_errors.append(
-				QualityGateError(
-					f"native tool source workspace is unavailable: {error.reason}",
-					check_id=check_id,
-					exit_code=EXIT_UNCHECKED,
-					recovery_action="restore private tool execution and retry the quality gate",
 				)
-			)
-		except QualityGateError as error:
-			error.check_id = check_id
-			run_errors.append(error)
+			_record_command_result(check_id, run_errors, run_outputs)
+			raise
+		_record_command_result(check_id, run_errors, run_outputs)
 	return executed, run_errors, run_outputs
 
 
@@ -1758,13 +2219,18 @@ def _command_results(
 			)
 		if is_coverage:
 			status = Status.PASSED
-		coverage_output = run_outputs.get(check_id, "")
+		command_output = run_outputs.get(check_id, "")
 		summary = "check passed" if status is Status.PASSED else "check requires attention"
 		recovery_action = "restore verification and fix the reported finding, then retry"
+		if check_id.endswith(".pytest"):
+			pytest_output = "\n".join((command_output, *(str(error) for error in errors)))
+			pytest_totals = _pytest_outcome_summary(pytest_output)
+			if pytest_totals is not None:
+				summary = f"pytest totals: {pytest_totals}"
 		if is_coverage_collection:
 			summary = "coverage collection completed"
 		if is_coverage_report:
-			report_lines = [line.strip() for line in coverage_output.splitlines() if line.strip()]
+			report_lines = [line.strip() for line in command_output.splitlines() if line.strip()]
 			report_line = next(
 				(line for line in reversed(report_lines) if line.startswith("TOTAL")),
 				report_lines[-1] if report_lines else "coverage report generated",
@@ -1787,119 +2253,202 @@ def _command_results(
 	return results
 
 
-def _run_python_checks(
-	actual_root: Path,
-	manifest: Manifest,
+def _mark_component_checks_not_run(
+	results: _OperationResults,
+	component: PythonComponent,
+	component_index: int,
+	prepared: PreparedEnvironment,
+	reason: str,
+) -> None:
+	prefix = f"python.component_{component_index}"
+	component_scope = component.path.relative_to(results.root).as_posix()
+	for suffix in ("ruff", "format"):
+		results.append_not_run(f"{prefix}.{suffix}", component_scope, reason)
+	if component.typecheck:
+		results.append_not_run(f"{prefix}.mypy", component_scope, reason)
+	if component.tests is not None:
+		test_paths = tuple(
+			path.relative_to(results.root).as_posix()
+			for path in (*component.test_paths, *component.missing_test_paths)
+		)
+		test_scope = f"{component_scope}; tests={','.join(test_paths)}"
+		results.append_not_run(f"{prefix}.pytest", test_scope, reason)
+		if _has_pinned_coverage(prepared):
+			results.append_not_run(f"{prefix}.coverage", test_scope, reason)
+			results.append_not_run(f"{prefix}.coverage_report", test_scope, reason)
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonCheckContext:
+	"""Inputs shared by every outcome of one candidate component's checks."""
+
+	root: Path
+	manifest: Manifest
+	component: PythonComponent
+	prepared: PreparedEnvironment
+	component_index: int
+	report_path: Path
+	deadline: float
+
+	def dependency_result(self, python_executable: Path | None = None) -> CheckResult:
+		return _dependency_hygiene_result(
+			self.root,
+			self.manifest,
+			self.component,
+			self.prepared,
+			self.component_index,
+			python_executable,
+			self.report_path,
+			self.deadline,
+		)
+
+
+def _append_missing_component_check(
+	results: _OperationResults, context: _PythonCheckContext
+) -> None:
+	check_id = f"python.component_{context.component_index}.path"
+	component_scope = context.component.path.relative_to(context.root).as_posix()
+	missing_component = CheckResult(
+		check_id=check_id,
+		status=Status.UNCHECKED,
+		summary="Python component path is unavailable",
+		findings=(
+			Finding(
+				path=component_scope,
+				message="declared component path does not exist",
+				action="restore the declared component path",
+			),
+		),
+		recovery_action="restore the declared component path and retry the quality gate",
+	)
+	results.append(
+		observe_check(
+			check_id,
+			component_scope,
+			_fixed_check_result(missing_component),
+		)
+	)
+	results.append(context.dependency_result())
+	_mark_component_checks_not_run(
+		results,
+		context.component,
+		context.component_index,
+		context.prepared,
+		"declared component path is unavailable",
+	)
+
+
+def _append_missing_test_path_checks(
+	results: _OperationResults, root: Path, component: PythonComponent, component_index: int
+) -> None:
+	for missing_index, missing_path in enumerate(component.missing_test_paths, start=1):
+		check_id = f"python.component_{component_index}.test_path_{missing_index}"
+		missing_test_path = CheckResult(
+			check_id=check_id,
+			status=Status.UNCHECKED,
+			summary="declared test path is unavailable",
+			findings=(
+				Finding(
+					path=missing_path.relative_to(root).as_posix(),
+					message="declared test path does not exist",
+					action="restore the declared test path",
+				),
+			),
+			recovery_action="restore the declared test path and retry the quality gate",
+		)
+		results.append(
+			observe_check(
+				check_id,
+				missing_path.relative_to(root).as_posix(),
+				_fixed_check_result(missing_test_path),
+			)
+		)
+
+
+def _append_unavailable_runtime_checks(
+	results: _OperationResults,
+	context: _PythonCheckContext,
+	error: QualityGateError,
+) -> None:
+	results.append(_error_result(error))
+	results.append(context.dependency_result())
+	_mark_component_checks_not_run(
+		results,
+		context.component,
+		context.component_index,
+		context.prepared,
+		"component runtime is unavailable",
+	)
+
+
+def _run_ready_python_component_checks(
+	results: _OperationResults,
+	context: _PythonCheckContext,
+	python_executable: Path,
+	environment: dict[str, str],
+) -> tuple[list[str], list[QualityGateError], dict[str, str]]:
+	results.append(context.dependency_result(python_executable))
+	component = context.component
+	prefix = f"python.component_{context.component_index}"
+	if component.tests is not None and not component.test_paths:
+		test_paths = tuple(
+			path.relative_to(context.root).as_posix()
+			for path in (*component.test_paths, *component.missing_test_paths)
+		)
+		component_scope = component.path.relative_to(context.root).as_posix()
+		test_scope = f"{component_scope}; tests={','.join(test_paths)}"
+		reason = "no declared test path is available"
+		results.append_not_run(f"{prefix}.pytest", test_scope, reason)
+		if _has_pinned_coverage(context.prepared):
+			results.append_not_run(f"{prefix}.coverage", test_scope, reason)
+			results.append_not_run(f"{prefix}.coverage_report", test_scope, reason)
+	return _execute_commands(
+		context.root,
+		environment,
+		_component_commands(
+			context.root,
+			context.manifest,
+			component,
+			context.prepared,
+			context.component_index,
+			python_executable,
+		),
+		component.timeout_seconds,
+		context.deadline,
+		prepared=context.prepared,
+		component=component,
+		component_index=context.component_index,
+		manifest=context.manifest,
+	)
+
+
+def _run_python_component_checks(
+	results: _OperationResults,
+	context: _PythonCheckContext,
+	environment: dict[str, str],
+) -> tuple[list[str], list[QualityGateError], dict[str, str]]:
+	if not context.component.path_exists:
+		_append_missing_component_check(results, context)
+		return [], [], {}
+	_append_missing_test_path_checks(
+		results, context.root, context.component, context.component_index
+	)
+	try:
+		python_executable = _runtime_python(context.prepared, context.component_index)
+	except QualityGateError as error:
+		_append_unavailable_runtime_checks(results, context, error)
+		return [], [], {}
+	return _run_ready_python_component_checks(results, context, python_executable, environment)
+
+
+def _append_not_applicable_python_checks(
+	results: _OperationResults,
 	components: list[PythonComponent],
 	prepared: PreparedEnvironment,
-	*,
-	deadline: float,
-) -> list[CheckResult]:
-	results: list[CheckResult] = []
-	with temporary_directory(actual_root) as temporary_path:
-		environment = _safe_environment(temporary_path)
-		temporary_root = Path(temporary_path)
-		environment["QUALITY_GATE_POLICY_ROOT"] = str(prepared.policy_root)
-		run_errors: list[QualityGateError] = []
-		executed: list[str] = []
-		run_outputs: dict[str, str] = {}
-		for component_index, component in enumerate(components, start=1):
-			if not component.path_exists:
-				results.append(
-					CheckResult(
-						check_id=f"python.component_{component_index}.path",
-						status=Status.UNCHECKED,
-						summary="Python component path is unavailable",
-						findings=(
-							Finding(
-								path=str(component.path.relative_to(actual_root)),
-								message="declared component path does not exist",
-								action="restore the declared component path",
-							),
-						),
-						recovery_action=(
-							"restore the declared component path and retry the quality gate"
-						),
-					)
-				)
-				results.append(
-					_dependency_hygiene_result(
-						actual_root,
-						manifest,
-						component,
-						prepared,
-						component_index,
-						None,
-						temporary_root / f"deptry-{component_index}.json",
-						deadline,
-					)
-				)
-				continue
-			for missing_path_index, missing_path in enumerate(
-				component.missing_test_paths, start=1
-			):
-				results.append(
-					CheckResult(
-						check_id=f"python.component_{component_index}.test_path_{missing_path_index}",
-						status=Status.UNCHECKED,
-						summary="declared test path is unavailable",
-						findings=(
-							Finding(
-								path=str(missing_path.relative_to(actual_root)),
-								message="declared test path does not exist",
-								action="restore the declared test path",
-							),
-						),
-						recovery_action="restore the declared test path and retry the quality gate",
-					)
-				)
-			try:
-				python_executable = _runtime_python(prepared, component_index)
-			except QualityGateError as error:
-				results.append(_error_result(error))
-				results.append(
-					_dependency_hygiene_result(
-						actual_root,
-						manifest,
-						component,
-						prepared,
-						component_index,
-						None,
-						temporary_root / f"deptry-{component_index}.json",
-						deadline,
-					)
-				)
-				continue
-			results.append(
-				_dependency_hygiene_result(
-					actual_root,
-					manifest,
-					component,
-					prepared,
-					component_index,
-					python_executable,
-					temporary_root / f"deptry-{component_index}.json",
-					deadline,
-				)
-			)
-			component_executed, component_errors, component_outputs = _execute_commands(
-				actual_root,
-				environment,
-				_component_commands(
-					actual_root, manifest, component, prepared, component_index, python_executable
-				),
-				component.timeout_seconds,
-				deadline,
-				prepared=prepared,
-				component=component,
-				component_index=component_index,
-			)
-			executed.extend(component_executed)
-			run_errors.extend(component_errors)
-			run_outputs.update(component_outputs)
-	results.extend(_command_results(executed, run_errors, run_outputs))
+) -> None:
 	for component_index, component in enumerate(components, start=1):
 		tests_not_applicable = component.tests is None
+		has_coverage = _has_pinned_coverage(prepared)
 		if not component.typecheck:
 			results.append(
 				CheckResult(
@@ -1909,7 +2458,6 @@ def _run_python_checks(
 					recovery_action="enable typecheck when component typing is required",
 				)
 			)
-		has_coverage = _has_pinned_coverage(prepared)
 		if tests_not_applicable:
 			results.append(
 				CheckResult(
@@ -1920,25 +2468,63 @@ def _run_python_checks(
 				)
 			)
 		if tests_not_applicable or not has_coverage:
+			summary = (
+				"coverage is not applicable without tests"
+				if tests_not_applicable and has_coverage
+				else "coverage provider is not in the pinned policy inventory"
+			)
+			recovery_action = (
+				"declare test paths before collecting report-only coverage"
+				if tests_not_applicable and has_coverage
+				else "add a pinned coverage provider only when report-only coverage is required"
+			)
 			results.append(
 				CheckResult(
 					check_id=f"python.component_{component_index}.coverage",
 					status=Status.NOT_APPLICABLE,
-					summary=(
-						"coverage is not applicable without tests"
-						if tests_not_applicable and has_coverage
-						else "coverage provider is not in the pinned policy inventory"
-					),
-					recovery_action=(
-						"declare test paths before collecting report-only coverage"
-						if tests_not_applicable and has_coverage
-						else (
-							"add a pinned coverage provider only when report-only coverage is "
-							"required"
-						)
-					),
+					summary=summary,
+					recovery_action=recovery_action,
 				)
 			)
+
+
+def _run_python_checks(
+	actual_root: Path,
+	manifest: Manifest,
+	components: list[PythonComponent],
+	prepared: PreparedEnvironment,
+	*,
+	deadline: float,
+) -> list[CheckResult]:
+	results = _OperationResults(actual_root)
+	results.manifest = manifest
+	with temporary_directory(actual_root) as temporary_path:
+		environment = _safe_environment(temporary_path)
+		environment["QUALITY_GATE_POLICY_ROOT"] = str(prepared.policy_root)
+		temporary_root = Path(temporary_path)
+		run_errors: list[QualityGateError] = []
+		executed: list[str] = []
+		run_outputs: dict[str, str] = {}
+		for component_index, component in enumerate(components, start=1):
+			context = _PythonCheckContext(
+				actual_root,
+				manifest,
+				component,
+				prepared,
+				component_index,
+				temporary_root / f"deptry-{component_index}.json",
+				deadline,
+			)
+			component_executed, component_errors, component_outputs = _run_python_component_checks(
+				results,
+				context,
+				environment,
+			)
+			executed.extend(component_executed)
+			run_errors.extend(component_errors)
+			run_outputs.update(component_outputs)
+	results.extend(_command_results(executed, run_errors, run_outputs))
+	_append_not_applicable_python_checks(results, components, prepared)
 	return results
 
 
@@ -2015,6 +2601,246 @@ def format_paths(root: Path | None, paths: tuple[str, ...]) -> None:
 	emit("format: complete - stage the changes, then run check")
 
 
+def _load_snapshot_manifest(root: Path, results: _OperationResults) -> Manifest | None:
+	try:
+		operation = current_operation()
+		if operation is None:
+			manifest = load_manifest(root)
+		else:
+			with operation.stage("manifest.contract", "staged quality-gate.toml", check=True):
+				manifest = load_manifest(root)
+				operation.configure_budget(
+					manifest.repository.gate_timeout_seconds,
+					manifest.repository.command_timeout_seconds,
+				)
+	except ValidationError as error:
+		operation = current_operation()
+		if operation is not None:
+			operation.mark_incomplete(
+				"manifest.contract",
+				"invalid staged manifest prevented the remaining checks",
+			)
+		results.append(_error_result(_manifest_error(error)))
+		return None
+	results.manifest = manifest
+	return manifest
+
+
+def _append_snapshot_baseline_checks(
+	root: Path,
+	manifest: Manifest,
+	results: _OperationResults,
+	*,
+	repository_root: Path | None,
+	index_file: Path | None,
+	mode: Literal["check", "audit"],
+) -> None:
+	results.append(
+		observe_check(
+			"manifest.documents",
+			"staged required documents",
+			lambda: required_documents_result(root, manifest),
+		)
+	)
+	results.extend(
+		[
+			*git_integrity_results(
+				root,
+				manifest,
+				repository=repository_root or root,
+				index_file=index_file,
+			),
+			observe_check(
+				"repository.workflow",
+				"staged GitHub workflow files",
+				lambda: workflow_result(
+					root,
+					manifest,
+					repository_root=repository_root or root,
+				),
+			),
+			*documentation_results(root, manifest),
+		]
+	)
+	results.append(
+		observe_check(
+			"lessons.learning",
+			"staged lessons collection",
+			lambda: lessons_result(root, is_complete_required=mode == "audit"),
+		)
+	)
+	results.extend(web_budget_results(root, manifest))
+
+
+def _prepare_snapshot_environment(
+	root: Path,
+	manifest: Manifest,
+	results: _OperationResults,
+	*,
+	repository_root: Path | None,
+	mode: Literal["check", "audit"],
+	policy_release: str | None,
+) -> tuple[list[PythonComponent], PreparedEnvironment] | None:
+	try:
+		components = load_components(root)
+		operation = current_operation()
+		if operation is not None:
+			operation.plan_checks(_planned_check_scopes(root, manifest, components, mode))
+
+		def prepare_environment() -> PreparedEnvironment:
+			if policy_release is not None:
+				return prepare_bootstrap(
+					root,
+					policy_release=policy_release,
+					repository_root=repository_root or root,
+				)
+			return prepare(root, repository_root=repository_root or root)
+
+		if operation is None:
+			prepared = prepare_environment()
+		else:
+			with operation.stage(
+				"policy.cache-validation",
+				"selected immutable policy release and component runtime caches",
+			):
+				prepared = prepare_environment()
+		operation = current_operation()
+		if operation is not None:
+			operation.plan_checks(
+				_planned_check_scopes(root, manifest, components, mode, prepared=prepared)
+			)
+		return components, prepared
+	except QualityGateError as error:
+		operation = current_operation()
+		if operation is not None:
+			operation.mark_incomplete(
+				"policy.cache-validation",
+				"policy or runtime preparation prevented the remaining checks",
+			)
+		results.append(_error_result(error))
+	except (DistributionError, RuntimeUnavailable, OSError) as error:
+		operation = current_operation()
+		if operation is not None:
+			operation.mark_incomplete(
+				"policy.cache-validation",
+				"policy or runtime preparation prevented the remaining checks",
+			)
+		results.append(
+			_error_result(
+				QualityGateError(
+					str(error),
+					check_id="runtime.policy",
+					exit_code=EXIT_UNCHECKED,
+					recovery_action="run sync and setup, then retry the quality gate",
+				)
+			)
+		)
+	return None
+
+
+def _append_snapshot_secret_checks(
+	root: Path,
+	manifest: Manifest,
+	prepared: PreparedEnvironment,
+	results: _OperationResults,
+	*,
+	repository_root: Path | None,
+	base: str | None,
+	head: str | None,
+	mode: Literal["check", "audit"],
+) -> None:
+	operation = current_operation()
+	if operation is None:
+		history_base, history_head = _ci_history_refs(base, head)
+	else:
+		with operation.stage("history.refs", "requested CI base and candidate references"):
+			history_base, history_head = _ci_history_refs(base, head)
+	results.append(
+		observe_check(
+			"secrets.candidate",
+			"staged candidate tree",
+			lambda: secret_candidate_result(root, manifest, prepared),
+			process_required=True,
+		)
+	)
+	if mode == "audit":
+		results.append(
+			observe_check(
+				"secrets.audit",
+				"all reachable Git history",
+				lambda: secret_audit_result(repository_root or root, manifest, prepared),
+				process_required=True,
+			)
+		)
+		return
+	results.append(
+		observe_check(
+			"secrets.history",
+			"requested base-to-head Git range",
+			lambda: secret_history_result(
+				repository_root or root,
+				manifest,
+				prepared,
+				base=history_base,
+				head=history_head,
+			),
+			process_required=True,
+		)
+	)
+
+
+def _append_python_snapshot_checks(
+	root: Path,
+	manifest: Manifest,
+	components: list[PythonComponent],
+	prepared: PreparedEnvironment,
+	results: _OperationResults,
+	deadline: float,
+) -> None:
+	if not components:
+		results.append(
+			CheckResult(
+				check_id="python.components",
+				status=Status.NOT_APPLICABLE,
+				summary="no Python component is declared",
+				recovery_action="declare a Python component if Python checks apply",
+			)
+		)
+		return
+	try:
+		run_results = _run_python_snapshot_checks(
+			root, manifest, components, prepared, deadline=deadline
+		)
+	except QualityGateError as error:
+		operation = current_operation()
+		if operation is not None:
+			operation.mark_incomplete(
+				"python.checks",
+				"Python verification preparation prevented the remaining component checks",
+			)
+		results.append(_error_result(error))
+		return
+	except (DistributionError, RuntimeUnavailable, OSError) as error:
+		operation = current_operation()
+		if operation is not None:
+			operation.mark_incomplete(
+				"python.checks",
+				"Python verification preparation prevented the remaining component checks",
+			)
+		results.append(
+			_error_result(
+				QualityGateError(
+					str(error),
+					check_id="runtime.policy",
+					exit_code=EXIT_UNCHECKED,
+					recovery_action="run sync and setup, then retry the quality gate",
+				)
+			)
+		)
+		return
+	results.extend(run_results)
+
+
 def _check_snapshot(
 	actual_root: Path,
 	*,
@@ -2027,105 +2853,48 @@ def _check_snapshot(
 	policy_release: str | None = None,
 ) -> Verdict:
 	actual_root = actual_root.resolve()
-	try:
-		manifest = load_manifest(actual_root)
-	except ValidationError as error:
-		verdict = Verdict((_error_result(_manifest_error(error)),))
-		return verdict
-	contract_result = required_documents_result(actual_root, manifest)
-	repository_results = [
-		*git_integrity_results(
-			actual_root,
-			manifest,
-			repository=repository_root or actual_root,
-			index_file=index_file,
-		),
-		workflow_result(
-			actual_root,
-			manifest,
-			repository_root=repository_root or actual_root,
-		),
-		*documentation_results(actual_root, manifest),
-	]
-	results = [contract_result, *repository_results]
-	results.append(lessons_result(actual_root, is_complete_required=mode == "audit"))
-	results.extend(web_budget_results(actual_root, manifest))
-	try:
-		components = load_components(actual_root)
-		prepared = (
-			prepare_bootstrap(
-				actual_root,
-				policy_release=policy_release,
-				repository_root=repository_root or actual_root,
-			)
-			if policy_release is not None
-			else prepare(actual_root, repository_root=repository_root or actual_root)
-		)
-	except QualityGateError as error:
-		return Verdict((*results, _error_result(error)))
-	except (DistributionError, RuntimeUnavailable, OSError) as error:
-		quality_error = QualityGateError(
-			str(error),
-			check_id="runtime.policy",
-			exit_code=EXIT_UNCHECKED,
-			recovery_action="run sync and setup, then retry the quality gate",
-		)
-		return Verdict((*results, _error_result(quality_error)))
-	history_base, history_head = _ci_history_refs(base, head)
-	results.append(secret_candidate_result(actual_root, manifest, prepared))
-	if mode == "audit":
-		results.append(secret_audit_result(repository_root or actual_root, manifest, prepared))
-	else:
-		results.append(
-			secret_history_result(
-				repository_root or actual_root,
-				manifest,
-				prepared,
-				base=history_base,
-				head=history_head,
-			)
-		)
-	gate_deadline = time.monotonic() + manifest.repository.gate_timeout_seconds
-	results.extend(
-		_web_check_results(
-			actual_root,
-			manifest,
-			prepared,
-			results,
-			deadline=gate_deadline,
-		)
+	results = _OperationResults(actual_root)
+	manifest = _load_snapshot_manifest(actual_root, results)
+	if manifest is None:
+		return Verdict(tuple(results))
+	_append_snapshot_baseline_checks(
+		actual_root,
+		manifest,
+		results,
+		repository_root=repository_root,
+		index_file=index_file,
+		mode=mode,
 	)
-	if not components:
-		results.append(
-			CheckResult(
-				check_id="python.components",
-				status=Status.NOT_APPLICABLE,
-				summary="no Python component is declared",
-				recovery_action="declare a Python component if Python checks apply",
-			)
-		)
-	else:
-		try:
-			run_results = _run_python_snapshot_checks(
-				actual_root,
-				manifest,
-				components,
-				prepared,
-				deadline=gate_deadline,
-			)
-		except QualityGateError as error:
-			return Verdict((*results, _error_result(error)))
-		except (DistributionError, RuntimeUnavailable, OSError) as error:
-			quality_error = QualityGateError(
-				str(error),
-				check_id="runtime.policy",
-				exit_code=EXIT_UNCHECKED,
-				recovery_action="run sync and setup, then retry the quality gate",
-			)
-			return Verdict((*results, _error_result(quality_error)))
-		results.extend(run_results)
-	verdict = Verdict(tuple(results))
-	return verdict
+	prepared_snapshot = _prepare_snapshot_environment(
+		actual_root,
+		manifest,
+		results,
+		repository_root=repository_root,
+		mode=mode,
+		policy_release=policy_release,
+	)
+	if prepared_snapshot is None:
+		return Verdict(tuple(results))
+	components, prepared = prepared_snapshot
+	_append_snapshot_secret_checks(
+		actual_root,
+		manifest,
+		prepared,
+		results,
+		repository_root=repository_root,
+		base=base,
+		head=head,
+		mode=mode,
+	)
+	operation = current_operation()
+	deadline = (
+		operation.deadline
+		if operation is not None
+		else time.monotonic() + manifest.repository.gate_timeout_seconds
+	)
+	results.extend(_web_check_results(actual_root, manifest, prepared, results, deadline=deadline))
+	_append_python_snapshot_checks(actual_root, manifest, components, prepared, results, deadline)
+	return Verdict(tuple(results))
 
 
 def check(
@@ -2136,10 +2905,8 @@ def check(
 	head: str | None = None,
 ) -> Verdict:
 	"""Run the complete quality contract against the exact staged candidate."""
-
-	actual_root = repository_root(root)
 	verdict = _run_snapshot(
-		actual_root,
+		root,
 		verbose=verbose,
 		base=base,
 		head=head,
@@ -2149,8 +2916,220 @@ def check(
 	return verdict
 
 
+def _run_candidate_checks(
+	operation: GateOperation,
+	snapshot: CandidateSnapshot,
+	snapshot_lifetime: ExitStack,
+	*,
+	verbose: bool,
+	base: str | None,
+	head: str | None,
+	mode: Literal["check", "audit"],
+	policy_release: str | None,
+) -> None:
+	with operation.stage(
+		"candidate.checks",
+		"checks declared by the staged candidate manifest",
+	):
+		verdict = _check_snapshot(
+			snapshot.root,
+			verbose=verbose,
+			repository_root=operation.root,
+			index_file=getattr(snapshot, "repository_index", None),
+			base=base,
+			head=head,
+			mode=mode,
+			policy_release=policy_release,
+		)
+	for result in verdict.results:
+		operation.record_unmeasured_result(result)
+	with operation.stage(
+		"candidate.snapshot-validation",
+		"staged Git index remained stable through checks",
+	):
+		snapshot_lifetime.close()
+
+
+def _execute_snapshot_operation(
+	operation: GateOperation,
+	actual_root: Path | None,
+	*,
+	verbose: bool,
+	base: str | None,
+	head: str | None,
+	mode: Literal["check", "audit"],
+	policy_release: str | None,
+) -> None:
+	with operation.stage(
+		"repository.root",
+		"explicit repository path" if actual_root is not None else "Git repository root",
+		process_required=actual_root is None,
+	):
+		resolved_root = repository_root(actual_root)
+	operation.set_repository_root(resolved_root)
+	with operation.stage(
+		"manifest.budget",
+		"staged repository timeout defaults",
+		process_required=True,
+	):
+		_configure_operation_budget(resolved_root, operation)
+	with ExitStack() as owned_workspaces:
+		with operation.stage(
+			"temporary.workspace",
+			"repository-local or private system temporary workspace",
+		):
+			owned_workspaces.enter_context(
+				temporary_workspace(
+					resolved_root,
+					workspace_registered=operation.register_workspace,
+					cleanup_owner=operation.handoff_workspace,
+					deadline=operation.deadline,
+				)
+			)
+		snapshot_lifetime = ExitStack()
+		owned_workspaces.enter_context(snapshot_lifetime)
+		with operation.stage(
+			"candidate.snapshot",
+			"staged Git index and blob materialization",
+		):
+			snapshot = snapshot_lifetime.enter_context(
+				candidate_snapshot(
+					resolved_root,
+					timeout_seconds=operation.command_timeout_seconds,
+					deadline=operation.deadline,
+					register_cleanup=operation.register_cleanup,
+				)
+			)
+		operation.candidate = _snapshot_candidate_identity(snapshot)
+		operation.scope = "staged Git index; checks declared by the candidate manifest"
+		_run_candidate_checks(
+			operation,
+			snapshot,
+			snapshot_lifetime,
+			verbose=verbose,
+			base=base,
+			head=head,
+			mode=mode,
+			policy_release=policy_release,
+		)
+
+
+def _snapshot_failure_stage(operation: GateOperation) -> str:
+	return (
+		"candidate.snapshot-validation"
+		if operation.last_completed_stage == "candidate.checks"
+		else "candidate.snapshot"
+	)
+
+
+def _record_snapshot_failure(
+	operation: GateOperation, error: SnapshotError, mode: Literal["check", "audit"]
+) -> None:
+	stage = _snapshot_failure_stage(operation)
+	if time.monotonic() >= operation.deadline:
+		operation.current_stage = stage
+		operation.interrupted_stage = stage
+		try:
+			operation.remaining()
+		except OperationTimeoutError as timeout:
+			raise timeout from error
+	operation.mark_incomplete(
+		stage,
+		"candidate snapshot construction or validation did not complete",
+	)
+	operation.record_unmeasured_result(
+		_error_result(
+			QualityGateError(
+				error.message,
+				check_id="candidate.snapshot",
+				exit_code=EXIT_UNCHECKED,
+				recovery_action=f"restore a stable supported Git index and run {mode} again",
+			)
+		),
+		scope="staged Git index and blob materialization",
+	)
+
+
+def _record_workspace_failure(operation: GateOperation, error: TemporaryWorkspaceError) -> None:
+	if time.monotonic() >= operation.deadline:
+		operation.current_stage = "temporary.workspace"
+		operation.interrupted_stage = "temporary.workspace"
+		try:
+			operation.remaining()
+		except OperationTimeoutError as timeout:
+			raise timeout from error
+	operation.mark_incomplete(
+		"temporary.workspace",
+		"temporary workspace ownership or cleanup transfer did not complete",
+	)
+	operation.record_unmeasured_result(
+		_error_result(
+			QualityGateError(
+				str(error),
+				check_id="temporary.workspace",
+				exit_code=EXIT_UNCHECKED,
+				recovery_action=(
+					"restore a writable repository temp directory and retry the quality gate"
+				),
+			)
+		),
+		scope="repository temporary workspace",
+	)
+
+
+def _run_snapshot_operation(
+	operation: GateOperation,
+	actual_root: Path | None,
+	*,
+	verbose: bool,
+	base: str | None,
+	head: str | None,
+	mode: Literal["check", "audit"],
+	policy_release: str | None,
+) -> None:
+	try:
+		_execute_snapshot_operation(
+			operation,
+			actual_root,
+			verbose=verbose,
+			base=base,
+			head=head,
+			mode=mode,
+			policy_release=policy_release,
+		)
+	except SnapshotError as error:
+		_record_snapshot_failure(operation, error, mode)
+	except TemporaryWorkspaceError as error:
+		_record_workspace_failure(operation, error)
+	except QualityGateError as error:
+		operation.mark_incomplete(
+			operation.current_stage or "preparation",
+			"a required preparation stage prevented the quality checks",
+		)
+		operation.record_unmeasured_result(_error_result(error))
+
+
+def _record_admission_failure(operation: GateOperation | None, error: AdmissionError) -> Verdict:
+	quality_error = QualityGateError(
+		str(error),
+		check_id="runtime.admission",
+		exit_code=EXIT_UNCHECKED,
+		recovery_action=error.recovery_action,
+	)
+	if operation is not None and operation.finalized:
+		operation.mark_incomplete(
+			"runtime.admission",
+			"machine-local Gate admission could not be released cleanly",
+		)
+		operation.record_unmeasured_result(
+			_error_result(quality_error), scope="machine-local Gate admission"
+		)
+		return operation.verdict()
+	return Verdict((_error_result(quality_error),))
+
+
 def _run_snapshot(
-	actual_root: Path,
+	actual_root: Path | None,
 	*,
 	verbose: bool = False,
 	base: str | None = None,
@@ -2159,48 +3138,26 @@ def _run_snapshot(
 	policy_release: str | None = None,
 ) -> Verdict:
 	"""Run one candidate snapshot and convert snapshot failures to a verdict."""
+	operation: GateOperation | None = None
 	try:
 		admission = nullcontext() if running_in_ci() else gate_admission()
 		with admission:
-			with temporary_workspace(actual_root):
-				with candidate_snapshot(actual_root) as snapshot:
-					verdict = _check_snapshot(
-						snapshot.root,
-						verbose=verbose,
-						repository_root=actual_root,
-						index_file=getattr(snapshot, "repository_index", None),
-						base=base,
-						head=head,
-						mode=mode,
-						policy_release=policy_release,
-					)
+			operation = GateOperation(actual_root or Path.cwd(), mode)
+			with operation:
+				_run_snapshot_operation(
+					operation,
+					actual_root,
+					verbose=verbose,
+					base=base,
+					head=head,
+					mode=mode,
+					policy_release=policy_release,
+				)
 	except AdmissionError as error:
-		quality_error = QualityGateError(
-			str(error),
-			check_id="runtime.admission",
-			exit_code=EXIT_UNCHECKED,
-			recovery_action=error.recovery_action,
-		)
-		verdict = Verdict((_error_result(quality_error),))
-	except SnapshotError as error:
-		quality_error = QualityGateError(
-			error.message,
-			check_id="candidate.snapshot",
-			exit_code=EXIT_UNCHECKED,
-			recovery_action=f"restore a stable supported Git index and run {mode} again",
-		)
-		verdict = Verdict((_error_result(quality_error),))
-	except TemporaryWorkspaceError as error:
-		quality_error = QualityGateError(
-			str(error),
-			check_id="temporary.workspace",
-			exit_code=EXIT_UNCHECKED,
-			recovery_action=(
-				"restore a writable repository temp directory and retry the quality gate"
-			),
-		)
-		verdict = Verdict((_error_result(quality_error),))
-	return verdict
+		return _record_admission_failure(operation, error)
+	if operation is None:
+		raise RuntimeError("Gate operation was not initialized")
+	return operation.verdict()
 
 
 def bootstrap_check(
@@ -2211,9 +3168,8 @@ def bootstrap_check(
 	head: str | None = None,
 ) -> Verdict:
 	"""Run the current checkout against a previous immutable policy release."""
-	actual_root = repository_root(root)
 	verdict = _run_snapshot(
-		actual_root,
+		root,
 		base=base,
 		head=head,
 		policy_release=policy_release,
@@ -2224,9 +3180,8 @@ def bootstrap_check(
 
 def audit(root: Path | None = None, *, verbose: bool = False) -> Verdict:
 	"""Run every implemented domain and an explicit full-history secret audit."""
-	actual_root = repository_root(root)
 	verdict = _run_snapshot(
-		actual_root,
+		root,
 		verbose=verbose,
 		mode="audit",
 	)
@@ -2241,9 +3196,8 @@ def bootstrap_audit(
 	verbose: bool = False,
 ) -> Verdict:
 	"""Audit one candidate using an explicitly selected immutable policy release."""
-	actual_root = repository_root(root)
 	verdict = _run_snapshot(
-		actual_root,
+		root,
 		verbose=verbose,
 		mode="audit",
 		policy_release=policy_release,

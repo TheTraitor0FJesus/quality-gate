@@ -14,6 +14,7 @@ from typing import cast
 from urllib.parse import unquote, urlsplit
 
 from .contracts import CheckResult, Finding, Manifest, Status
+from .operation import OperationTimeoutError, current_operation, observe_check, run_probe
 from .publication_config import validate_config
 
 _CONFLICT_MARKER = re.compile(r"^\s*(?:<{7}|={7}|>{7})(?:\s|$)")
@@ -412,11 +413,10 @@ def _git_case_result(
 			environment = os.environ.copy()
 			if index_file is not None:
 				environment["GIT_INDEX_FILE"] = str(index_file)
-			result = subprocess.run(
+			result = run_probe(
 				["git", "-C", str(repository), "ls-files", "--cached", "-z"],
-				capture_output=True,
-				check=False,
-				env=environment,
+				cwd=repository,
+				environment=environment,
 				timeout=manifest.repository.command_timeout_seconds,
 			)
 		except (OSError, subprocess.TimeoutExpired):
@@ -509,13 +509,38 @@ def git_integrity_results(
 	repository: Path | None = None,
 	index_file: Path | None = None,
 ) -> tuple[CheckResult, ...]:
-	scan = _scan_tree(root)
+	operation = current_operation()
+	if operation is None:
+		scan = _scan_tree(root)
+	else:
+		with operation.stage("repository.git.tree-inventory", "staged repository tree"):
+			scan = _scan_tree(root)
 	return (
-		_git_conflict_result(manifest, scan),
-		_git_junk_result(manifest, scan),
-		_git_large_blob_result(manifest, scan),
-		_git_case_result(manifest, scan, repository, index_file),
-		_git_symlink_result(root, manifest, scan),
+		observe_check(
+			"repository.git.conflict_markers",
+			"staged text files",
+			lambda: _git_conflict_result(manifest, scan),
+		),
+		observe_check(
+			"repository.git.tracked_junk",
+			"staged repository paths",
+			lambda: _git_junk_result(manifest, scan),
+		),
+		observe_check(
+			"repository.git.large_blobs",
+			"staged Git blob sizes",
+			lambda: _git_large_blob_result(manifest, scan),
+		),
+		observe_check(
+			"repository.git.case_collisions",
+			"staged Git index paths",
+			lambda: _git_case_result(manifest, scan, repository, index_file),
+		),
+		observe_check(
+			"repository.git.unsafe_symlinks",
+			"staged symbolic links",
+			lambda: _git_symlink_result(root, manifest, scan),
+		),
 	)
 
 
@@ -1664,7 +1689,7 @@ def _is_deployment_only(workflow: _Workflow) -> bool:
 def _is_repository_root(path: Path) -> bool:
 	try:
 		requested_root = path.resolve()
-		result = subprocess.run(
+		result = run_probe(
 			[
 				"git",
 				"-C",
@@ -1672,13 +1697,14 @@ def _is_repository_root(path: Path) -> bool:
 				"rev-parse",
 				"--show-toplevel",
 			],
-			capture_output=True,
-			check=False,
+			cwd=requested_root,
 			timeout=5,
 		)
 		if result.returncode:
 			return False
 		git_root = Path(result.stdout.decode("utf-8").strip()).resolve()
+	except OperationTimeoutError:
+		raise
 	except (OSError, RuntimeError, UnicodeError, subprocess.TimeoutExpired):
 		return False
 	return os.path.normcase(str(git_root)) == os.path.normcase(str(requested_root))
@@ -1692,10 +1718,9 @@ def _is_quality_gate_origin(repository_root: Path) -> bool:
 	if not _is_repository_root(repository_root):
 		return False
 	try:
-		result = subprocess.run(
+		result = run_probe(
 			["git", "-C", str(repository_root), "remote", "get-url", "origin"],
-			capture_output=True,
-			check=False,
+			cwd=repository_root,
 			timeout=5,
 		)
 	except (OSError, subprocess.TimeoutExpired):
@@ -1876,6 +1901,14 @@ def documentation_component_result(root: Path, manifest: Manifest) -> CheckResul
 
 def documentation_results(root: Path, manifest: Manifest) -> tuple[CheckResult, ...]:
 	return (
-		documentation_link_result(root, manifest),
-		documentation_component_result(root, manifest),
+		observe_check(
+			"repository.documentation.links",
+			"staged Markdown links",
+			lambda: documentation_link_result(root, manifest),
+		),
+		observe_check(
+			"repository.documentation.components",
+			"documented Python and web component paths",
+			lambda: documentation_component_result(root, manifest),
+		),
 	)

@@ -9,6 +9,8 @@ from quality_gate.contracts import (
 	MAX_FINDINGS_TOTAL,
 	CheckResult,
 	Finding,
+	OperationTelemetry,
+	StageTiming,
 	Status,
 	Verdict,
 )
@@ -24,6 +26,121 @@ EXPECTED_UNCHECKED_EXIT = 2
 KNOWN_UPSTREAM_OMISSION = MAX_FINDINGS_PER_CHECK // 4
 EXPECTED_DISPLAYED_FINDINGS = MAX_FINDINGS_TOTAL
 EXPECTED_AVAILABLE_FINDINGS = MAX_FINDINGS_PER_CHECK + SINGLE_FINDING_COUNT
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_report_separates_reuse_lookup_from_original_execution(verbose: bool) -> None:
+	result = CheckResult(
+		"python.component_1.mypy",
+		Status.PASSED,
+		"check passed",
+		telemetry=StageTiming(
+			stage="python.component_1.mypy",
+			elapsed_ms=17,
+			scope="quality_gate",
+			disposition="reused",
+			lookup_ms=12,
+			validation_ms=5,
+			original_elapsed_ms=2300,
+			original_operation_id="prior-operation",
+		),
+	)
+	output = render(Verdict((result,)), verbose=verbose)
+	assert "disposition=reused" in output
+	assert "scope=quality_gate" in output
+	assert "elapsed_ms=17" in output
+	assert "lookup_ms=12" in output
+	assert "validation_ms=5" in output
+	assert "original_elapsed_ms=2300" in output
+	assert "original_operation=prior-operation" in output
+	assert "disposition=executed" not in output
+
+
+def test_incomplete_operation_retains_findings_and_blocks_green_aggregate() -> None:
+	result = CheckResult(
+		"python.component_1.mypy",
+		Status.FAILED,
+		"incompatible return type",
+		findings=(Finding(path="quality_gate/example.py", line=3, message="expected int"),),
+		recovery_action="repair the return type",
+		telemetry=StageTiming("python.component_1.mypy", 41, "quality_gate", "executed"),
+	)
+	operation = OperationTelemetry(
+		operation_id="current-operation",
+		operation="check",
+		profile="check",
+		candidate="index-digest",
+		elapsed_ms=85,
+		stages=(StageTiming("cleanup", 44, "operation-owned roots", "executed"),),
+		complete=False,
+		current_stage="cleanup",
+		last_completed_stage="python.component_1.mypy",
+	)
+	verdict = Verdict((result,), operation=operation)
+	output = render(verdict)
+	assert verdict.exit_code == EXPECTED_UNCHECKED_EXIT
+	assert "python.component_1.mypy: failed - incompatible return type" in output
+	assert "expected int" in output
+	assert "candidate=index-digest" in output
+	assert "current_stage=cleanup" in output
+	assert "last_completed_stage=python.component_1.mypy" in output
+	assert "complete=false" in output
+	assert "disposition=executed" in output
+	assert "outcome=failed" in output
+
+
+def test_compact_report_includes_pytest_terminal_totals_after_status_summary() -> None:
+	result = CheckResult(
+		"python.component_1.pytest",
+		Status.PASSED,
+		"pytest totals: 2 passed, 1 skipped",
+		telemetry=StageTiming("python.component_1.pytest", 42, "quality_gate/tests", "executed"),
+	)
+	output = render(Verdict((result,)))
+
+	assert output.index("Observed results: 1 passed") < output.index("Check timings:")
+	assert "outcome=passed" in output
+	assert "test_totals=2 passed, 1 skipped" in output
+
+
+def test_verbose_report_preserves_pytest_status_line_before_telemetry() -> None:
+	result = CheckResult(
+		"python.component_1.pytest",
+		Status.PASSED,
+		"pytest totals: 2 passed, 1 skipped",
+		telemetry=StageTiming("python.component_1.pytest", 42, "quality_gate/tests", "executed"),
+	)
+	output = render(Verdict((result,)), verbose=True)
+
+	status_line = "python.component_1.pytest: passed - pytest totals: 2 passed, 1 skipped"
+	assert output.index(status_line) < output.index("Check timings:")
+	assert "outcome=passed" in output
+	assert "test_totals=2 passed, 1 skipped" in output
+
+
+def test_timing_metadata_uses_the_existing_secret_redaction() -> None:
+	result = CheckResult(
+		"python.component_1.mypy",
+		Status.PASSED,
+		"check passed",
+		_secrets=("synthetic-private-value",),
+		telemetry=StageTiming(
+			"python.component_1.mypy",
+			9,
+			"quality_gate",
+			"executed",
+			reason="native cache synthetic-private-value",
+		),
+	)
+	output = render(Verdict((result,)))
+	assert "synthetic-private-value" not in output
+	assert "reason=native cache" in output
+
+
+@pytest.mark.parametrize("duration", [-1, True, 1.5, None])
+def test_telemetry_rejects_invalid_elapsed_time(duration: object) -> None:
+	with pytest.raises(ValueError, match="duration"):
+		StageTiming("check", duration, "quality_gate", "executed")  # type: ignore[arg-type]
 
 
 def _failed_result(
