@@ -325,6 +325,10 @@ and final hashes, managed/baseline coverage, selection identities, configuration
 waiver/dependency inputs and artifact paths/digests. It also observes filesystem facts
 under the explicit root and `src` for bounded source identifier/dotted-name candidates:
 adding/removing a local module can change Ruff's first-party import classification.
+The provider also captures the presence of parent `__init__.py` and `__init__.pyi`
+markers for explicit input files. Empty markers in the isolated tree preserve Ruff's
+package classification without reading unrelated initializer contents. Marker changes
+invalidate reuse, and unsafe marker paths remain unchecked.
 Unreadable, unlexable or over-bound import context disables reuse and runs ordinary Ruff.
 No imported source contents or repository-wide discovery are needed.
 

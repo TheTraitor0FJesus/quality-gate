@@ -111,6 +111,11 @@ def emit(message: str) -> None:
 	sys.stdout.write(f"{message}\n")
 
 
+def _progress(message: str) -> None:
+	sys.stderr.write(f"QUALITY GATE: {message}\n")
+	sys.stderr.flush()
+
+
 def decode_subprocess_output(output: bytes | str | None) -> str:
 	"""Decode subprocess output across UTF-8 and Windows console encodings."""
 	if output is None:
@@ -2085,6 +2090,7 @@ def _check_snapshot(
 				head=history_head,
 			)
 		)
+	_progress("repository checks completed; 1 stage remaining.")
 	gate_deadline = time.monotonic() + manifest.repository.gate_timeout_seconds
 	results.extend(
 		_web_check_results(
@@ -2124,6 +2130,7 @@ def _check_snapshot(
 			)
 			return Verdict((*results, _error_result(quality_error)))
 		results.extend(run_results)
+	_progress("component checks completed; preparing report.")
 	verdict = Verdict(tuple(results))
 	return verdict
 
@@ -2159,11 +2166,13 @@ def _run_snapshot(
 	policy_release: str | None = None,
 ) -> Verdict:
 	"""Run one candidate snapshot and convert snapshot failures to a verdict."""
+	_progress("this check may take a long time; wait for completion without polling.")
 	try:
 		admission = nullcontext() if running_in_ci() else gate_admission()
 		with admission:
 			with temporary_workspace(actual_root):
 				with candidate_snapshot(actual_root) as snapshot:
+					_progress("preparation completed; 2 stages remaining.")
 					verdict = _check_snapshot(
 						snapshot.root,
 						verbose=verbose,

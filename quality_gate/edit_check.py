@@ -650,6 +650,7 @@ def _execute(invocation: Invocation, workspace: Path) -> dict[str, Any]:
 	cached = _reused_result(invocation, files, records, selections, workspace)
 	if cached is not None:
 		return cached
+	invocation.imports.materialize_packages(workspace)
 	_apply_batches(invocation, workspace, files, selections, batches, records)
 	if sum(len(record["findings"]) for record in records) > MAX_FINDINGS:
 		raise EditError("limits")
