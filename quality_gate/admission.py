@@ -24,7 +24,6 @@ DEFAULT_QUEUE_TIMEOUT_SECONDS = 120
 MAX_QUEUE_TIMEOUT_SECONDS = 240
 SLOT_COUNT = 2
 POLL_INTERVAL_SECONDS = 0.1
-WAIT_NOTICE_INTERVAL_SECONDS = 30
 RELEASE_CONTROL_WAIT_SECONDS = 0.5
 _SLOT_LOCK_NAME = ".gate-admission-{slot}.lock"
 _CONTROL_LOCK_NAME = ".gate-admission-control.lock"
@@ -323,11 +322,6 @@ def _emit_waiting() -> None:
 	sys.stderr.flush()
 
 
-def _emit_progress() -> None:
-	sys.stderr.write("QUALITY GATE: still waiting for a local run slot.\n")
-	sys.stderr.flush()
-
-
 def _emit_acquired() -> None:
 	sys.stderr.write("QUALITY GATE: local run slot acquired; continuing the check.\n")
 	sys.stderr.flush()
@@ -357,7 +351,6 @@ def _acquire(
 		raise OSError(f"gate admission cache root is not a regular directory: {root}")
 	deadline = time.monotonic() + timeout_seconds
 	waited = False
-	next_notice = 0.0
 	while True:
 		lease = _inherited_lease(*inherited_identity) if inherited_identity is not None else None
 		if lease is None:
@@ -368,10 +361,6 @@ def _acquire(
 		if not waited:
 			_emit_waiting()
 			waited = True
-			next_notice = now + WAIT_NOTICE_INTERVAL_SECONDS
-		elif now >= next_notice:
-			_emit_progress()
-			next_notice = now + WAIT_NOTICE_INTERVAL_SECONDS
 		if now >= deadline:
 			raise AdmissionError(
 				(
