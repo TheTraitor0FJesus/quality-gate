@@ -305,7 +305,7 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert 'QUALITY_GATE_WHEEL="$(python .quality-gate-ci/quality_gate/ci_release.py' in workflow
 	assert "manifest_python.outputs.versions" in workflow
 	assert 'default: "3.12"' not in workflow
-	assert manifest["quality"]["policy_release"] == "v4.5.0"
+	assert manifest["quality"]["policy_release"] == "v4.7.0"
 	version = tomllib.loads((REPOSITORY / ".release" / "version.toml").read_text(encoding="utf-8"))
 	assert template["quality"]["policy_release"] == f"v{version['version']}"
 	assert fixture["quality"]["policy_release"] == manifest["quality"]["policy_release"]
@@ -590,10 +590,12 @@ def test_compare_results_rejects_equal_invalid_probe(
 
 
 def test_ci_and_local_cli_runs_match_on_a_release_backed_repository(
-	tmp_path: Path, _release_gate: tuple[Path, Path]
+	tmp_path_factory: pytest.TempPathFactory, _release_gate: tuple[Path, Path]
 ) -> None:
 	"""Verify local and CI runs expose one release, tool, result, and redaction surface."""
 
+	# Leave room for cache staging beneath the nested Windows Gate workspace.
+	tmp_path = tmp_path_factory.mktemp("parity")
 	scanner = _installed_scanner()
 	assert scanner is not None, "the active policy release must provide Gitleaks"
 	gate, wheel = _release_gate

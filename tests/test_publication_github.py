@@ -167,6 +167,28 @@ def test_api_errors_are_not_interpreted_as_absent_resources() -> None:
 
 @pytest.mark.parametrize(
 	("method", "path"),
+	[
+		("GET", "/../other/releases"),
+		("GET", "/compare/" + "a" * 40 + "..." + "b" * 40 + "/../releases"),
+		("GET", "/compare/main...feature"),
+		("GET", "/compare/" + "a" * 40 + "...." + "b" * 40),
+		("GET", "/compare/" + "a" * 40 + "..." + "b" * 40 + "?path=../other"),
+		("POST", "/compare/" + "a" * 40 + "..." + "b" * 40),
+	],
+)
+def test_compare_exception_preserves_api_path_rejections(method: str, path: str) -> None:
+	command = Command([])
+	api = GitHubCLI("o/r", timeout_seconds=120, command=command)
+	with pytest.raises(PublicationError, match="invalid repository API path"):
+		if method == "GET":
+			api.get(path)
+		else:
+			api.post(path, {})
+	assert command.calls == []
+
+
+@pytest.mark.parametrize(
+	("method", "path"),
 	[("GET", "/git/commits/" + "a" * 40), ("POST", "/git/commits")],
 )
 def test_commit_api_error_objects_remain_fail_closed(method: str, path: str) -> None:
@@ -978,9 +1000,12 @@ def test_image_writer_cli_passes_the_original_pull_request_number(
 ) -> None:
 	from quality_gate import publication_cli
 
+	calls: list[tuple[int, int, Path]] = []
+
 	class Publisher:
 		@staticmethod
 		def write_images(_pr: int, _candidate_id: int, _output: Path) -> dict[str, str]:
+			calls.append((_pr, _candidate_id, _output))
 			return {"status": "images-written", "version": "2.3.0"}
 
 	monkeypatch.setattr(publication_cli, "_publisher", lambda _root: Publisher())
@@ -999,6 +1024,7 @@ def test_image_writer_cli_passes_the_original_pull_request_number(
 		== 0
 	)
 	assert '"status": "images-written"' in capsys.readouterr().out
+	assert calls == [(7, 9, tmp_path)]
 
 
 def test_job_log_download_retries_escape_guard_with_gh_opt_in() -> None:

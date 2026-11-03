@@ -288,6 +288,28 @@ def test_git_commit_messages_are_data_for_rollout_reads_and_writes() -> None:
 	assert command.calls[5][2] == f"repos/{PROVIDER}/git/commits"
 
 
+@pytest.mark.parametrize("behind", [0, 1])
+def test_existing_branch_comparison_through_cli_syncs_only_when_behind(behind: int) -> None:
+	base_sha, head_sha, merged_sha = "a" * 40, "b" * 40, "c" * 40
+	responses: list[object] = [{"behind_by": behind}]
+	if behind:
+		responses.extend([{"sha": merged_sha}, {"object": {"sha": merged_sha}}])
+	command = JsonCommand(responses)
+	client = GitHubCLI(PROVIDER, timeout_seconds=60, command=command)
+
+	result = release_rollout._sync_branch_with_base(
+		client, "quality-gate-rollout/v4.5.0", "main", base_sha, head_sha
+	)
+
+	assert result == (merged_sha if behind else head_sha)
+	assert command.calls[0][2] == f"repos/{PROVIDER}/compare/{base_sha}...{head_sha}"
+	assert [call[call.index("--method") + 1] for call in command.calls] == (
+		["GET", "POST", "GET"] if behind else ["GET"]
+	)
+	if behind:
+		assert command.calls[1][2] == f"repos/{PROVIDER}/merges"
+
+
 def test_foreign_rollout_branch_is_ignored_before_marker_validation(
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:

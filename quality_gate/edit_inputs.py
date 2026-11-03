@@ -105,7 +105,10 @@ class ImportContext:
 
 	def __init__(self, root: Path, files: list[SourceFile]) -> None:
 		self.facts: dict[Path, tuple[bool, bool]] = {}
+		self.package_markers: set[Path] = set()
+		self.root = root
 		self.identity: str | None = None
+		self._capture_packages(files)
 		names = _module_names(files)
 		if names is None:
 			return
@@ -125,8 +128,27 @@ class ImportContext:
 			json.dumps(sorted((str(path), state) for path, state in self.facts.items())).encode()
 		)
 
+	def _capture_packages(self, files: list[SourceFile]) -> None:
+		for source in files:
+			for directory in Path(source.path).parents:
+				for name in ("__init__.py", "__init__.pyi"):
+					relative = (directory / name).as_posix()
+					path = regular_path(self.root, relative, optional=True)
+					self.facts[path] = path.is_dir(), path.is_file()
+					if path.is_file():
+						self.package_markers.add(path)
+
+	def materialize_packages(self, workspace: Path) -> None:
+		"""Preserve package classification without reading unrelated source bytes."""
+		for marker in self.package_markers:
+			path = workspace / marker.relative_to(self.root)
+			path.parent.mkdir(parents=True, exist_ok=True)
+			path.touch(exist_ok=True)
+
 	def assert_current(self) -> None:
-		if self.identity is not None and any(
+		for marker in self.package_markers:
+			regular_path(self.root, marker.relative_to(self.root).as_posix(), optional=True)
+		if any(
 			(path.is_dir(), path.is_file()) != expected for path, expected in self.facts.items()
 		):
 			raise EditError("stale_input")

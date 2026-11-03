@@ -174,15 +174,11 @@ def candidate_typing_cache(
 ) -> Iterator[Path]:
 	from test_edit_check import prepare_edit_cache
 
-	cache_parent = typing_policy.parent.parent
-	if is_link_or_reparse(cache_parent.lstat()) or not cache_parent.is_dir():
-		raise AssertionError("Candidate typing cache requires an ordinary policy cache root.")
-	# Gate redirects TEMP into its nested workspace. Keep disposable runtimes beside
-	# the verified user-local policy cache to avoid overlong Windows paths.
+	cache_parent = _candidate_typing_cache_parent(typing_policy)
 	with tempfile.TemporaryDirectory(prefix="qg-candidate-", dir=cache_parent) as directory:
 		cache = Path(directory).resolve()
-		prepare_edit_cache(cache, "v4.6.0")
-		candidate_root = cache / "releases/v4.6.0"
+		prepare_edit_cache(cache, "v4.7.0")
+		candidate_root = cache / "releases/v4.7.0"
 		candidate = verify_release(candidate_root)
 		published = verify_release(typing_policy)
 		replacements: dict[str, Path] = {}
@@ -222,9 +218,60 @@ def candidate_typing_cache(
 			shutil.copy2(source_path, candidate_root / relative)
 		_update_candidate_release_digests(candidate_root, replacements)
 		verified = verify_release(candidate_root)
-		assert verified.version == "v4.6.0"
+		assert verified.version == "v4.7.0"
 		assert (candidate_root / product.path).read_bytes() == candidate_engine_wheel.read_bytes()
 		yield cache
+
+
+def _candidate_typing_cache_parent(typing_policy: Path) -> Path:
+	cache_parent = typing_policy.parent.parent
+	if os.name == "nt":
+		temp_parent = Path(tempfile.gettempdir()).parent
+		try:
+			temp_parent_identity = temp_parent.lstat()
+		except OSError:
+			temp_parent_identity = None
+		if (
+			temp_parent_identity is not None
+			and not is_link_or_reparse(temp_parent_identity)
+			and temp_parent.is_dir()
+			and os.access(temp_parent, os.W_OK)
+			and len(os.fspath(temp_parent)) < len(os.fspath(cache_parent))
+		):
+			# Keep the candidate runtime short enough for Windows to open mypy's typeshed files.
+			cache_parent = temp_parent
+	if is_link_or_reparse(cache_parent.lstat()) or not cache_parent.is_dir():
+		raise AssertionError("Candidate typing cache requires an ordinary parent directory.")
+	return cache_parent
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows candidate temp parent selection only")
+def test_candidate_typing_cache_parent_falls_back_from_reparse_temp_parent(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	policy_cache = tmp_path / "policy-cache"
+	policy_cache.mkdir()
+	typing_policy = policy_cache / "releases/v4.6.0"
+	temp_parent = tmp_path / "short"
+	temp_directory = temp_parent / "temp"
+	temp_directory.mkdir(parents=True)
+	assert len(os.fspath(temp_parent)) < len(os.fspath(policy_cache))
+	monkeypatch.setattr(tempfile, "gettempdir", lambda: os.fspath(temp_directory))
+	reparse_identity = temp_parent.lstat()
+	original_is_link_or_reparse = is_link_or_reparse
+
+	def mark_temp_parent_as_reparse(metadata: os.stat_result) -> bool:
+		if (metadata.st_dev, metadata.st_ino) == (
+			reparse_identity.st_dev,
+			reparse_identity.st_ino,
+		):
+			return True
+		return original_is_link_or_reparse(metadata)
+
+	monkeypatch.setattr(sys.modules[__name__], "is_link_or_reparse", mark_temp_parent_as_reparse)
+
+	assert _candidate_typing_cache_parent(typing_policy) == policy_cache
 
 
 def _candidate_mypy_dependency_replacements(
@@ -1170,7 +1217,7 @@ tests_reason = "Disposable typing integration."
 def _argus_typing_manifest() -> str:
 	return f'''[quality]
 schema = 2
-policy_release = "v4.6.0"
+policy_release = "v4.7.0"
 [repository]
 name = "argus-source-roots"
 domains = ["repository", "python"]
@@ -1265,7 +1312,7 @@ def argus_project(
 def _run_candidate_types(
 	project: Path, cache: Path, wheel: Path, *paths: str, network_guard: bool = True
 ) -> tuple[int, dict[str, Any]]:
-	policy = cache / "releases/v4.6.0"
+	policy = cache / "releases/v4.7.0"
 	return invoke_candidate_wheel(
 		request(project, policy, *paths, background=True), wheel, network_guard=network_guard
 	)
@@ -1327,7 +1374,7 @@ def test_candidate_wheel_checks_argus_sibling_sources_and_local_stubs(
 		network_guard=True,
 	)
 	assert (code, result["status"]) == (1, "failed"), json.dumps(result, indent=2)
-	assert result["engine_version"] == "4.6.0"
+	assert result["engine_version"] == "4.7.0"
 	assert [record["name"] for record in result["components"]] == ["bot", "worker"]
 	component = result["components"][0]
 	assert {item["path"] for item in component["inventory"]} == {
@@ -1344,7 +1391,7 @@ def test_candidate_wheel_checks_argus_sibling_sources_and_local_stubs(
 		{"path": "bot/main.py", "line": 5, "column": 21, "code": "arg-type"}
 	]
 	assert result["selections"][0]["mypy_version"] == "2.3.1"
-	policy = candidate_typing_cache / "releases/v4.6.0"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	candidate = verify_release(policy)
 	mypy = next(item for item in candidate.tools if item.name == "mypy")
 	assert result["selections"][0]["mypy_sha256"] == digest((policy / mypy.path).read_bytes())
@@ -1371,7 +1418,7 @@ def test_candidate_wheel_checks_argus_sibling_sources_and_local_stubs(
 	assert result["components"][0]["diagnostics"] == []
 	assert result["components"][1]["reason"] == "typecheck_disabled"
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.6.0"
+		"v4.7.0"
 	]
 
 
@@ -1464,22 +1511,22 @@ def test_candidate_wheel_runs_ruff_writer_and_validator_with_candidate_only_cach
 	path = project / "example.py"
 	original = b"import os\nimport sys\n\nvalue = (os.name, sys.version)\n"
 	path.write_bytes(original)
-	policy = candidate_typing_cache / "releases/v4.6.0"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	payload = request(project, policy, "example.py")
 	payload["baseline"] = {
-		"policy_release": "v4.6.0",
+		"policy_release": "v4.7.0",
 		"python": sys.executable,
 		"python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
 	}
 	payload["phase"] = phase
 	code, result = invoke_candidate_wheel(payload, candidate_engine_wheel, command="edit-check")
-	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.6.0"), result
-	assert result["selections"][0]["policy_release"] == "v4.6.0"
+	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.7.0"), result
+	assert result["selections"][0]["policy_release"] == "v4.7.0"
 	assert result["files"][0]["format"] == "passed"
 	assert result["files"][0]["sha256"] == digest(original)
 	assert path.read_bytes() == original
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.6.0"
+		"v4.7.0"
 	]
 
 
@@ -1491,16 +1538,16 @@ def test_candidate_wheel_runs_secrets_with_candidate_only_cache(
 	project = tmp_path / "secrets-candidate"
 	project.mkdir()
 	(project / "settings.py").write_text("token = 'ordinary value'\n", encoding="utf-8")
-	policy = candidate_typing_cache / "releases/v4.6.0"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	code, result = invoke_candidate_wheel(
 		request(project, policy, "settings.py"), candidate_engine_wheel, command="edit-secrets"
 	)
-	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.6.0"), result
-	assert result["selections"][0]["policy_release"] == "v4.6.0"
+	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.7.0"), result
+	assert result["selections"][0]["policy_release"] == "v4.7.0"
 	assert result["selections"][0]["scanner_version"] == "8.30.1"
 	assert result["files"][0]["findings"] == []
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.6.0"
+		"v4.7.0"
 	]
 
 
@@ -1512,15 +1559,15 @@ def test_candidate_wheel_runs_integrity_with_candidate_only_cache(
 	project = tmp_path / "integrity-candidate"
 	project.mkdir()
 	(project / "clean.py").write_text("value: int = 1\n", encoding="utf-8")
-	policy = candidate_typing_cache / "releases/v4.6.0"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	code, result = invoke_candidate_wheel(
 		request(project, policy, "clean.py"), candidate_engine_wheel, command="edit-integrity"
 	)
-	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.6.0"), result
-	assert result["selections"][0]["policy_release"] == "v4.6.0"
+	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.7.0"), result
+	assert result["selections"][0]["policy_release"] == "v4.7.0"
 	assert result["files"][0]["status"] == "passed"
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.6.0"
+		"v4.7.0"
 	]
 
 
@@ -1733,7 +1780,7 @@ def test_candidate_cli_fails_closed_for_missing_or_linked_source_roots(
 		except OSError as error:
 			pytest.skip(f"Directory symlinks are unavailable: {error}")
 		(project / "apscheduler").mkdir()
-	cache_policy = candidate_typing_cache / "releases/v4.6.0"
+	cache_policy = candidate_typing_cache / "releases/v4.7.0"
 	code, result = invoke_candidate_wheel(
 		request(project, cache_policy, "bot/main.py", background=True), candidate_engine_wheel
 	)
@@ -1763,7 +1810,7 @@ def test_candidate_cli_fails_closed_for_missing_or_unsafe_component_stub_roots(
 		),
 		encoding="utf-8",
 	)
-	policy = candidate_typing_cache / "releases/v4.6.0"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	code, result = invoke_candidate_wheel(
 		request(project, policy, "bot/main.py", background=True), candidate_engine_wheel
 	)
@@ -1781,7 +1828,7 @@ def test_candidate_cli_does_not_import_undeclared_working_tree_modules(
 		"from unlisted import helper\nvalue: int = helper()\n",
 		encoding="utf-8",
 	)
-	policy = candidate_typing_cache / "releases/v4.6.0"
+	policy = candidate_typing_cache / "releases/v4.7.0"
 	code, result = invoke_candidate_wheel(
 		request(argus_project, policy, "bot/main.py", background=True),
 		candidate_engine_wheel,
@@ -1789,7 +1836,7 @@ def test_candidate_cli_does_not_import_undeclared_working_tree_modules(
 	assert (code, result["status"], result["reason"]) == (2, "unchecked", "dependencies"), result
 	assert result["components"] == []
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.6.0"
+		"v4.7.0"
 	]
 
 

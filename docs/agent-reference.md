@@ -46,16 +46,28 @@ read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnos
    Run `quality-gate setup` after selecting a policy release or adding/changing Python components.
    Setup provisions the tools and component runtime before editing; edit-time hooks do not
    install them, and a missing runtime is reported as `unchecked`.
-3. For changes to this repository's source or policy, run the current-source `quality-gate check`
-   before committing. For a consumer implementation, complete staged verification through its
-   active workflow; its commit-hook Quality Gate satisfies this step. For standalone verification,
-   run `quality-gate check` directly. The default report preserves every observed failed and
+3. When an authorized commit is the next step, rely on its active commit hook to run the staged
+   Quality Gate. Outside `$implement`'s explicitly required pre-review Gate, run a
+   standalone or current-source `quality-gate check` only when the user directly requests it.
+   Generic verification, review, PR, release, or policy-change guidance does not trigger another
+   Gate. After a failed staged Gate is fixed and commit is next, run focused checks outside hook
+   coverage and retry the commit; do not run a standalone Gate before the hook. Use test-runner
+   `scope.kind = "full"`, `snapshot = "working-tree"` for complete test-suite verification. For consumers
+   without a commit-hook Gate, rely on CI and report an unavailable Gate instead of starting one
+   locally. For a direct user request or the `$implement` pre-review Gate, dispatch a separate
+   test-runner request with `scope.kind = "quality-gate"`, `snapshot = "staged"`, a fresh
+   `run_id`, and no `command` or `coverage`. This scope runs `quality-gate --root <repo> check`.
+   It runs the installed engine selected by that entry point, not the current checkout source.
+   If current-source verification is explicitly requested, establish and report the engine identity;
+   do not present the installed-engine result as current-source evidence. Use a procedure that
+   explicitly supports the requested source check, or report that it is unavailable.
+   The default report preserves every observed failed and
    unchecked check status while bounding finding details. Known and unknown upstream omissions are
    identified explicitly. Use `--verbose` for every status and all safely collected redacted
    findings.
-4. Use `quality-gate format <explicit-path>...`, stage the result, and rerun the current-source
-   `quality-gate check`
-   for Quality Gate changes or return to the active workflow for consumer changes.
+4. Use `quality-gate format <explicit-path>...` and stage the result. The next authorized commit
+   runs the staged Gate. Do not repeat it before the hook solely because formatting or a correction
+   changed the candidate; use focused checks outside hook coverage.
 5. The `quality-gate version` command prints the installed engine package version. The repository's
    `quality-gate.toml` selects the policy release; `quality-gate doctor` checks that release and its
    runtimes but does not print its version. `quality-gate setup` prints the selected release when it
@@ -104,7 +116,7 @@ wrapper has no separate policy-version pin. If CI reports a v2 release, inspect 
 repository's selected release API returns 404. The native pre-push wrapper blocks updates and
 deletion of the remote default branch when Git can prove its name.
 
-Queue-aware releases admit two independent local full Gate runs across repositories for the
+Queue-aware releases admit four independent local full Gate runs across repositories for the
 current user. Waiting continues automatically when a slot opens and has a separate configurable
 budget. Ruff children default to four worker threads. See [Local Gate queue](local-gate-queue.md)
 for settings, nested execution, and the native-wrapper activation requirement. Source changes do
@@ -222,7 +234,9 @@ matches total, and 256 KiB of matched path names. Arbitrary commands are not par
 contract. Quality Gate validates these declarations during `validate`, `check`, `audit`, native
 hooks, and the reusable workflow, but does not execute them. The typed test-runner expands
 validated globs without shell expansion, passes concrete paths to Node, and owns their execution
-during `scope: full`; repository CI remains the enforcement owner.
+during `scope: full`, alongside separate pytest stages for each applicable Python component's
+declared `test_paths`. The runner validates the manifest first and checks working-tree tests;
+repository CI remains the enforcement owner.
 
 After every `quality-gate.toml` edit, run `quality-gate validate`. Use
 [templates/quality-gate.toml](../templates/quality-gate.toml) as the canonical shape; do not create
@@ -287,17 +301,18 @@ Then change the policy pin and all active caller references in one feature-branc
    commit SHA that contains the compatible workflow implementation. Obtain the SHA from the verified
    release record; do not use a tag or branch in a caller.
 
-Run `validate`, `setup`, and `doctor`, then stage every changed manifest and workflow together. Use one
-typed test-runner `scope: full` request: it runs every declared supplemental test and then the
-staged `quality-gate check`, while a repository without a manifest keeps ordinary complete-suite
-discovery. Commit only after it passes; the native commit hook repeats the staged gate. Push the
-feature branch, require the single `Quality Gate` pull-request status, and leave approval and merge
-to a human.
+Run `validate`, `setup`, and `doctor`, then stage the manifest and workflow together. If an
+authorized commit is next, rely on its hook for the staged Gate. Before pushing, run declared
+supplemental tests locally with test-runner `scope.kind = "full"`, `snapshot = "working-tree"`,
+or verify that a separate required CI status runs them. The `Quality Gate` status alone does not
+execute or verify supplemental tests. Push the feature branch, require the `Quality Gate`
+pull-request status and any separate required supplemental-test status, and leave approval and
+merge to a human. Use a narrower test scope for focused checks.
 
-For rollback, restore both pins to the last known-good pair in a new feature-branch candidate,
-then run `doctor`, the complete tests, and the staged gate again. `quality-gate sync --rollback`
-only changes cache retention state; it does not override `quality.policy_release` or the workflow
-SHA, so it is not a consumer rollback by itself.
+For rollback, restore both pins to the last known-good pair in a new feature-branch candidate and
+run `doctor`; rely on the next commit hook for its staged Gate and run declared supplemental tests
+locally or verify their separate required CI status as above. `quality-gate sync --rollback` only changes cache retention state; it does not
+override `quality.policy_release` or the workflow SHA, so it is not a consumer rollback by itself.
 
 ## Migration, audit, and lessons
 
@@ -314,9 +329,8 @@ release-only gate.
 ## Troubleshooting and security
 
 - Use `validate` for a manifest contract error and `doctor` for a release or runtime error.
-- Repair a failed finding. For Quality Gate source changes, rerun the current-source check; for
-  standalone verification, rerun the failed command; for consumer implementations, return to the
-  active workflow.
+- Repair a failed finding, then rerun the check that reported it when its procedure requires a
+  rerun. For a staged Gate failure, retry the authorized commit and use its new hook result.
 - Restore an `unchecked` prerequisite, then rerun the command; do not add a waiver for missing
   verification.
 - Add a typed waiver only for one reviewed current finding. Keep its exact check ID and target,
@@ -347,10 +361,13 @@ and external rule changes remain human-reviewed decisions.
 
 ## Release and rollback route
 
-Run the complete test suite and `quality-gate audit` before building the exact platform artifacts.
-Then follow [Release procedure](release.md). Shared preparation preserves the original owner-merged
-candidate; product jobs validate its exact source, checks, self-host manifest, lessons, and every
-declared artifact in a temporary cache before shared publication. Completed readback skips builds.
+Run the complete declared test suite through test-runner with `scope.kind = "full"` and
+`snapshot = "working-tree"`, and run `quality-gate audit` before building the exact platform
+artifacts. The release audit remains a separate required command. Then follow
+[Release procedure](release.md).
+Shared preparation preserves the original owner-merged candidate; product jobs validate its exact
+source, checks, self-host manifest, lessons, and every declared artifact in a temporary cache before
+shared publication. Completed readback skips builds.
 
 Retain the active and preceding policy releases. To recover a bad activation, run
 the consumer rollback procedure above: restore the manifest release and reusable-workflow SHA,

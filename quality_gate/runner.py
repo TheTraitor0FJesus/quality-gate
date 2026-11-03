@@ -312,6 +312,11 @@ def emit(message: str) -> None:
 	sys.stdout.write(f"{message}\n")
 
 
+def _progress(message: str) -> None:
+	sys.stderr.write(f"QUALITY GATE: {message}\n")
+	sys.stderr.flush()
+
+
 def decode_subprocess_output(output: bytes | str | None) -> str:
 	"""Decode subprocess output across UTF-8 and Windows console encodings."""
 	if output is None:
@@ -2886,6 +2891,7 @@ def _check_snapshot(
 		head=head,
 		mode=mode,
 	)
+	_progress("repository checks completed; 1 stage remaining.")
 	operation = current_operation()
 	deadline = (
 		operation.deadline
@@ -2894,6 +2900,7 @@ def _check_snapshot(
 	)
 	results.extend(_web_check_results(actual_root, manifest, prepared, results, deadline=deadline))
 	_append_python_snapshot_checks(actual_root, manifest, components, prepared, results, deadline)
+	_progress("component checks completed; preparing report.")
 	return Verdict(tuple(results))
 
 
@@ -3000,6 +3007,7 @@ def _execute_snapshot_operation(
 					register_cleanup=operation.register_cleanup,
 				)
 			)
+		_progress("preparation completed; 2 stages remaining.")
 		operation.candidate = _snapshot_candidate_identity(snapshot)
 		operation.scope = "staged Git index; checks declared by the candidate manifest"
 		_run_candidate_checks(
@@ -3138,6 +3146,7 @@ def _run_snapshot(
 	policy_release: str | None = None,
 ) -> Verdict:
 	"""Run one candidate snapshot and convert snapshot failures to a verdict."""
+	_progress("this check may take a long time; wait for completion without polling.")
 	operation: GateOperation | None = None
 	try:
 		admission = nullcontext() if running_in_ci() else gate_admission()

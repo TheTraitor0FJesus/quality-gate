@@ -28,7 +28,9 @@ def _selected_settings_root(environment: Mapping[str, str], profile: Path) -> Pa
 def _test_runner_instructions(settings_root: Path) -> str:
 	path = settings_root / "agents" / "test-runner.toml"
 	if not path.is_file():
-		pytest.skip(f"typed test-runner configuration is missing under selected settings root: {path}")
+		pytest.skip(
+			f"typed test-runner configuration is missing under selected settings root: {path}"
+		)
 	document = tomllib.loads(path.read_text(encoding="utf-8"))
 	if "developer_instructions" in document:
 		return document["developer_instructions"]
@@ -47,7 +49,9 @@ def test_explicit_settings_root_selects_runner_instructions(tmp_path: Path) -> N
 	_write_runner_config(selected_root, "selected root")
 	_write_runner_config(profile_root / ".codex", "profile fallback")
 
-	assert _selected_settings_root({"CODEX_HOME": str(selected_root)}, profile_root) == selected_root
+	assert (
+		_selected_settings_root({"CODEX_HOME": str(selected_root)}, profile_root) == selected_root
+	)
 	assert _test_runner_instructions(selected_root) == "selected root"
 
 
@@ -70,24 +74,39 @@ def test_missing_explicit_settings_root_does_not_fall_back_to_profile(tmp_path: 
 		_test_runner_instructions(selected_root)
 
 
-def test_prompt_contract_orders_python_then_supplementals_without_a_staged_gate() -> None:
+def test_prompt_contract_full_scope_runs_python_and_supplementals_without_a_gate() -> None:
 	settings_root = _selected_settings_root(os.environ, Path.home())
 	instructions = " ".join(_test_runner_instructions(settings_root).split())
 	preflight = instructions.index("first select `quality-gate --root <repo> validate`")
 	declarations = instructions.index(
-		"read only the validated manifest's `python` and `supplemental_tests` declarations"
+		"read only the validated manifest's `python` and `supplemental_tests`"
 	)
-	python_stage = instructions.index(
-		"For each Python component with `tests_applicable: true`, run one pytest stage"
-	)
+	python = instructions.index("For each Python component with `tests_applicable: true`")
 	expansion = instructions.index("expand each validated repository-relative target")
 	collection = instructions.index(
 		"Run all applicable Python stages, then every supplemental declaration"
 	)
 
-	assert preflight < declarations < python_stage < expansion < collection
-	assert "even after an earlier completed failure or an unavailable component" in instructions
+	assert preflight < declarations < python < expansion < collection
+	full_branch = instructions.split("2. For `full` when `quality-gate.toml` exists", 1)[1].split(
+		"4. For `full` without", 1
+	)[0]
+	assert "quality-gate --root <repo> check" not in full_branch
+	assert (
+		"Test scopes, including `full`, require `snapshot: working-tree` "
+		"and never add a Quality Gate check"
+	) in instructions
 	assert "Do not add a repository-wide suite or a Quality Gate check" in instructions
+	assert "skip all untrusted test declarations" in instructions
+	assert (
+		"`quality-gate` requires `snapshot: staged` and forbids `command` and `coverage`"
+	) in instructions
+	assert (
+		"For `quality-gate`, require `quality-gate.toml` "
+		"and select `quality-gate --root <repo> check`"
+	) in instructions
+	assert "every applicable Python stage and every supplemental stage" in instructions
+	assert "even after an earlier completed failure or an unavailable component" in instructions
 	assert "Only `scope.kind: quality-gate` selects the staged Gate" in instructions
 
 
@@ -226,7 +245,7 @@ def _report_integration_timings(timings: dict[str, float]) -> None:
 	)
 
 
-def test_node_fixture_runs_supplementals_before_a_locally_authored_gate_stub() -> None:
+def test_node_fixture_collects_every_supplemental_after_a_failure() -> None:
 	"""Exercise Node fixtures and local sequencing; this does not invoke the typed runner."""
 	temporary = tempfile.TemporaryDirectory(prefix="quality-gate-runner-contract-")
 	timings: dict[str, float] = {}
@@ -273,26 +292,7 @@ def test_node_fixture_runs_supplementals_before_a_locally_authored_gate_stub() -
 			timings[f"supplemental {declaration.name}"] = perf_counter() - started
 			results.append(result.returncode)
 
-		gate_script = root / "staged_gate.py"
-		gate_script.write_text(
-			"from pathlib import Path\n"
-			"import sys\n"
-			"root = Path(sys.argv[1])\n"
-			"if (root / 'supplemental.log').read_text(encoding='utf-8') != 'failure\\nsuccess\\n':\n"
-			"    raise SystemExit(1)\n"
-			"(root / 'staged-gate.log').write_text('ran\\n', encoding='utf-8')\n",
-			encoding="utf-8",
-		)
-		started = perf_counter()
-		gate = subprocess.run(
-			[sys.executable, str(gate_script), str(root)],
-			cwd=REPOSITORY,
-			capture_output=True,
-			text=True,
-		)
-		timings["local staged-gate stub"] = perf_counter() - started
 		supplemental_log = (root / "supplemental.log").read_text(encoding="utf-8")
-		gate_log = (root / "staged-gate.log").read_text(encoding="utf-8")
 	finally:
 		started = perf_counter()
 		temporary.cleanup()
@@ -301,5 +301,3 @@ def test_node_fixture_runs_supplementals_before_a_locally_authored_gate_stub() -
 
 	assert results == [1, 0]
 	assert supplemental_log == "failure\nsuccess\n"
-	assert gate.returncode == 0, gate.stdout + gate.stderr
-	assert gate_log == "ran\n"

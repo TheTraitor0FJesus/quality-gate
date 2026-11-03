@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -843,28 +844,24 @@ def test_cli_reports_timeout_as_unchecked_without_a_failed_verdict(
 
 
 @pytest.mark.parametrize("command", ["check", "audit"])
-def test_cli_defers_gate_root_and_workspace_to_the_operation(
-	command: str, monkeypatch: pytest.MonkeyPatch
+def test_cli_starts_operation_before_repository_discovery(
+	command: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-	seen_arguments = []
+	observed = []
 
-	def dispatch(arguments: object) -> int:
-		seen_arguments.append(arguments)
-		return 0
+	def fail_discovery(root: Path | None) -> Path:
+		assert root is None
+		operation = runner.current_operation()
+		assert operation is not None
+		observed.append(operation)
+		raise TemporaryWorkspaceError("repository discovery unavailable")
 
-	def unexpected_preparation(*_args: object, **_kwargs: object) -> object:
-		pytest.fail("check and audit own repository discovery and workspace lifetime")
-
-	monkeypatch.setattr(sys, "argv", ["quality-gate", command])
-	monkeypatch.setattr("quality_gate.cli._dispatch", dispatch)
-	monkeypatch.setattr("quality_gate.runner.repository_root", unexpected_preparation)
-	monkeypatch.setattr(
-		"quality_gate.temp_workspace.temporary_workspace", unexpected_preparation
-	)
-
-	assert main() == 0
-	assert len(seen_arguments) == 1
-	assert seen_arguments[0].root is None
+	monkeypatch.setattr(sys, "argv", ["quality-gate", command, "--verbose"])
+	monkeypatch.setattr(runner, "gate_admission", lambda: nullcontext())
+	monkeypatch.setattr(runner, "repository_root", fail_discovery)
+	assert main() == EXIT_UNCHECKED
+	assert len(observed) == 1 and observed[0].finalized
+	assert "temporary.workspace: unchecked" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("command", ["check", "audit"])

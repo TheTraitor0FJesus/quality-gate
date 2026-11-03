@@ -293,6 +293,41 @@ def test_provider_release_path_preflight_stops_before_release_test_actions(
 	assert not release_action.exists()
 
 
+def test_provider_release_candidate_preflight_reuses_the_allocated_path(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	from types import SimpleNamespace
+
+	candidate = tmp_path / "candidate0"
+	names: list[str] = []
+
+	def mktemp(basename: str) -> Path:
+		names.append(basename)
+		candidate.mkdir()
+		return candidate
+
+	factory = SimpleNamespace(
+		getbasetemp=lambda: tmp_path,
+		mktemp=mktemp,
+	)
+	item = SimpleNamespace(
+		name="test_release_controller_audits_with_candidate_policy_when_source_pin_is_previous",
+		path=Path(conftest.__file__).with_name("test_release.py"),
+		fixturenames=("release_candidate_path",),
+		stash={},
+	)
+	session = SimpleNamespace(
+		items=(item,), config=SimpleNamespace(_tmp_path_factory=factory)
+	)
+	monkeypatch.setattr(conftest, "_default_release_workspace", lambda: None)
+
+	conftest._preflight_release_test_paths(session)
+
+	assert names == ["candidate"]
+	assert item.stash[conftest._RELEASE_CANDIDATE_PATH] == candidate
+	assert candidate.is_dir()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows release workspace path check only")
 def test_release_controller_rejects_long_final_path_before_artifact_actions(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -342,9 +377,11 @@ def test_release_controller_executes_the_verified_wheel(
 
 
 def test_release_controller_audits_with_candidate_policy_when_source_pin_is_previous(
-	tmp_path: Path,
+	release_candidate_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+	# Leave room for wheel names beneath the nested Windows Gate cache staging.
+	tmp_path = release_candidate_path
 	_source(tmp_path, version="2.2.0", policy_release="v2.1.0")
 	marker = tmp_path / "release-probe.txt"
 	monkeypatch.setenv("QUALITY_GATE_RELEASE_PROBE", str(marker))

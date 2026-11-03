@@ -25,6 +25,7 @@ from quality_gate.contracts import load_manifest
 from quality_gate.distribution import (
 	DistributionError,
 	ExternalTool,
+	PolicyCache,
 	ReleaseManifest,
 	default_cache_root,
 	verify_release,
@@ -35,6 +36,7 @@ from quality_gate.distribution import (
 from quality_gate.edit_check import Invocation
 from quality_gate.edit_check import execute as execute_edit_check
 from quality_gate.edit_inputs import Configuration
+from quality_gate.edit_policy import ruff_artifact, tool_path
 from quality_gate.edit_protocol import (
 	SUPPORTED_POLICIES as EDIT_SUPPORTED_POLICIES,
 )
@@ -75,6 +77,7 @@ RELEASED_EDIT_POLICIES = frozenset(
 		"v4.3.0",
 		"v4.4.0",
 		"v4.5.0",
+		"v4.6.0",
 	}
 )
 
@@ -541,8 +544,10 @@ def request(root: Path, cache: Path, *paths: str) -> dict[str, Any]:
 	}
 
 
-def invoke(payload: object) -> tuple[int, dict[str, Any]]:
+def invoke(payload: object, *, engine_wheel: Path | None = None) -> tuple[int, dict[str, Any]]:
 	invocation_environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+	if engine_wheel is not None:
+		invocation_environment["PYTHONPATH"] = str(engine_wheel)
 	if isinstance(payload, dict) and isinstance(payload.get("root"), str):
 		project = Path(payload["root"])
 		# Keep mutable result reuse local to this test, independently of shared releases.
@@ -551,7 +556,7 @@ def invoke(payload: object) -> tuple[int, dict[str, Any]]:
 	result = subprocess.run(
 		[sys.executable, "-B", "-m", "quality_gate.cli", "edit-check"],
 		input=payload if isinstance(payload, bytes) else json.dumps(payload).encode(),
-		cwd=REPOSITORY,
+		cwd=REPOSITORY if engine_wheel is None else engine_wheel.parent,
 		env=invocation_environment,
 		capture_output=True,
 		check=False,
@@ -624,6 +629,67 @@ def test_import_layout_change_invalidates_reuse(
 	assert changed["files"][0]["sha256"] == digest(path.read_bytes())
 	assert changed["files"][0]["findings"] == []
 	assert module.read_bytes() == b"# Local module appeared after the previous checks.\n"
+
+
+@pytest.mark.parametrize("from_wheel", [False, True])
+def test_nested_package_import_order_matches_full_tree(
+	tmp_path: Path, engine_wheel: Path, from_wheel: bool
+) -> None:
+	cache = prepare_edit_cache(tmp_path / "cache")
+	root = tmp_path / "project"
+	package = root / "hooks" / "_shared"
+	package.mkdir(parents=True)
+	marker = package / "__init__.py"
+	marker.write_bytes(b"# Preserve this unrelated package marker.\n")
+	path = package / "example.py"
+	path.write_bytes(
+		b"from _shared.helper import value\nfrom python_types.helper import other\n"
+		b"\nresult = (value, other)\n"
+	)
+	engine = engine_wheel if from_wheel else None
+	wheel_hash = digest(engine_wheel.read_bytes())
+	exit_code, result = invoke(
+		request(root, cache, "hooks/_shared/example.py"), engine_wheel=engine
+	)
+	assert exit_code == 0, result
+	assert path.read_bytes() == (
+		b"from python_types.helper import other\n\nfrom _shared.helper import value\n"
+		b"\nresult = (value, other)\n"
+	)
+	assert marker.read_bytes() == b"# Preserve this unrelated package marker.\n"
+	release = cache / "releases/v2.4.2"
+	artifact = ruff_artifact(release, verify_release_cache(release))
+	ordinary = subprocess.run(
+		[
+			str(tool_path(PolicyCache(cache), artifact.sha256)),
+			"check",
+			"--no-cache",
+			"--config",
+			str(release / "quality_gate/policy/ruff.toml"),
+			"--output-format",
+			"json",
+			str(path),
+		],
+		cwd=root,
+		capture_output=True,
+		check=False,
+		timeout=10,
+	)
+	assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
+	assert json.loads(ordinary.stdout) == result["files"][0]["findings"] == []
+	_, warm = invoke(request(root, cache, "hooks/_shared/example.py"), engine_wheel=engine)
+	assert warm["process_count"] == REUSED_PROCESSES
+	marker.unlink()
+	exit_code, changed = invoke(
+		request(root, cache, "hooks/_shared/example.py"), engine_wheel=engine
+	)
+	assert exit_code == 0, changed
+	assert changed["process_count"] == FRESH_PROCESSES
+	assert path.read_bytes() == (
+		b"from _shared.helper import value\nfrom python_types.helper import other\n"
+		b"\nresult = (value, other)\n"
+	)
+	assert digest(engine_wheel.read_bytes()) == wheel_hash
 
 
 def test_policy_selection_change_requires_fresh_ruff(tmp_path: Path, wheel_cache: Path) -> None:

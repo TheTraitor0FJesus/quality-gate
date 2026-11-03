@@ -157,8 +157,8 @@ def _full_capacity(
 ) -> Iterator[list[tuple[subprocess.Popen[str], Path]]]:
 	cache_root = tmp_path / "machine-cache" / "quality-gate"
 	holders = [
-		_start_holder(cache_root, tmp_path / "repository-a"),
-		_start_holder(cache_root, tmp_path / "repository-b"),
+		_start_holder(cache_root, tmp_path / f"repository-{index}")
+		for index in range(admission.SLOT_COUNT)
 	]
 	try:
 		yield holders
@@ -491,14 +491,17 @@ def test_nested_cli_check_uses_its_live_parent_lease(
 	monkeypatch.setenv("LOCALAPPDATA", "unrelated-parent-appdata")
 	monkeypatch.setenv("XDG_CACHE_HOME", "unrelated-parent-xdg-cache")
 	cache_root = tmp_path / "machine-cache" / "quality-gate"
-	other = _start_holder(cache_root, tmp_path / "other-repository")
+	others = [
+		_start_holder(cache_root, tmp_path / f"other-repository-{index}")
+		for index in range(admission.SLOT_COUNT - 1)
+	]
 	project_root = _nested_project(tmp_path / "nested-project")
 
 	try:
 		with admission.gate_admission(cache_root=cache_root):
 			environment = runner._safe_environment(str(tmp_path / "nested-temporary"))
 			assert environment[admission._LEASE_ROOT_ENVIRONMENT] == str(cache_root.resolve())
-			assert environment[admission._LEASE_SLOT_ENVIRONMENT] in {"0", "1"}
+			assert environment[admission._LEASE_SLOT_ENVIRONMENT] == "3"
 			assert environment[admission._LEASE_PROOF_ENVIRONMENT]
 			assert "LOCALAPPDATA" not in environment
 			assert "XDG_CACHE_HOME" not in environment
@@ -526,7 +529,7 @@ def test_nested_cli_check_uses_its_live_parent_lease(
 		assert "candidate.snapshot" in result.stdout
 		assert "queue wait" not in result.stdout
 	finally:
-		_stop_holders([other])
+		_stop_holders(others)
 
 
 def _nested_project(root: Path) -> Path:

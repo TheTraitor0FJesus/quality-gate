@@ -1722,6 +1722,119 @@ def test_cleanup_area_recovery_restores_nonempty_quarantined_directory(tmp_path:
 		os.close(cleanup_descriptor)
 
 
+def test_removal_rescans_tree_after_repeated_nonempty_errors(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	temp_root = tmp_path / "temp"
+	workspace = temp_root / "qg-retry"
+	victim = workspace / "victim"
+	victim.mkdir(parents=True)
+	identity = victim.lstat()
+	original_remove = temp_workspace._remove_collected_directory
+	transient_errors = 8
+	attempts = 0
+
+	def fail_first_removals(
+		path: Path, expected: os.stat_result, *, deadline: float | None = None
+	) -> None:
+		nonlocal attempts
+		if path == victim and attempts < transient_errors:
+			attempts += 1
+			raise OSError(errno.ENOTEMPTY, "directory not empty", os.fspath(path))
+		original_remove(path, expected, deadline=deadline)
+
+	monkeypatch.setattr(temp_workspace, "_remove_collected_directory", fail_first_removals)
+
+	temp_workspace._remove_entry(victim, expected_identity=identity)
+
+	assert attempts == transient_errors
+	assert not victim.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX quarantine uses directory descriptors")
+def test_removal_rescans_directory_when_entries_keep_appearing_after_quarantine(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	temp_root = tmp_path / "temp"
+	workspace = temp_root / "qg-rescan"
+	workspace.mkdir(parents=True)
+	victim = workspace / "victim"
+	victim.mkdir()
+	identity = victim.lstat()
+	original_move = temp_workspace._rename_entry_to_cleanup_area
+	late_entry_count = 8
+	injected_entries = 0
+
+	def add_entry_after_quarantine(
+		path: Path,
+		quarantine_name: str,
+		parent_descriptor: int,
+		cleanup_descriptor: int,
+	) -> None:
+		nonlocal injected_entries
+		original_move(path, quarantine_name, parent_descriptor, cleanup_descriptor)
+		if path != victim or injected_entries == late_entry_count:
+			return
+		late_entry_name = f"late-entry-{injected_entries}"
+		injected_entries += 1
+		directory_descriptor = os.open(
+			quarantine_name,
+			os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+			dir_fd=cleanup_descriptor,
+		)
+		try:
+			file_descriptor = os.open(
+				late_entry_name,
+				os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+				0o600,
+				dir_fd=directory_descriptor,
+			)
+			with os.fdopen(file_descriptor, "wb") as late_entry:
+				late_entry.write(b"created during quarantine")
+		finally:
+			os.close(directory_descriptor)
+
+	monkeypatch.setattr(temp_workspace, "_rename_entry_to_cleanup_area", add_entry_after_quarantine)
+
+	temp_workspace._remove_entry(victim, expected_identity=identity)
+
+	assert injected_entries == late_entry_count
+	assert not victim.exists()
+
+
+def test_temporary_workspace_cleanup_retries_each_directory_independently(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	monkeypatch.setattr(temp_workspace, "_user_state_directory", lambda: tmp_path / "state")
+	original_remove = temp_workspace._remove_collected_directory
+	victims: set[Path] = set()
+	interrupted: set[Path] = set()
+
+	def interrupt_each_directory_once(
+		path: Path, expected: os.stat_result, *, deadline: float | None = None
+	) -> None:
+		if path in victims and path not in interrupted:
+			interrupted.add(path)
+			raise OSError(errno.ENOTEMPTY, "directory not empty", os.fspath(path))
+		original_remove(path, expected, deadline=deadline)
+
+	monkeypatch.setattr(
+		temp_workspace, "_remove_collected_directory", interrupt_each_directory_once
+	)
+
+	with temporary_workspace(tmp_path / "repository") as workspace:
+		for index in range(temp_workspace._DIRECTORY_REMOVAL_MAX_RESCANS + 8):
+			victim = workspace / f"victim-{index}"
+			victim.mkdir()
+			victims.add(victim)
+
+	assert interrupted == victims
+	assert not workspace.exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows deletion uses file-handle identity")
 @pytest.mark.parametrize("entry_kind", ["file", "link", "directory"])
 def test_removal_preserves_entry_replaced_after_identity_check(
