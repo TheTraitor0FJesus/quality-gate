@@ -33,6 +33,7 @@ required_documents = [
     "docs/edit-secrets.md",
     "docs/edit-integrity.md",
     "docs/edit-types.md",
+    "codex_hooks/README.md",
     "docs/architecture.md",
     "docs/coding-standards.md",
     "docs/lessons.md",
@@ -72,5 +73,20 @@ path = "quality_gate"
 python_version = "3.12"
 dependency_inputs = ["pyproject.toml"]
 test_paths = ["tests"]
+tests_applicable = true
+timeout_seconds = 300
+
+[[python]]
+name = "codex-hooks"
+path = "codex_hooks"
+python_version = "3.12"
+dependency_inputs = []
+test_paths = [
+    "codex_hooks/_shared/tests",
+    "codex_hooks/file_integrity/tests",
+    "codex_hooks/python_quality/tests",
+    "codex_hooks/python_types/tests",
+    "codex_hooks/secret_scan/tests",
+]
 tests_applicable = true
 timeout_seconds = 300

@@ -1,0 +1,1 @@
+"""Typing hook behavior tests."""
