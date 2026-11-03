@@ -70,7 +70,11 @@ release. It must not import mutable source from this repository or depend on Cod
 1. Identify whether the change affects a shared policy, the runner, the manifest contract, or CI behavior.
 2. Update the source of truth in this repository. Do not add a project-local override to weaken a shared rule.
 3. Update focused tests when runner behavior or manifest handling changes.
-4. Run the relevant tests and the current-source `quality-gate check` from this repository.
+4. Run the relevant focused tests. The authorized commit hook runs the staged Quality Gate; this
+   policy-change procedure does not require a separate current-source check. The only routine
+   pre-review Gate outside the hook is the one explicitly required by `$implement`; a direct user
+   request can also request a standalone check. Dispatch that check through test-runner with
+   `scope.kind = "quality-gate"` and `snapshot = "staged"`.
 5. Run `quality-gate audit` and the release controller before publishing a policy release.
 6. Inspect the diff for unintended changes to the shared policy or CI workflow.
 7. Commit and push to `main` only after the checks pass.
@@ -90,7 +94,9 @@ It may also declare repository-owned supplemental tests with `[[supplemental_tes
 the `node-test` runner and repository-relative targets. The manifest validator checks their
 identities, matches, and bounded expansion size; the Quality Gate never executes them. The typed
 test-runner expands validated targets without shell expansion and executes concrete paths as part
-of its `scope: full` orchestration. Repository CI remains responsible for their normal enforcement.
+of its `scope: full` orchestration, alongside pytest stages for each applicable Python component's
+declared `test_paths`. The manifest preflight runs `validate`; the staged Gate uses the separate
+`quality-gate` scope. Repository CI remains responsible for their normal enforcement.
 
 Each Python component with dependency inputs receives one `python.component_N.deptry` result. Deptry compares imports with the declared runtime and development dependencies. Custom requirements file names must be classified by `tool.deptry.requirements_files` or `tool.deptry.requirements_files_dev`; an unclassified input is `unchecked`. A component must use either one `pyproject.toml` or classified requirements files because deptry does not analyze both formats together; mixed formats are `unchecked`. A waiver target uses the exact `<path>::<DEP-code>::<module>` form so that dynamic, plugin, entry-point, and configuration-driven dependencies do not suppress unrelated findings. Native deptry ignore, per-rule-ignore, exclude, and inline-ignore mechanisms are rejected because the typed manifest waiver is the only suppression contract. Jupyter notebooks are explicitly outside this Python source contract and are not scanned. Missing tools, missing metadata, and invalid deptry reports are `unchecked`.
 

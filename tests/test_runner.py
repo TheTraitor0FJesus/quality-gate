@@ -358,6 +358,20 @@ def test_expired_admission_returns_before_snapshot_construction(
 	assert verdict.results[0].status is runner.Status.UNCHECKED
 
 
+def test_progress_does_not_claim_preparation_after_admission_failure(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+	def reject_admission() -> AbstractContextManager[None]:
+		raise AdmissionError("queue expired", "retry")
+
+	monkeypatch.setattr(runner, "running_in_ci", lambda: False)
+	monkeypatch.setattr(runner, "gate_admission", reject_admission)
+	runner._run_snapshot(tmp_path)
+	output = capsys.readouterr().err
+	assert "wait for completion without polling" in output
+	assert "preparation completed" not in output
+
+
 def test_check_skips_local_admission_in_ci(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 	monkeypatch.setattr(runner, "running_in_ci", lambda: True)
 	monkeypatch.setattr(
