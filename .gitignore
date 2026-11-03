@@ -1,5 +1,4 @@
 .quality-gate-tmp/
-.quality-gate-edit-*/
 /temp/
 .venv/
 build/

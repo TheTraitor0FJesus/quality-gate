@@ -11,7 +11,6 @@ Use this map before non-trivial codebase questions, design work, or code changes
 - **Temporary workspace.** `quality_gate/temp_workspace.py` reclaims an inactive `qg-` directory only when a user-local HMAC key validates its root-level owner record and directory identity, the marker and active-lock identities match, and Gate acquires the run lock. A signed cleanup record binds both control-file identities and permits recovery after partial removal. Keys and cleanup records are published only after complete writes; a separate recovery key preserves an incomplete older key. Deletion checks identity atomically through a Windows file handle or a private POSIX cleanup area selected by key. POSIX retains authenticated areas for journal recovery. A name prefix or marker alone does not authorize deletion. The module preserves foreign files and directories, unrecognized entries, legacy `.quality-gate-edit-*` directories, active runs and the root lock. It routes Python and child-process temporary files into a per-run directory and removes owned workspaces at exit. Read-only checkouts and candidate snapshots use a private hashed workspace per repository under user-local system temp. Staging beside persistent caches and atomic replacement targets stays beside those targets.
 - **Path safety** — `quality_gate/path_safety.py` centralizes symlink and Windows reparse-point predicates shared by edit-input validation, source inventory and temporary-workspace cleanup.
 - **Local runtime** — the stable native wrapper reads the staged schema 2 manifest, verifies the declared wheel in the immutable user cache, and launches that exact release without importing mutable repository source; `quality_gate/runtime.py` creates a separate component runtime per repository and fingerprint of policy, component, Python, and dependency inputs.
-- **Codex Python Quality hook** — `codex_hooks/` is the canonical checkout-only source for the shell event coordinator, Python checks, and Post-edit handler; its tests are declared as the `codex-hooks` Python component in `quality-gate.toml`. Codex registrations point directly into this directory, while per-user settings and installation receipts remain under the active `CODEX_HOME`. The hook source is excluded from the published wheel. See [the Windows operating guide](../codex_hooks/README.md) for installation and operation.
 - **CI integration** — `.github/workflows/quality.yml` is the reusable GitHub workflow boundary; it checks out `job.workflow_repository` at `job.workflow_sha`, bootstraps Python before reading component versions, selects a platform-specific immutable release asset, and uses `quality_gate/ci_release.py` plus `quality_gate/release_contract.py` to verify GitHub release immutability, the GitHub-reported asset digest, the exact unified inventory, every declared release file, and safe extraction paths; `.github/workflows/parity.yml` runs the release-backed Python/web/supplemental fixture on Windows and Linux from dispatch or schedule, uploads machine-readable results, and compares them in a separate job; every external Action is pinned to a full commit SHA, and pull requests pass explicit range refs to the same CLI gate.
 - **Project contract** — `quality_gate/contracts.py` is the source of truth for schema 2 repository, Python/web component, supplemental-test, verdict, and waiver models; `quality_gate/policy/biome.json` and `quality_gate/policy/biome.toml` are the pinned web-tool policy and platform inventory; `templates/quality-gate.toml` is the manifest shape and `templates/quality.yml` plus `templates/dependabot.yml` are the consumer CI shapes generated for a project by `$setup-repo`.
 - **Learning contract** — `docs/lessons.md` defines the English Markdown lesson format; `quality_gate/lessons.py` validates lessons and provides the audit and release readiness results.
@@ -21,11 +20,6 @@ Use this map before non-trivial codebase questions, design work, or code changes
 - **Product release** — `.release/version.toml` is the product-version authority; `.release/notes.md` contains reviewed changes; `.release/publisher.toml` declares product projections and required producers. The provider source manifest stays pinned to the latest published policy through candidate verification, while the consumer template projects the product release; the provider activates its new policy after publication. `scripts/release_build.py` drives the existing platform checks; `scripts/release_adapter.py` owns package construction, installation, and isolated runtime/audit validation; `scripts/release_metadata.py` supplies product metadata. Follow [the local release contract](release.md) when preparing a candidate.
 
 ## Flows
-
-The checkout hook's `_shared/quality_diagnostics.py` owns the source-free incomplete-result
-vocabulary and retained diagnostic envelope. Event, coordinator and background producers
-preserve safe originating evidence for feedback. See the
-[diagnostic contract](../codex_hooks/DIAGNOSTICS.md) for failed-Pre pairing and recovery.
 
 - **Working-tree edit checking** — the public `edit-check` command and `quality-gate-edit`
   entry point use `edit_cli.py` and `edit_protocol.py` for bounded JSON and one caller deadline;
@@ -74,66 +68,8 @@ preserve safe originating evidence for feedback. See the
   optional `typecheck` opt-out, component-relative `stub_roots`, and policy-gated
   repository-relative `source_roots`; the provider resolves both path sets only
   from captured sources.
-  The checkout host's `python_types/coverage.py` derives allowed roots from the
-  independently hashed manifest, checks exact directory closure and source inventory,
-  and includes typed package markers in the v4.6.0 configuration certificate.
   See the [wire contract](edit-types.md)
   and [interface verification requirements](release.md#working-tree-interface-verification).
-
-- **Codex edit checks** — shell `PreToolUse`/`PostToolUse` registrations invoke
-  `codex_hooks/_shared/quality_coordinator.py`; the `apply_patch` Post-edit registration
-  invokes `codex_hooks/python_quality/post_edit_checks.py`. The coordinator reads the
-  user-selected checks from `CODEX_HOME/hooks/_shared/python-quality.json`, and its
-  managed receipt also remains in `CODEX_HOME`. A receipt with `paused: true` makes
-  both registered entry points return silently before reading events or running checks.
-  Supported reinstall/prepare/activate preserves an existing user pause.
-  Findings require an in-scope fix; the hook checks the next edit automatically.
-  A completed failed shell call with valid paired snapshots and no observed file changes
-  needs no edit verification and emits no attribution warning. Partial changes from a failed
-  call and missing completion or snapshot evidence remain unchecked.
-  Unchecked feedback preserves known recovery identifiers and the host-owned repository
-  and input paths; these paths identify the requested scope, not an exact failing file.
-  Incomplete verification requires
-  immediate user reporting with available safe diagnostic context. Previously authorized
-  diagnosis or repair continues within its agreed scope without repeated approval for the
-  same unresolved condition; otherwise the task pauses for user instructions.
-  Clean, pending and inapplicable results remain silent.
-  Keep this checkout source available at
-  the paths stored in the user's `hooks.json`.
-  A security-blocking Pre response discards its own shell snapshot, because the
-  rejected tool call cannot deliver the matching Post event.
-  Shell capture/read transitions wait within the original caller deadline when a live
-  peer holds their state lock; other transactions keep the default 100 ms acquisition limit.
-  Captures retain session, turn and call identities. Main-thread Stop and
-  Interrupt clean their turn's captures only after command completion is confirmed;
-  Interrupt uses bounded cancellation rather than Stop's result drain.
-  `quality_completion.py` isolates structured-output, JSONL and optional read-only
-  host-history adapters. The bounded history query follows host-recorded started
-  subagents because their hook session identity belongs to the parent while command
-  records belong to the child. Exact turn/call/cwd checks remain required.
-  Unknown storage preserves ownership. A new Pre may reclaim
-  legacy captures only after both command and turn completion are confirmed.
-  An explicitly failed launch without a host exec session may be reclaimed within
-  the same turn; missing process metadata does not establish that exception.
-  If an exact terminal turn has no item for a captured call, its snapshot moves to
-  events/unconfirmed, allowing a fresh baseline. An unchecked warning is emitted only
-  when its baseline differs from the new snapshot or cannot be compared, without
-  claiming verification or process termination for the earlier call.
-  SubagentStop preserves parent-turn captures; SessionEnd retains session cleanup.
-  Shell snapshots exclude the root `temp/` and legacy `.quality-gate-edit-*`
-  workspace directories, so concurrent checks do not become attributed edits.
-  Overlapping shell calls keep separate captures and mark their observations
-  concurrent. The coordinator checks the observed content with all selected
-  readers and skips its foreground writer for that ambiguous scope. Observed
-  changes do not establish exclusive authorship. Native-history paths are
-  checked for unsafe links before canonicalizing Windows aliases for ownership.
-  When the Gate secret reader is disabled, builtin protection remains synchronous.
-  The existing heavy-security opt-in queues Semgrep/detect-secrets as the internal
-  legacy_security reader in the same background lifecycle. Tool errors without
-  real findings remain unchecked; real findings fail. The legacy reader verifies
-  captured bytes again after scanning.
-  Worker recovery preserves deadline and cancellation reasons when analysis or
-  result publication exhausts its budget; those outcomes remain unchecked.
 
 - **Dependabot review and patch auto-merge.** `.github/workflows/dependabot-review.yml` handles
   non-draft Dependabot PRs targeting `main` from trusted base metadata. Its only job grants

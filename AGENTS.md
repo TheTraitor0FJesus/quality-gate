@@ -4,7 +4,7 @@ Python 3.11+ CLI providing a shared quality contract for local Git hooks and Git
 
 ## Project map
 
-`quality_gate/` contains the CLI, runner, release machinery, and shared `policy/`; `tests/` contains Quality Gate tests; `codex_hooks/` contains the checkout-only Codex Python Quality hook and its tests, which are not included in the published wheel; `templates/` contains consumer configuration; `.github/workflows/` contains CI; `docs/` contains project and hook operating guides.
+`quality_gate/` contains the CLI, runner, release machinery, and shared `policy/`; `tests/` contains tests; `templates/` contains consumer configuration; `.github/workflows/` contains CI; `docs/` contains project contracts.
 
 ## Agent skills
 
