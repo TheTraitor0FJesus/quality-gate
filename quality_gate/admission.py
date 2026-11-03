@@ -22,9 +22,8 @@ from .distribution import default_cache_root
 QUEUE_TIMEOUT_ENV = "QUALITY_GATE_QUEUE_TIMEOUT_SECONDS"
 DEFAULT_QUEUE_TIMEOUT_SECONDS = 120
 MAX_QUEUE_TIMEOUT_SECONDS = 240
-SLOT_COUNT = 2
+SLOT_COUNT = 4
 POLL_INTERVAL_SECONDS = 0.1
-WAIT_NOTICE_INTERVAL_SECONDS = 30
 RELEASE_CONTROL_WAIT_SECONDS = 0.5
 _SLOT_LOCK_NAME = ".gate-admission-{slot}.lock"
 _CONTROL_LOCK_NAME = ".gate-admission-control.lock"
@@ -41,7 +40,7 @@ _LEASE_ENVIRONMENT = (
 	_LEASE_ROOT_ENVIRONMENT,
 )
 _TOKEN_PATTERN = re.compile(r"^[0-9a-f]{32}$")
-_SLOT_PATTERN = re.compile(r"^[01]$")
+_SLOT_PATTERN = re.compile(r"^[0-3]$")
 _RECORD_PATTERN = re.compile(r"^QG1 ([1-9][0-9]{0,9}) ([0-9a-f]{64})$")
 _active_lease: ContextVar[_Lease | None] = ContextVar("quality_gate_active_lease", default=None)
 
@@ -323,11 +322,6 @@ def _emit_waiting() -> None:
 	sys.stderr.flush()
 
 
-def _emit_progress() -> None:
-	sys.stderr.write("QUALITY GATE: still waiting for a local run slot.\n")
-	sys.stderr.flush()
-
-
 def _emit_acquired() -> None:
 	sys.stderr.write("QUALITY GATE: local run slot acquired; continuing the check.\n")
 	sys.stderr.flush()
@@ -357,7 +351,6 @@ def _acquire(
 		raise OSError(f"gate admission cache root is not a regular directory: {root}")
 	deadline = time.monotonic() + timeout_seconds
 	waited = False
-	next_notice = 0.0
 	while True:
 		lease = _inherited_lease(*inherited_identity) if inherited_identity is not None else None
 		if lease is None:
@@ -368,10 +361,6 @@ def _acquire(
 		if not waited:
 			_emit_waiting()
 			waited = True
-			next_notice = now + WAIT_NOTICE_INTERVAL_SECONDS
-		elif now >= next_notice:
-			_emit_progress()
-			next_notice = now + WAIT_NOTICE_INTERVAL_SECONDS
 		if now >= deadline:
 			raise AdmissionError(
 				(
@@ -445,7 +434,7 @@ def _release(lease: _Lease) -> None:
 
 @contextmanager
 def gate_admission(*, cache_root: Path | None = None) -> Iterator[None]:
-	"""Hold one of two machine-local slots for one complete Gate run."""
+	"""Hold one of four machine-local slots for one complete Gate run."""
 	queue_timeout = queue_timeout_seconds()
 	requested_root = cache_root.expanduser().resolve() if cache_root is not None else None
 	active_lease = _active_lease.get()

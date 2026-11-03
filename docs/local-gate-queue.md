@@ -1,6 +1,6 @@
 # Local Gate queue
 
-The local full Gate uses two machine-wide slots shared by repositories for the current user. A
+The local full Gate uses four machine-wide slots shared by repositories for the current user. A
 run acquires one slot before building its candidate snapshot and keeps it through `check` or
 `audit`. Other runs display a waiting message and continue automatically when a slot opens. The
 operating system releases a slot when its process exits, including after a crash.
@@ -11,7 +11,7 @@ commands. GitHub Actions skips this local wait so its existing job deadline rema
 
 Queue time has a separate budget from Gate execution. The default is 120 seconds. Set
 `QUALITY_GATE_QUEUE_TIMEOUT_SECONDS` to a whole number from 0 through 240 to change it. Zero makes
-the command try an available slot once and stop immediately if both slots are occupied. If the
+the command try an available slot once and stop immediately if all slots are occupied. If the
 budget expires, Quality Gate reports that no check ran. It does not build a snapshot or return a
 pass.
 
@@ -48,6 +48,8 @@ ahead into the locked byte. Descendants receive only a
 canonical admission root, slot, and token from an active lease. They must confirm a live slot
 lock and the matching token under the control lock before reusing it. An explicit provider cache
 root selects an isolated namespace.
+Older two-slot releases reject inherited slots 2 and 3, so a nested Gate using one of those
+releases can return `unchecked` when its four-slot parent holds either new slot.
 
 Release waits at most 0.5 seconds for the control lock, then closes its OS slot handle even if
 the control lock remains busy. The next owner replaces stale metadata. Safe child environments
