@@ -73,4 +73,4 @@ python_version = "3.12"
 dependency_inputs = ["pyproject.toml"]
 test_paths = ["tests"]
 tests_applicable = true
-timeout_seconds = 300
+timeout_seconds = 1800

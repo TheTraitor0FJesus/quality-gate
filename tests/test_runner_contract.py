@@ -28,7 +28,9 @@ def _selected_settings_root(environment: Mapping[str, str], profile: Path) -> Pa
 def _test_runner_instructions(settings_root: Path) -> str:
 	path = settings_root / "agents" / "test-runner.toml"
 	if not path.is_file():
-		pytest.skip(f"typed test-runner configuration is missing under selected settings root: {path}")
+		pytest.skip(
+			f"typed test-runner configuration is missing under selected settings root: {path}"
+		)
 	document = tomllib.loads(path.read_text(encoding="utf-8"))
 	if "developer_instructions" in document:
 		return document["developer_instructions"]
@@ -47,7 +49,9 @@ def test_explicit_settings_root_selects_runner_instructions(tmp_path: Path) -> N
 	_write_runner_config(selected_root, "selected root")
 	_write_runner_config(profile_root / ".codex", "profile fallback")
 
-	assert _selected_settings_root({"CODEX_HOME": str(selected_root)}, profile_root) == selected_root
+	assert (
+		_selected_settings_root({"CODEX_HOME": str(selected_root)}, profile_root) == selected_root
+	)
 	assert _test_runner_instructions(selected_root) == "selected root"
 
 
@@ -102,14 +106,20 @@ def test_prompt_contract_full_scope_runs_python_and_supplementals_without_a_gate
 		"and select `quality-gate --root <repo> check`"
 	) in instructions
 	assert "every applicable Python stage and every supplemental stage" in instructions
+	assert "even after an earlier completed failure or an unavailable component" in instructions
+	assert "Only `scope.kind: quality-gate` selects the staged Gate" in instructions
 
 
 def test_manifestless_full_scope_prompt_contract_keeps_ordinary_suite_discovery() -> None:
 	settings_root = _selected_settings_root(os.environ, Path.home())
-	instructions = _test_runner_instructions(settings_root)
+	instructions = " ".join(_test_runner_instructions(settings_root).split())
 
 	assert "For `full` without `quality-gate.toml`" in instructions
 	assert "for discovered `full` without a manifest, add no selector" in instructions
+	assert (
+		"For manifest-backed `full`, select exactly each component's declared test paths"
+		in instructions
+	)
 
 
 def _git(root: Path, *arguments: str) -> None:

@@ -27,6 +27,10 @@ from quality_gate.native_cache import (
 	NativeToolCacheSelection,
 	native_tool_source_workspace,
 )
+from quality_gate.operation import GateOperation, OperationTimeoutError, observe_check
+from quality_gate import operation as operation_module
+from quality_gate.edit_protocol import EditError
+from quality_gate.contracts import CheckResult, Status
 
 MEASUREMENT_WARM_RUNS = 5
 MEASUREMENT_EXPECTED_TOOL_RUNS = (MEASUREMENT_WARM_RUNS + 2) * 2
@@ -150,12 +154,157 @@ def test_source_cleanup_failure_does_not_override_successful_tool(
 		):
 			assert effective.storage == "persistent"
 			assert (workspace_root / "module.py").is_file()
-			monkeypatch.setattr(
-				native_cache_module, "_remove_owned_source_workspace", fail_cleanup
-			)
+			monkeypatch.setattr(native_cache_module, "_remove_owned_source_workspace", fail_cleanup)
 			tool_completed = True
 
 	assert tool_completed
+
+
+def test_operation_owns_native_source_workspace_until_shared_cleanup(
+	tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+	# The supervised child uses the real Windows path limit, unlike in-process fixtures.
+	cache = NativeToolCache(tmp_path_factory.mktemp("nc"))
+	identity = _identity()
+	private_cache = tmp_path / "private-cache"
+	snapshot_root = tmp_path / "snapshot"
+	snapshot_root.mkdir()
+	(snapshot_root / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	operation = GateOperation(repository, "check", timeout_seconds=10, cleanup_seconds=3)
+	staged_root: Path | None = None
+
+	with operation:
+		with cache.lease(identity, private_cache, operation=operation) as selection:
+			with native_tool_source_workspace(
+				selection, snapshot_root, private_cache, operation=operation
+			) as (effective, workspace_root):
+				assert effective.storage == "persistent", effective.fallback_reason
+				staged_root = workspace_root
+			assert workspace_root.is_dir()
+
+	assert staged_root is not None
+	assert not staged_root.exists()
+	assert operation.stages[-1].stage == "cleanup"
+	with cache.lease(identity, private_cache) as selection:
+		assert selection.storage == "persistent"
+
+
+def test_operation_deadline_prevents_native_source_preparation_after_expiry(
+	tmp_path: Path,
+) -> None:
+	cache = NativeToolCache(tmp_path / "provider-cache")
+	identity = _identity()
+	private_cache = tmp_path / "private-cache"
+	snapshot_root = tmp_path / "snapshot"
+	snapshot_root.mkdir()
+	(snapshot_root / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	operation = GateOperation(repository, "check", timeout_seconds=10, cleanup_seconds=3)
+
+	with operation:
+		with cache.lease(identity, private_cache, operation=operation) as selection:
+			operation.deadline = time.monotonic() - 1
+			with pytest.raises(OperationTimeoutError):
+				with native_tool_source_workspace(
+					selection, snapshot_root, private_cache, operation=operation
+				):
+					pytest.fail("source preparation started after the operation deadline")
+
+	assert operation.timed_out
+
+
+def test_operation_cache_selection_does_not_start_after_deadline(tmp_path: Path) -> None:
+	cache = NativeToolCache(tmp_path / "cache")
+	gate = GateOperation(tmp_path, "check", cleanup_seconds=1)
+	entered = False
+	with gate:
+		gate.deadline = time.monotonic() - 1
+		with cache.lease(_identity(), tmp_path / "private", operation=gate):
+			entered = True
+	assert not entered
+	assert gate.timed_out
+
+
+def test_operation_cache_pruning_is_physically_bounded(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	cache = NativeToolCache(tmp_path / "cache")
+	old_identity = _identity(runtime_fingerprint="old")
+	with cache.lease(old_identity, tmp_path / "old-private") as selection:
+		payload = selection.path / "payload"
+		payload.mkdir()
+		(payload / "data").write_text("owned", encoding="utf-8")
+		marker = selection.path / ".quality-gate-native-cache.json"
+		value = json.loads(marker.read_text(encoding="utf-8"))
+		value["last_used_ns"] = 1
+		marker.write_text(json.dumps(value), encoding="utf-8")
+	real_remove = native_cache_module.shutil.rmtree
+
+	def slow_remove(*args: Any, **kwargs: Any) -> None:
+		time.sleep(2)
+		real_remove(*args, **kwargs)
+
+	monkeypatch.setattr(native_cache_module.shutil, "rmtree", slow_remove)
+	body = (
+		getattr(native_cache_module, "_NATIVE_CACHE_BODY", None)
+		or native_cache_module._SOURCE_PREPARE_BODY
+	)
+	monkeypatch.setattr(
+		native_cache_module,
+		"_NATIVE_CACHE_BODY",
+		"import time; time.sleep(2)\n" + body,
+		raising=False,
+	)
+	gate = GateOperation(tmp_path, "check", timeout_seconds=0.1, cleanup_seconds=0.5)
+	entered = False
+	started = time.monotonic()
+	with gate:
+		with cache.lease(
+			_identity(runtime_fingerprint="new"), tmp_path / "private", operation=gate
+		):
+			entered = True
+	assert not entered
+	assert gate.timed_out
+	assert time.monotonic() - started < 1
+	assert gate.stages[-1].stage == "cleanup" and gate.stages[-1].disposition == "executed"
+
+
+def test_operation_cache_source_worker_does_not_execute_the_tool(
+	tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	cache = NativeToolCache(tmp_path_factory.mktemp("nc"))
+	snapshot = tmp_path / "snapshot"
+	snapshot.mkdir()
+	(snapshot / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+	gate = GateOperation(tmp_path, "check", timeout_seconds=10, cleanup_seconds=1)
+	real_supervise = operation_module.supervise_process
+
+	def timeout_source(command: list[str], **kwargs: Any) -> tuple[int, bytes, bytes]:
+		if b'"snapshot_root"' in (kwargs.get("payload") or b""):
+			if kwargs.get("on_started") is not None:
+				kwargs["on_started"]()
+			gate.deadline = time.monotonic() - 1
+			raise EditError("deadline")
+		return real_supervise(command, **kwargs)
+
+	monkeypatch.setattr(operation_module, "supervise_process", timeout_source)
+
+	def check() -> CheckResult:
+		with cache.lease(_identity(), tmp_path / "private", operation=gate) as selection:
+			with native_tool_source_workspace(
+				selection, snapshot, tmp_path / "private", operation=gate
+			):
+				pytest.fail("tool body ran after source preparation timed out")
+		return CheckResult("python.component_1.ruff", Status.PASSED, "unexpected")
+
+	with gate:
+		observe_check("python.component_1.ruff", "snapshot", check, process_required=True)
+	result = next(item for item in gate.verdict().results if item.check_id.endswith(".ruff"))
+	assert result.status is Status.UNCHECKED
+	assert result.telemetry is not None and result.telemetry.disposition == "not-run"
 
 
 def test_interrupted_native_tool_source_workspace_is_recovered_under_lease(
@@ -213,9 +362,7 @@ def test_source_workspace_cleanup_preserves_replacement_stage_parent(
 				(stage_parent / "p").mkdir()
 				(stage_parent / "o").mkdir()
 				(stage_parent / "c").mkdir()
-				(stage_parent / "c" / "foreign.txt").write_text(
-					"preserve", encoding="utf-8"
-				)
+				(stage_parent / "c" / "foreign.txt").write_text("preserve", encoding="utf-8")
 
 		assert (stage_parent / "c" / "foreign.txt").read_text(encoding="utf-8") == "preserve"
 		assert (preserved_stage / "c" / "src" / "module.py").is_file()
@@ -709,9 +856,7 @@ def test_pathological_native_cache_marker_uses_private_fallback(
 		assert selection.storage == "persistent"
 		state = selection.path / "native-state"
 		state.write_text("keep", encoding="utf-8")
-		(selection.path / ".quality-gate-native-cache.json").write_text(
-			payload, encoding="utf-8"
-		)
+		(selection.path / ".quality-gate-native-cache.json").write_text(payload, encoding="utf-8")
 
 	with cache.lease(identity, tmp_path / "private-two") as fallback:
 		assert fallback.storage == "private"
@@ -728,7 +873,7 @@ def test_incomplete_native_cache_marker_temporary_is_recovered(tmp_path: Path) -
 		namespace_path = selection.path
 	(namespace_path / ".quality-gate-native-cache.json").unlink()
 	temporary = namespace_path / f"..quality-gate-native-cache.json.{os.getpid()}.tmp"
-	temporary.write_text("{\"owner\":", encoding="utf-8")
+	temporary.write_text('{"owner":', encoding="utf-8")
 
 	with cache.lease(identity, tmp_path / "private-two") as recovered:
 		assert recovered.storage == "persistent"

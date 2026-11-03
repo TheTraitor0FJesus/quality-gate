@@ -59,11 +59,14 @@ def test_old_manifest_default_preserves_runtime_fingerprint_contract(tmp_path: P
 def test_full_gate_reports_optout_and_keeps_other_python_checks(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+	monkeypatch.setattr(runner, "gate_admission", lambda: nullcontext())
 	(tmp_path / "app").mkdir()
 	(tmp_path / "app/source.py").write_text('value: int = "typing failure"\n', encoding="utf-8")
 	(tmp_path / "quality-gate.toml").write_text(manifest_text(), encoding="utf-8")
 	monkeypatch.setattr(
-		runner, "candidate_snapshot", lambda root: nullcontext(SimpleNamespace(root=root))
+		runner,
+		"candidate_snapshot",
+		lambda root, **_kwargs: nullcontext(SimpleNamespace(root=root)),
 	)
 	monkeypatch.setattr(
 		runner,

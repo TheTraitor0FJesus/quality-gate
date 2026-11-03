@@ -5,6 +5,14 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+	from .contracts import ValidationError
+	from .distribution import DistributionError
+	from .runner import QualityGateError
+	from .runtime import RuntimeUnavailable
+	from .temp_workspace import TemporaryWorkspaceError
 
 # Keep the documented script entry point usable while the package uses relative imports.
 if __package__ in {None, ""}:
@@ -175,96 +183,132 @@ def _dispatch(arguments: argparse.Namespace) -> int:
 	return verdict.exit_code
 
 
+def _run_edit_command(command: str) -> int:
+	from .edit_cli import main as edit_main
+
+	return edit_main(
+		secrets=command == "edit-secrets",
+		types=command == "edit-types",
+		integrity=command == "edit-integrity",
+	)
+
+
+def _run_edit_setup(arguments: argparse.Namespace) -> int:
+	from .distribution import DistributionError, PolicyCache
+	from .edit_policy import setup_tool
+	from .edit_protocol import EditError
+
+	try:
+		tool = setup_tool(PolicyCache(arguments.cache_dir), arguments.policy_release)
+		sys.stdout.write(f"edit-setup: ready - {tool}\n")
+		return 0
+	except (EditError, DistributionError, OSError, ValueError):
+		sys.stdout.write("edit-setup: unchecked - restore the exact release using sync and retry\n")
+		return 2
+
+
+def _dispatch_with_workspace(arguments: argparse.Namespace) -> int:
+	from .runner import repository_root
+	from .temp_workspace import temporary_workspace
+
+	if arguments.command in {"check", "audit"}:
+		return _dispatch(arguments)
+	if arguments.command in {"format", "setup", "doctor", "validate"}:
+		actual_root = repository_root(arguments.root)
+		with temporary_workspace(actual_root):
+			return _dispatch(arguments)
+	return _dispatch(arguments)
+
+
+def _render_workspace_error(arguments: argparse.Namespace, error: TemporaryWorkspaceError) -> int:
+	from .contracts import Verdict
+	from .reporting import render
+	from .runner import EXIT_UNCHECKED, QualityGateError, _error_result
+
+	if arguments.command in {"check", "audit"}:
+		quality_error = QualityGateError(
+			str(error),
+			check_id="temporary.workspace",
+			exit_code=EXIT_UNCHECKED,
+			recovery_action=(
+				"restore a writable repository temp directory and retry the quality gate"
+			),
+		)
+		sys.stdout.write(
+			render(
+				Verdict((_error_result(quality_error),)),
+				verbose=getattr(arguments, "verbose", False),
+			)
+		)
+		sys.stdout.write("\n")
+		return EXIT_UNCHECKED
+	sys.stdout.write(
+		f"temporary workspace: unchecked - {error}; "
+		"action: restore a writable repository temp directory and retry the quality gate\n"
+	)
+	return EXIT_UNCHECKED
+
+
+def _render_validation_error(error: ValidationError) -> int:
+	error_path = getattr(error, "path", "")
+	error_message = getattr(error, "message", str(error))
+	action = (
+		"review the schema 1 manifest and run migrate"
+		if error_path == "quality.schema"
+		else f"correct {error_path} and run validate"
+	)
+	sys.stdout.write(f"manifest: unchecked - {error_message}; action: {action}\n")
+	return 2
+
+
+def _render_quality_error(
+	arguments: argparse.Namespace,
+	error: QualityGateError | DistributionError | RuntimeUnavailable,
+) -> int:
+	from .contracts import Verdict
+	from .distribution import DistributionError
+	from .reporting import render
+	from .runner import QualityGateError, _error_result
+	from .runtime import RuntimeUnavailable
+
+	if isinstance(error, (DistributionError, RuntimeUnavailable)):
+		error = QualityGateError(
+			str(error),
+			check_id="runtime.available",
+			exit_code=2,
+			recovery_action="run sync or setup and retry the quality gate",
+		)
+	sys.stdout.write(
+		render(Verdict((_error_result(error),)), verbose=getattr(arguments, "verbose", False))
+	)
+	sys.stdout.write("\n")
+	return getattr(error, "exit_code", 2)
+
+
+def _run_standard_command(arguments: argparse.Namespace) -> int:
+	from .contracts import ValidationError
+	from .distribution import DistributionError
+	from .runner import QualityGateError
+	from .runtime import RuntimeUnavailable
+	from .temp_workspace import TemporaryWorkspaceError
+
+	try:
+		return _dispatch_with_workspace(arguments)
+	except TemporaryWorkspaceError as error:
+		return _render_workspace_error(arguments, error)
+	except ValidationError as error:
+		return _render_validation_error(error)
+	except (QualityGateError, DistributionError, RuntimeUnavailable) as error:
+		return _render_quality_error(arguments, error)
+
+
 def main() -> int:
 	arguments = parser().parse_args()
 	if arguments.command in {"edit-check", "edit-secrets", "edit-types", "edit-integrity"}:
-		from .edit_cli import main as edit_main
-
-		return edit_main(
-			secrets=arguments.command == "edit-secrets",
-			types=arguments.command == "edit-types",
-			integrity=arguments.command == "edit-integrity",
-		)
-	# The edit path shares the JSON-only entry's lean startup. Full Gate modules
-	# are loaded only for commands which need their repository orchestration.
-	from .contracts import ValidationError, Verdict
-	from .distribution import DistributionError, PolicyCache
-	from .reporting import render
-	from .runner import EXIT_UNCHECKED, QualityGateError, _error_result, repository_root
-	from .runtime import RuntimeUnavailable
-	from .temp_workspace import TemporaryWorkspaceError, temporary_workspace
-
+		return _run_edit_command(arguments.command)
 	if arguments.command == "edit-setup":
-		from .edit_policy import setup_tool
-		from .edit_protocol import EditError
-
-		try:
-			tool = setup_tool(PolicyCache(arguments.cache_dir), arguments.policy_release)
-			sys.stdout.write(f"edit-setup: ready - {tool}\n")
-			return 0
-		except (EditError, DistributionError, OSError, ValueError):
-			sys.stdout.write(
-				"edit-setup: unchecked - restore the exact release using sync and retry\n"
-			)
-			return 2
-	try:
-		if arguments.command in {
-			"check",
-			"audit",
-			"format",
-			"setup",
-			"doctor",
-			"validate",
-		}:
-			actual_root = repository_root(arguments.root)
-			with temporary_workspace(actual_root):
-				return _dispatch(arguments)
-		return _dispatch(arguments)
-	except TemporaryWorkspaceError as error:
-		if arguments.command in {"check", "audit"}:
-			quality_error = QualityGateError(
-				str(error),
-				check_id="temporary.workspace",
-				exit_code=EXIT_UNCHECKED,
-				recovery_action=(
-					"restore a writable repository temp directory and retry the quality gate"
-				),
-			)
-			sys.stdout.write(
-				render(
-					Verdict((_error_result(quality_error),)),
-					verbose=getattr(arguments, "verbose", False),
-				)
-			)
-			sys.stdout.write("\n")
-		else:
-			sys.stdout.write(
-				f"temporary workspace: unchecked - {error}; "
-				"action: restore a writable repository temp directory and retry the quality gate\n"
-			)
-		return EXIT_UNCHECKED
-	except ValidationError as error:
-		action = (
-			"review the schema 1 manifest and run migrate"
-			if error.path == "quality.schema"
-			else f"correct {error.path} and run validate"
-		)
-		sys.stdout.write(f"manifest: unchecked - {error.message}; action: {action}\n")
-		return 2
-	except (QualityGateError, DistributionError, RuntimeUnavailable) as error:
-		if isinstance(error, (DistributionError, RuntimeUnavailable)):
-			error = QualityGateError(
-				str(error),
-				check_id="runtime.available",
-				exit_code=2,
-				recovery_action="run sync or setup and retry the quality gate",
-			)
-		sys.stdout.write(
-			render(Verdict((_error_result(error),)), verbose=getattr(arguments, "verbose", False))
-		)
-		sys.stdout.write("\n")
-		return error.exit_code
-	return 0
+		return _run_edit_setup(arguments)
+	return _run_standard_command(arguments)
 
 
 if __name__ == "__main__":

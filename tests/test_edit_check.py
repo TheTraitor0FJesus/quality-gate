@@ -1463,7 +1463,34 @@ def process_alive(pid: int) -> bool:
 		os.kill(pid, 0)
 	except ProcessLookupError:
 		return False
+	if sys.platform == "linux":
+		try:
+			state = Path(f"/proc/{pid}/stat").read_text().rpartition(") ")[2].split()[0]
+		except (OSError, IndexError):
+			return True
+		return state not in {"Z", "X"}
 	return True
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux process-state semantics")
+def test_process_alive_distinguishes_live_and_zombie_processes() -> None:
+	live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+	finished = subprocess.Popen([sys.executable, "-c", "pass"])
+	try:
+		assert process_alive(live.pid)
+		stat = Path(f"/proc/{finished.pid}/stat")
+		deadline = time.monotonic() + 3
+		while time.monotonic() < deadline:
+			if stat.exists() and stat.read_text().rpartition(") ")[2].split()[0] == "Z":
+				break
+			time.sleep(0.01)
+		else:
+			pytest.fail("finished child did not enter zombie state")
+		assert not process_alive(finished.pid)
+	finally:
+		live.kill()
+		live.wait(timeout=3)
+		finished.wait(timeout=3)
 
 
 def test_deadline_terminates_owned_runtime_descendants(tmp_path: Path, edit_cache: Path) -> None:

@@ -82,5 +82,7 @@ The enclosing launcher must retain time for preparation and cleanup beyond the G
 allowances. This provider's 2400-second Gate budget requires an explicitly enlarged enclosing
 verification budget. With a 3000-second envelope, the default 120-second queue wait leaves 480
 seconds for preparation and cleanup; the maximum 240-second wait leaves 360 seconds. The normal
-1500-second typed-runner envelope is too short for this provider budget and must be overridden
-explicitly before dispatch. These are budget bounds, not measured run durations.
+2100-second typed-runner envelope is shorter than this provider's complete declared Gate budget.
+Use an explicitly enlarged envelope when the operation needs that full allowance. An owner-approved
+shorter envelope caps the actual inner work and cleanup at that aggregate deadline. These are budget
+bounds, not measured run durations.

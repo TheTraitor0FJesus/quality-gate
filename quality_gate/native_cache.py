@@ -8,13 +8,15 @@ import math
 import os
 import shutil
 import stat
+import sys
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, replace
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
-from typing import BinaryIO, Literal
+from typing import Any, BinaryIO, Literal, Protocol, cast
 
+from .edit_protocol import EditError
 from .file_lock import FileLockUnavailableError, locked_file, open_locked_file, unlock_file
 from .path_safety import is_link_or_reparse
 
@@ -50,6 +52,18 @@ _RETENTION_SECONDS = 30 * 24 * 60 * 60
 _MAX_NAMESPACES_PER_REPOSITORY_TOOL = 8
 _MAX_EVICTIONS_PER_LEASE = 16
 _MAX_SCANNED_NAMESPACES = 64
+_MAX_NATIVE_CACHE_ACTION_BYTES = 64 * 1024
+_NATIVE_CACHE_BODY = """
+import json, sys
+limit = int(sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+payload = sys.stdin.buffer.read(limit + 1)
+if len(payload) > limit:
+    raise ValueError('native cache action input exceeded its limit')
+from quality_gate.native_cache import execute_native_cache_request
+result = execute_native_cache_request(json.loads(payload))
+sys.stdout.write(json.dumps(result, separators=(',', ':')))
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +73,7 @@ class _SourceWorkspaceIdentity:
 	namespace: tuple[int, int]
 	namespace_marker: tuple[int, int]
 	stage_parent: tuple[int, int]
-	parent_owner_marker: tuple[int, int]
+	parent_owner_marker: tuple[int, int] | None
 	owner_marker: tuple[int, int] | None
 	stable_root: tuple[int, int] | None
 
@@ -133,6 +147,37 @@ class NativeToolCacheSelection:
 	_tool: Literal["ruff", "mypy"] | None = field(default=None, repr=False, compare=False)
 	_path_identity: tuple[int, int] | None = field(default=None, repr=False, compare=False)
 	_marker_identity: tuple[int, int] | None = field(default=None, repr=False, compare=False)
+
+
+class NativeToolCacheOperation(Protocol):
+	"""Operation-owned deadlines, process observations and native cache cleanup."""
+
+	root: Path
+	command_timeout_seconds: int
+
+	def remaining(self, limit: float | None = None) -> float: ...
+
+	def stage(
+		self, name: str, scope: str, *, process_required: bool = False
+	) -> AbstractContextManager[None]: ...
+
+	def record_native_cache_selection(self, selection: NativeToolCacheSelection) -> None: ...
+
+	def run_process(
+		self,
+		command: list[str],
+		*,
+		root: Path,
+		environment: dict[str, str],
+		timeout_seconds: float | None = None,
+		payload: bytes | None = None,
+		limit: int = 0,
+		check_execution: bool = True,
+	) -> tuple[int, bytes, bytes]: ...
+
+	def register_native_cache_cleanup(self, payload: bytes) -> None: ...
+
+	def defer_release(self, release: Callable[[], None]) -> None: ...
 
 
 def _is_link(path: Path) -> bool:
@@ -818,15 +863,385 @@ def _prepare_source_workspace(
 		raise NativeToolCacheError("source-staging-unavailable") from error
 
 
+def _pair_from_payload(value: object) -> tuple[int, int]:
+	if (
+		isinstance(value, (list, tuple))
+		and len(value) == _FILE_IDENTITY_COMPONENTS
+		and all(isinstance(part, int) and not isinstance(part, bool) for part in value)
+	):
+		return int(value[0]), int(value[1])
+	raise NativeToolCacheError("unsafe-source-path")
+
+
+def _optional_pair_from_payload(value: object) -> tuple[int, int] | None:
+	return None if value is None else _pair_from_payload(value)
+
+
+def _identity_payload(identity: _SourceWorkspaceIdentity) -> dict[str, object]:
+	return asdict(identity)
+
+
+def _identity_from_payload(value: object) -> _SourceWorkspaceIdentity:
+	if not isinstance(value, dict) or set(value) != {
+		"namespace",
+		"namespace_marker",
+		"stage_parent",
+		"parent_owner_marker",
+		"owner_marker",
+		"stable_root",
+	}:
+		raise NativeToolCacheError("unsafe-source-path")
+	return _SourceWorkspaceIdentity(
+		_pair_from_payload(value["namespace"]),
+		_pair_from_payload(value["namespace_marker"]),
+		_pair_from_payload(value["stage_parent"]),
+		_optional_pair_from_payload(value["parent_owner_marker"]),
+		_optional_pair_from_payload(value["owner_marker"]),
+		_optional_pair_from_payload(value["stable_root"]),
+	)
+
+
+def _selection_payload(selection: NativeToolCacheSelection) -> dict[str, object]:
+	if (
+		selection.storage != "persistent"
+		or selection._tool not in {"ruff", "mypy"}
+		or selection._path_identity is None
+		or selection._marker_identity is None
+		or not selection.path.is_absolute()
+		or len(selection.namespace_id) != _SHA256_HEX_LENGTH
+		or any(character not in "0123456789abcdef" for character in selection.namespace_id)
+	):
+		raise NativeToolCacheError("unsafe-source-path")
+	return {
+		"namespace_id": selection.namespace_id,
+		"path": str(selection.path),
+		"tool": selection._tool,
+		"path_identity": list(selection._path_identity),
+		"marker_identity": list(selection._marker_identity),
+	}
+
+
+def _selection_from_payload(value: object) -> NativeToolCacheSelection:
+	if not isinstance(value, dict) or set(value) != {
+		"namespace_id",
+		"path",
+		"tool",
+		"path_identity",
+		"marker_identity",
+	}:
+		raise NativeToolCacheError("unsafe-source-path")
+	path = value["path"]
+	tool = value["tool"]
+	namespace_id = value["namespace_id"]
+	if (
+		not isinstance(path, str)
+		or not isinstance(tool, str)
+		or tool not in {"ruff", "mypy"}
+		or not isinstance(namespace_id, str)
+		or len(namespace_id) != _SHA256_HEX_LENGTH
+		or any(character not in "0123456789abcdef" for character in namespace_id)
+	):
+		raise NativeToolCacheError("unsafe-source-path")
+	selected_path = Path(path)
+	if not selected_path.is_absolute() or selected_path.name != namespace_id:
+		raise NativeToolCacheError("unsafe-source-path")
+	path_identity = _pair_from_payload(value["path_identity"])
+	marker_identity = _pair_from_payload(value["marker_identity"])
+	return NativeToolCacheSelection(
+		namespace_id,
+		selected_path,
+		"persistent",
+		None,
+		0.0,
+		_tool=cast(Literal["ruff", "mypy"], tool),
+		_path_identity=path_identity,
+		_marker_identity=marker_identity,
+	)
+
+
+def _source_paths(
+	selection: NativeToolCacheSelection,
+) -> tuple[Path, Path, Path, Path]:
+	stage_parent = selection.path / _SOURCE_DIRECTORY
+	stable_root = stage_parent / _SOURCE_ROOT
+	owner_marker = stage_parent / _SOURCE_OWNER_DIRECTORY
+	parent_owner_marker = stage_parent / _SOURCE_PARENT_OWNER_DIRECTORY
+	return stage_parent, stable_root, owner_marker, parent_owner_marker
+
+
+def _source_cleanup_payload(
+	selection: NativeToolCacheSelection, *, expected: _SourceWorkspaceIdentity | None
+) -> bytes:
+	payload = {
+		"schema": 1,
+		"selection": _selection_payload(selection),
+		"expected": None if expected is None else _identity_payload(expected),
+	}
+	return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _capture_source_cleanup_payload(
+	selection: NativeToolCacheSelection,
+) -> bytes | None:
+	stage_parent, stable_root, owner_marker, parent_owner_marker = _source_paths(selection)
+	if not stage_parent.exists() and not stage_parent.is_symlink():
+		return None
+	try:
+		identity = _validate_source_workspace_ownership(
+			selection, stage_parent, stable_root, owner_marker, parent_owner_marker
+		)
+	except NativeToolCacheError:
+		if _is_link(stage_parent):
+			return None
+		stage_identity = _directory_identity(stage_parent)
+		if stage_identity is None:
+			return None
+		try:
+			entries = tuple(stage_parent.iterdir())
+			namespace_identity = _selected_source_namespace_identity(selection)
+			parent_identity = _directory_identity(parent_owner_marker)
+			if parent_identity is not None and not _source_owner_marker_is_valid(
+				parent_owner_marker
+			):
+				return None
+			marker_identity = selection._marker_identity
+			if marker_identity is None:
+				return None
+			if any(entry.name != _SOURCE_PARENT_OWNER_DIRECTORY for entry in entries):
+				return None
+		except (OSError, NativeToolCacheError):
+			return None
+		identity = _SourceWorkspaceIdentity(
+			namespace_identity,
+			marker_identity,
+			stage_identity,
+			parent_identity,
+			None,
+			None,
+		)
+	return _source_cleanup_payload(selection, expected=identity)
+
+
+def prepare_native_source_workspace_request(payload: object) -> dict[str, object]:
+	"""Create one validated stable source tree in a supervised operation child."""
+	if (
+		not isinstance(payload, dict)
+		or set(payload)
+		!= {
+			"schema",
+			"selection",
+			"snapshot_root",
+		}
+		or payload["schema"] != 1
+	):
+		raise NativeToolCacheError("unsafe-source-path")
+	selection = _selection_from_payload(payload["selection"])
+	snapshot_root = payload["snapshot_root"]
+	if not isinstance(snapshot_root, str) or not Path(snapshot_root).is_absolute():
+		raise NativeToolCacheError("unsafe-source-path")
+	stage_parent, stable_root, owner_marker, parent_owner_marker = _source_paths(selection)
+	try:
+		identity = _prepare_source_workspace(
+			selection,
+			Path(snapshot_root),
+			stage_parent,
+			stable_root,
+			owner_marker,
+			parent_owner_marker,
+		)
+	except NativeToolCacheError as error:
+		return {"status": "fallback", "reason": error.reason}
+	return {"status": "ready", "expected": _identity_payload(identity)}
+
+
+def cleanup_native_cache_source_workspace(payload: object) -> None:
+	"""Remove only a native source tree still matching its registered ownership."""
+	if (
+		not isinstance(payload, dict)
+		or set(payload)
+		!= {
+			"schema",
+			"selection",
+			"expected",
+		}
+		or payload["schema"] != 1
+	):
+		raise NativeToolCacheError("unsafe-source-path")
+	selection = _selection_from_payload(payload["selection"])
+	stage_parent, stable_root, owner_marker, parent_owner_marker = _source_paths(selection)
+	if not stage_parent.exists() and not stage_parent.is_symlink():
+		return
+	expected_value = payload["expected"]
+	if expected_value is None:
+		identity = _validate_source_workspace_ownership(
+			selection, stage_parent, stable_root, owner_marker, parent_owner_marker
+		)
+	else:
+		identity = _identity_from_payload(expected_value)
+	if identity.owner_marker is None and identity.stable_root is None:
+		_remove_new_empty_source_parent(
+			selection,
+			stage_parent,
+			identity.stage_parent,
+			parent_owner_marker,
+			identity.parent_owner_marker,
+		)
+		if stage_parent.exists() or stage_parent.is_symlink():
+			raise NativeToolCacheError("source-cleanup-unavailable")
+	else:
+		_remove_owned_source_workspace(
+			selection,
+			stage_parent,
+			stable_root,
+			owner_marker,
+			parent_owner_marker,
+			expected=identity,
+		)
+	if (
+		stable_root.exists()
+		or stable_root.is_symlink()
+		or owner_marker.exists()
+		or owner_marker.is_symlink()
+	):
+		raise NativeToolCacheError("source-cleanup-unavailable")
+
+
+def _register_partial_source_cleanup(
+	selection: NativeToolCacheSelection, operation: NativeToolCacheOperation
+) -> None:
+	cleanup = _capture_source_cleanup_payload(selection)
+	if cleanup is not None:
+		operation.register_native_cache_cleanup(cleanup)
+
+
+def _run_native_cache_action(
+	operation: NativeToolCacheOperation,
+	action: Literal["prepare-source", "prune", "prepare-namespace"],
+	request: dict[str, object],
+	scope: str,
+) -> dict[str, object]:
+	payload = json.dumps(
+		{"action": action, "request": request},
+		sort_keys=True,
+		separators=(",", ":"),
+	).encode("utf-8")
+	if len(payload) > _MAX_NATIVE_CACHE_ACTION_BYTES:
+		raise NativeToolCacheError("cache-action-input-too-large")
+	command = [
+		sys.executable,
+		"-I",
+		"-S",
+		"-B",
+		"-c",
+		_NATIVE_CACHE_BODY,
+		str(_MAX_NATIVE_CACHE_ACTION_BYTES),
+		str(Path(__file__).resolve().parent.parent),
+	]
+	with operation.stage(f"native-cache.{action}", scope, process_required=True):
+		code, output, _diagnostics = operation.run_process(
+			command,
+			root=operation.root,
+			environment=dict(os.environ),
+			timeout_seconds=operation.command_timeout_seconds,
+			payload=payload,
+			limit=_MAX_NATIVE_CACHE_ACTION_BYTES,
+			check_execution=False,
+		)
+	if code != 0:
+		raise NativeToolCacheError("cache-action-unavailable")
+	try:
+		result = json.loads(output.decode("utf-8"))
+	except (UnicodeDecodeError, json.JSONDecodeError) as error:
+		raise NativeToolCacheError("cache-action-unavailable") from error
+	if not isinstance(result, dict):
+		raise NativeToolCacheError("cache-action-unavailable")
+	return result
+
+
+def _prepare_source_workspace_with_operation(
+	selection: NativeToolCacheSelection,
+	snapshot_root: Path,
+	operation: NativeToolCacheOperation,
+) -> tuple[_SourceWorkspaceIdentity | None, str | None]:
+	try:
+		result = _run_native_cache_action(
+			operation,
+			"prepare-source",
+			{
+				"schema": 1,
+				"selection": _selection_payload(selection),
+				"snapshot_root": str(snapshot_root),
+			},
+			f"namespace={selection.namespace_id}",
+		)
+	except BaseException as error:
+		_register_partial_source_cleanup(selection, operation)
+		if isinstance(error, (EditError, OSError)):
+			raise NativeToolCacheError("source-staging-unavailable") from error
+		raise
+	if result.get("status") == "fallback":
+		_register_partial_source_cleanup(selection, operation)
+		reason = result.get("reason")
+		return None, reason if isinstance(reason, str) and reason else "source-staging-unavailable"
+	if result.get("status") != "ready":
+		_register_partial_source_cleanup(selection, operation)
+		return None, "source-staging-unavailable"
+	try:
+		expected = _identity_from_payload(result.get("expected"))
+		operation.register_native_cache_cleanup(
+			_source_cleanup_payload(selection, expected=expected)
+		)
+	except (NativeToolCacheError, ValueError):
+		_register_partial_source_cleanup(selection, operation)
+		return None, "source-staging-unavailable"
+	return expected, None
+
+
+@contextmanager
+def _operation_native_source_workspace(
+	selection: NativeToolCacheSelection,
+	snapshot_root: Path,
+	private_cache_path: Path,
+	operation: NativeToolCacheOperation,
+) -> Iterator[tuple[NativeToolCacheSelection, Path]]:
+	expected, fallback_reason = _prepare_source_workspace_with_operation(
+		selection, snapshot_root, operation
+	)
+	if expected is None:
+		yield (
+			replace(
+				selection,
+				path=private_cache_path,
+				storage="private",
+				fallback_reason=fallback_reason or "source-staging-unavailable",
+			),
+			snapshot_root,
+		)
+		return
+	try:
+		yield selection, selection.path / _SOURCE_DIRECTORY / _SOURCE_ROOT
+	except BaseException:
+		_register_partial_source_cleanup(selection, operation)
+		raise
+
+
 @contextmanager
 def native_tool_source_workspace(
 	selection: NativeToolCacheSelection,
 	snapshot_root: Path,
 	private_cache_path: Path,
+	*,
+	operation: NativeToolCacheOperation | None = None,
 ) -> Iterator[tuple[NativeToolCacheSelection, Path]]:
 	"""Run a persistent native cache against a stable, disposable source root."""
 	if selection.storage == "private":
 		yield selection, snapshot_root
+		return
+	if operation is not None:
+		with _operation_native_source_workspace(
+			selection, snapshot_root, private_cache_path, operation
+		) as workspace:
+			yield workspace
 		return
 
 	stage_parent = selection.path / _SOURCE_DIRECTORY
@@ -1465,8 +1880,63 @@ class NativeToolCache:
 		marker_identity = _namespace_marker_identity(path, identity.namespace_id, identity.tool)
 		return namespace_identity, marker_identity
 
+	def _prune_for_lease(
+		self,
+		identity: NativeToolCacheIdentity,
+		*,
+		exclude_namespace: str | None,
+		needs_slot: bool,
+		operation: NativeToolCacheOperation | None,
+	) -> bool:
+		if operation is None:
+			return self._prune(identity, exclude_namespace=exclude_namespace, needs_slot=needs_slot)
+		try:
+			result = _run_native_cache_action(
+				operation,
+				"prune",
+				{
+					"schema": 1,
+					"cache_root": str(self.root),
+					"identity": asdict(identity),
+					"exclude_namespace": exclude_namespace,
+					"needs_slot": needs_slot,
+				},
+				f"tool={identity.tool}; namespace={identity.namespace_id}",
+			)
+		except (EditError, OSError) as error:
+			raise NativeToolCacheError("maintenance-unavailable") from error
+		if result.get("status") != "ready" or not isinstance(result.get("space_available"), bool):
+			raise NativeToolCacheError("maintenance-unavailable")
+		return result["space_available"] is True
+
+	def _prepare_namespace_for_lease(
+		self,
+		path: Path,
+		identity: NativeToolCacheIdentity,
+		operation: NativeToolCacheOperation | None,
+	) -> tuple[tuple[int, int], tuple[int, int]]:
+		if operation is None:
+			return self._prepare_namespace(path, identity)
+		try:
+			result = _run_native_cache_action(
+				operation,
+				"prepare-namespace",
+				{"schema": 1, "cache_root": str(self.root), "identity": asdict(identity)},
+				f"tool={identity.tool}; namespace={identity.namespace_id}",
+			)
+			if result.get("status") != "ready":
+				raise NativeToolCacheError("namespace-unavailable")
+			return _pair_from_payload(result.get("namespace")), _pair_from_payload(
+				result.get("marker")
+			)
+		except (EditError, OSError, ValueError) as error:
+			raise NativeToolCacheError("namespace-unavailable") from error
+
 	def _acquire(
-		self, identity: NativeToolCacheIdentity
+		self,
+		identity: NativeToolCacheIdentity,
+		*,
+		operation: NativeToolCacheOperation | None = None,
 	) -> tuple[Path, BinaryIO, tuple[int, int], tuple[int, int]]:
 		if not self.root.is_absolute():
 			raise NativeToolCacheError("unsafe-cache-path")
@@ -1478,23 +1948,30 @@ class NativeToolCache:
 		try:
 			with locked_file(
 				maintenance_lock,
-				timeout_seconds=self.maintenance_timeout_seconds,
+				timeout_seconds=(
+					self.maintenance_timeout_seconds
+					if operation is None
+					else operation.remaining(self.maintenance_timeout_seconds)
+				),
 			):
 				path = self.namespace_path(identity)
 				if _is_link(path):
 					raise NativeToolCacheError("unsafe-cache-path")
 				exists = path.exists()
-				if not self._prune(
+				if not self._prune_for_lease(
 					identity,
 					exclude_namespace=identity.namespace_id if exists else None,
 					needs_slot=not exists,
+					operation=operation,
 				):
 					raise NativeToolCacheError("capacity-limit")
 				lease_path = self._lock_path(identity)
 				self._ensure_directory(lease_path.parent)
-				handle = self._open_lease_lock(lease_path)
+				handle = self._open_lease_lock(lease_path, operation=operation)
 				try:
-					namespace_identity, marker_identity = self._prepare_namespace(path, identity)
+					namespace_identity, marker_identity = self._prepare_namespace_for_lease(
+						path, identity, operation
+					)
 					return path, handle, namespace_identity, marker_identity
 				except BaseException:
 					try:
@@ -1505,13 +1982,19 @@ class NativeToolCache:
 		except FileLockUnavailableError as error:
 			raise NativeToolCacheError("lock-busy") from error
 
-	def _open_lease_lock(self, path: Path) -> BinaryIO:
+	def _open_lease_lock(
+		self, path: Path, *, operation: NativeToolCacheOperation | None = None
+	) -> BinaryIO:
 		deadline = time.monotonic() + self.lease_timeout_seconds
 		while True:
+			if operation is not None:
+				operation.remaining()
 			handle = open_locked_file(path, blocking=False)
 			if handle is not None:
 				return handle
 			remaining = deadline - time.monotonic()
+			if operation is not None:
+				remaining = operation.remaining(remaining)
 			if remaining <= 0:
 				raise NativeToolCacheError("lock-busy")
 			time.sleep(min(0.025, remaining))
@@ -1521,43 +2004,128 @@ class NativeToolCache:
 		self,
 		identity: NativeToolCacheIdentity,
 		private_path: Path,
+		*,
+		operation: NativeToolCacheOperation | None = None,
 	) -> Iterator[NativeToolCacheSelection]:
 		"""Hold a compatible cache lease across one real native tool invocation."""
 		started = time.monotonic()
-		try:
-			path, handle, path_identity, marker_identity = self._acquire(identity)
-		except NativeToolCacheError as error:
-			yield NativeToolCacheSelection(
-				identity.namespace_id,
-				private_path,
-				"private",
-				error.reason,
-				(time.monotonic() - started) * 1000,
+		handle: BinaryIO | None = None
+		lookup = (
+			nullcontext()
+			if operation is None
+			else operation.stage(
+				f"native-cache.{identity.tool}.lookup", f"native {identity.tool} cache selection"
 			)
-			return
-		except OSError:
-			yield NativeToolCacheSelection(
-				identity.namespace_id,
-				private_path,
-				"private",
-				"storage-unavailable",
-				(time.monotonic() - started) * 1000,
-			)
-			return
-		selection = NativeToolCacheSelection(
-			identity.namespace_id,
-			path,
-			"persistent",
-			None,
-			(time.monotonic() - started) * 1000,
-			_tool=identity.tool,
-			_path_identity=path_identity,
-			_marker_identity=marker_identity,
 		)
 		try:
+			with lookup:
+				try:
+					path, handle, path_identity, marker_identity = self._acquire(
+						identity, operation=operation
+					)
+				except OSError as error:
+					selection = NativeToolCacheSelection(
+						identity.namespace_id,
+						private_path,
+						"private",
+						error.reason
+						if isinstance(error, NativeToolCacheError)
+						else "storage-unavailable",
+						(time.monotonic() - started) * 1000,
+					)
+				else:
+					selection = NativeToolCacheSelection(
+						identity.namespace_id,
+						path,
+						"persistent",
+						None,
+						(time.monotonic() - started) * 1000,
+						_tool=identity.tool,
+						_path_identity=path_identity,
+						_marker_identity=marker_identity,
+					)
+				if operation is not None:
+					operation.record_native_cache_selection(selection)
 			yield selection
 		finally:
-			try:
-				unlock_file(handle)
-			except OSError:
-				pass
+			if handle is not None:
+				if operation is None:
+					try:
+						unlock_file(handle)
+					except OSError:
+						pass
+				else:
+					lease_handle = handle
+					operation.defer_release(lambda: unlock_file(lease_handle))
+
+
+def _cache_identity_from_request(value: object) -> NativeToolCacheIdentity:
+	if not isinstance(value, dict) or set(value) != {
+		item.name for item in fields(NativeToolCacheIdentity)
+	}:
+		raise NativeToolCacheError("unsafe-cache-action")
+	decoded = dict(value)
+	sequence_fields = {"effective_options", "import_roots"}
+	for name in sequence_fields:
+		items = decoded[name]
+		if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+			raise NativeToolCacheError("unsafe-cache-action")
+		decoded[name] = tuple(items)
+	if any(
+		not isinstance(item, str) for name, item in decoded.items() if name not in sequence_fields
+	):
+		raise NativeToolCacheError("unsafe-cache-action")
+	if decoded["tool"] not in {"ruff", "mypy"}:
+		raise NativeToolCacheError("unsafe-cache-action")
+	return NativeToolCacheIdentity(**cast(dict[str, Any], decoded))
+
+
+def _prune_native_cache_request(value: object) -> dict[str, object]:
+	if (
+		not isinstance(value, dict)
+		or set(value) != {"schema", "cache_root", "identity", "exclude_namespace", "needs_slot"}
+		or value["schema"] != 1
+		or not isinstance(value["cache_root"], str)
+		or not Path(value["cache_root"]).is_absolute()
+		or not isinstance(value["needs_slot"], bool)
+	):
+		raise NativeToolCacheError("unsafe-cache-action")
+	identity = _cache_identity_from_request(value["identity"])
+	exclude = value["exclude_namespace"]
+	if exclude is not None and exclude != identity.namespace_id:
+		raise NativeToolCacheError("unsafe-cache-action")
+	cache = NativeToolCache(Path(value["cache_root"]))
+	cache._ensure_directory(cache._cache_root())
+	cache._ensure_directory(cache._repository_tool_root(identity))
+	available = cache._prune(identity, exclude_namespace=exclude, needs_slot=value["needs_slot"])
+	return {"status": "ready", "space_available": available}
+
+
+def _prepare_namespace_request(value: object) -> dict[str, object]:
+	if (
+		not isinstance(value, dict)
+		or set(value) != {"schema", "cache_root", "identity"}
+		or value["schema"] != 1
+		or not isinstance(value["cache_root"], str)
+		or not Path(value["cache_root"]).is_absolute()
+	):
+		raise NativeToolCacheError("unsafe-cache-action")
+	identity = _cache_identity_from_request(value["identity"])
+	cache = NativeToolCache(Path(value["cache_root"]))
+	cache._ensure_directory(cache._cache_root())
+	cache._ensure_directory(cache._repository_tool_root(identity))
+	namespace, marker = cache._prepare_namespace(cache.namespace_path(identity), identity)
+	return {"status": "ready", "namespace": namespace, "marker": marker}
+
+
+def execute_native_cache_request(payload: object) -> dict[str, object]:
+	"""Execute one bounded cache action under the caller-held maintenance/namespace lease."""
+	if not isinstance(payload, dict) or set(payload) != {"action", "request"}:
+		raise NativeToolCacheError("unsafe-cache-action")
+	if payload["action"] == "prepare-source":
+		return prepare_native_source_workspace_request(payload["request"])
+	if payload["action"] == "prune":
+		return _prune_native_cache_request(payload["request"])
+	if payload["action"] == "prepare-namespace":
+		return _prepare_namespace_request(payload["request"])
+	return {"status": "fallback", "reason": "unsupported-cache-action"}

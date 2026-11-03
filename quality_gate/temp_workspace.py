@@ -7,15 +7,18 @@ import errno
 import hashlib
 import hmac
 import json
+import math
 import os
 import stat
 import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from ctypes import wintypes
+from functools import cache
 from pathlib import Path
 from typing import Any, BinaryIO, cast
 
@@ -71,6 +74,10 @@ _WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
 _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _WINDOWS_FILE_BASIC_INFORMATION = 0
 _WINDOWS_FILE_DISPOSITION_INFORMATION = 4
+_WINDOWS_FILE_DISPOSITION_INFORMATION_EX = 21
+_WINDOWS_FILE_DISPOSITION_DELETE = 0x00000001
+_WINDOWS_FILE_DISPOSITION_POSIX_SEMANTICS = 0x00000002
+_WINDOWS_UNSUPPORTED_DISPOSITION_ERRORS = frozenset({1, 50, 87})
 _WINDOWS_FILE_ID_INFORMATION = 18
 _PUBLICATION_LINK_SETTLE_ATTEMPTS = 100
 _PUBLICATION_LINK_SETTLE_DELAY_SECONDS = 0.001
@@ -93,6 +100,76 @@ class TemporaryWorkspaceError(OSError):
 
 def _lock(handle: BinaryIO, *, blocking: bool) -> None:
 	lock_file(handle, blocking=blocking)
+
+
+def _check_workspace_deadline(deadline: float | None) -> None:
+	if deadline is not None and time.monotonic() >= deadline:
+		raise TimeoutError("temporary workspace preparation exceeded the operation deadline")
+
+
+def _raise_operation_timeout_if_expired(deadline: float | None, error: BaseException) -> None:
+	if deadline is None or time.monotonic() < deadline:
+		return
+	from .operation import OperationTimeoutError, current_operation
+
+	operation = current_operation()
+	if operation is None:
+		return
+	try:
+		operation.remaining()
+	except OperationTimeoutError as timeout:
+		raise timeout from error
+
+
+@contextmanager
+def _locked_process_scope(deadline: float | None) -> Iterator[None]:
+	acquired = False
+	try:
+		if deadline is None:
+			_process_lock.acquire()
+			acquired = True
+		else:
+			while not acquired:
+				_check_workspace_deadline(deadline)
+				remaining = deadline - time.monotonic()
+				if remaining <= 0:
+					continue
+				acquired = _process_lock.acquire(timeout=min(0.05, remaining))
+			_check_workspace_deadline(deadline)
+	except TimeoutError as error:
+		if acquired:
+			_process_lock.release()
+		_raise_operation_timeout_if_expired(deadline, error)
+		raise TemporaryWorkspaceError(
+			"temporary workspace process lock wait exceeded its deadline"
+		) from error
+	try:
+		yield
+	finally:
+		_process_lock.release()
+
+
+def _lock_until(handle: BinaryIO, deadline: float) -> None:
+	contention_errors = {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+	if hasattr(errno, "EWOULDBLOCK"):
+		contention_errors.add(errno.EWOULDBLOCK)
+	last_error: OSError | None = None
+	while True:
+		_check_workspace_deadline(deadline)
+		try:
+			_lock(handle, blocking=False)
+			_check_workspace_deadline(deadline)
+			return
+		except OSError as error:
+			if error.errno not in contention_errors:
+				raise
+			last_error = error
+		remaining = deadline - time.monotonic()
+		if remaining <= 0:
+			raise TimeoutError(
+				"temporary workspace lock wait exceeded the operation deadline"
+			) from last_error
+		time.sleep(min(0.05, remaining))
 
 
 def _unlock(handle: BinaryIO) -> None:
@@ -129,6 +206,7 @@ def _user_state_directory() -> Path:
 	return Path(base) / "quality-gate" / "temp-workspace"
 
 
+@cache
 def _windows_security_api() -> tuple[Any, Any]:
 	loader_name = "WinDLL"
 	loader = cast(Any, getattr(ctypes, loader_name))
@@ -866,7 +944,7 @@ def _plain_lock_file(path: Path, metadata: os.stat_result) -> bool:
 	)
 
 
-def _open_locked_file(path: Path, *, blocking: bool, create: bool = True) -> BinaryIO | None:
+def _existing_lock_file_identity(path: Path, *, create: bool) -> os.stat_result | None:
 	try:
 		before = path.lstat()
 	except FileNotFoundError:
@@ -875,29 +953,69 @@ def _open_locked_file(path: Path, *, blocking: bool, create: bool = True) -> Bin
 		raise OSError(f"refusing an unsafe temporary lock file: {path}")
 	if before is None and not create:
 		return None
+	return before
+
+
+def _validate_open_lock_file(
+	path: Path,
+	before: os.stat_result | None,
+	handle: BinaryIO,
+) -> None:
+	opened = os.fstat(handle.fileno())
+	try:
+		current = path.lstat()
+	except OSError as error:
+		raise OSError(f"temporary lock path changed while opening: {path}") from error
+	if (
+		not _plain_lock_file(path, opened)
+		or not _plain_lock_file(path, current)
+		or not _same_file_identity(opened, current)
+		or (before is not None and not _same_file_identity(before, opened))
+	):
+		raise OSError(f"temporary lock path changed while opening: {path}")
+
+
+def _initialize_empty_lock_file(handle: BinaryIO) -> None:
+	handle.seek(0, os.SEEK_END)
+	if handle.tell() == 0:
+		handle.write(b"\0")
+		handle.flush()
+
+
+def _acquire_lock_file(
+	handle: BinaryIO,
+	*,
+	blocking: bool,
+	deadline: float | None,
+) -> bool:
+	try:
+		if blocking and deadline is not None:
+			_lock_until(handle, deadline)
+		else:
+			_lock(handle, blocking=blocking)
+	except OSError:
+		if blocking:
+			raise
+		return False
+	return True
+
+
+def _open_locked_file(
+	path: Path,
+	*,
+	blocking: bool,
+	create: bool = True,
+	deadline: float | None = None,
+) -> BinaryIO | None:
+	_check_workspace_deadline(deadline)
+	before = _existing_lock_file_identity(path, create=create)
+	if before is None and not create:
+		return None
 	handle = path.open("a+b" if create else "r+b")
 	try:
-		opened = os.fstat(handle.fileno())
-		try:
-			current = path.lstat()
-		except OSError as error:
-			raise OSError(f"temporary lock path changed while opening: {path}") from error
-		if (
-			not _plain_lock_file(path, opened)
-			or not _plain_lock_file(path, current)
-			or not _same_file_identity(opened, current)
-			or (before is not None and not _same_file_identity(before, opened))
-		):
-			raise OSError(f"temporary lock path changed while opening: {path}")
-		handle.seek(0, os.SEEK_END)
-		if handle.tell() == 0:
-			handle.write(b"\0")
-			handle.flush()
-		try:
-			_lock(handle, blocking=blocking)
-		except OSError:
-			if blocking:
-				raise
+		_validate_open_lock_file(path, before, handle)
+		_initialize_empty_lock_file(handle)
+		if not _acquire_lock_file(handle, blocking=blocking, deadline=deadline):
 			handle.close()
 			return None
 		return handle
@@ -906,7 +1024,13 @@ def _open_locked_file(path: Path, *, blocking: bool, create: bool = True) -> Bin
 		raise
 
 
-def _remove_entry(path: Path, *, expected_identity: os.stat_result | None = None) -> None:
+def _remove_entry(
+	path: Path,
+	*,
+	expected_identity: os.stat_result | None = None,
+	deadline: float | None = None,
+) -> None:
+	_check_workspace_deadline(deadline)
 	try:
 		metadata = path.lstat()
 	except FileNotFoundError:
@@ -916,17 +1040,18 @@ def _remove_entry(path: Path, *, expected_identity: os.stat_result | None = None
 	if is_link_or_reparse(metadata):
 		_remove_link(path, metadata)
 	elif stat.S_ISDIR(metadata.st_mode):
-		_remove_tree(path, metadata)
+		_remove_tree(path, metadata, deadline=deadline)
 	else:
 		_remove_file(path, metadata)
+	_check_workspace_deadline(deadline)
 
 
-def _remove_tree(path: Path, identity: os.stat_result) -> None:
+def _remove_tree(path: Path, identity: os.stat_result, *, deadline: float | None = None) -> None:
 	pending = [(path, identity)]
 	rescans: dict[tuple[Path, int, int], int] = {}
 	while pending:
 		tree_path, tree_identity = pending.pop()
-		_remove_tree_attempt(tree_path, tree_identity, pending, rescans)
+		_remove_tree_attempt(tree_path, tree_identity, pending, rescans, deadline=deadline)
 
 
 def _remove_tree_attempt(
@@ -934,10 +1059,17 @@ def _remove_tree_attempt(
 	tree_identity: os.stat_result,
 	pending: list[tuple[Path, os.stat_result]],
 	rescans: dict[tuple[Path, int, int], int],
+	*,
+	deadline: float | None = None,
 ) -> None:
-	directories, deferred_root_controls = _scan_tree_for_removal(tree_path, tree_identity)
+	_check_workspace_deadline(deadline)
+	directories, deferred_root_controls = _scan_tree_for_removal(
+		tree_path, tree_identity, deadline=deadline
+	)
 	for directory, expected in reversed(directories[1:]):
-		if not _remove_collected_directory_with_retry(directory, expected, rescans):
+		if not _remove_collected_directory_with_retry(
+			directory, expected, rescans, deadline=deadline
+		):
 			# Retry only the raced subtree; unrelated directories have separate budgets.
 			pending.extend(((tree_path, tree_identity), (directory, expected)))
 			return
@@ -949,10 +1081,13 @@ def _remove_tree_attempt(
 			child_identity,
 			[],
 			root_control=True,
+			deadline=deadline,
 		)
 	if directories:
 		root_path, root_identity = directories[0]
-		if not _remove_collected_directory_with_retry(root_path, root_identity, rescans):
+		if not _remove_collected_directory_with_retry(
+			root_path, root_identity, rescans, deadline=deadline
+		):
 			pending.append((root_path, root_identity))
 
 
@@ -960,10 +1095,13 @@ def _remove_collected_directory_with_retry(
 	path: Path,
 	expected: os.stat_result,
 	rescans: dict[tuple[Path, int, int], int],
+	*,
+	deadline: float | None = None,
 ) -> bool:
+	_check_workspace_deadline(deadline)
 	key = (path, expected.st_dev, expected.st_ino)
 	try:
-		_remove_collected_directory(path, expected)
+		_remove_collected_directory(path, expected, deadline=deadline)
 	except OSError as error:
 		if not _can_rescan_directory(error, rescans.get(key, 0)):
 			raise
@@ -980,18 +1118,20 @@ def _can_rescan_directory(error: OSError, rescans: int) -> bool:
 
 
 def _scan_tree_for_removal(
-	path: Path, identity: os.stat_result
+	path: Path, identity: os.stat_result, *, deadline: float | None = None
 ) -> tuple[list[tuple[Path, os.stat_result]], list[tuple[Path, os.stat_result]]]:
 	directories: list[tuple[Path, os.stat_result]] = []
 	deferred_root_controls: list[tuple[Path, os.stat_result]] = []
 	pending = [(path, identity)]
 	while pending:
+		_check_workspace_deadline(deadline)
 		directory, expected = pending.pop()
-		entries = _directory_entries_for_removal(directory, expected)
+		entries = _directory_entries_for_removal(directory, expected, deadline=deadline)
 		if entries is None:
 			continue
 		directories.append((directory, expected))
 		for child_path, scanned_identity in entries:
+			_check_workspace_deadline(deadline)
 			_remove_scanned_child(
 				directory,
 				expected,
@@ -999,13 +1139,15 @@ def _scan_tree_for_removal(
 				scanned_identity,
 				pending,
 				deferred_root_controls=(deferred_root_controls if directory == path else None),
+				deadline=deadline,
 			)
 	return directories, deferred_root_controls
 
 
 def _directory_entries_for_removal(
-	directory: Path, expected: os.stat_result
+	directory: Path, expected: os.stat_result, *, deadline: float | None = None
 ) -> list[tuple[Path, os.stat_result]] | None:
+	_check_workspace_deadline(deadline)
 	try:
 		before = directory.lstat()
 	except FileNotFoundError:
@@ -1020,10 +1162,15 @@ def _directory_entries_for_removal(
 		return None
 	try:
 		with os.scandir(directory) as children:
-			entries = [(Path(child.path), Path(child.path).lstat()) for child in children]
+			entries: list[tuple[Path, os.stat_result]] = []
+			for child in children:
+				_check_workspace_deadline(deadline)
+				child_path = Path(child.path)
+				entries.append((child_path, child_path.lstat()))
 	except FileNotFoundError:
 		return None
 	after = directory.lstat()
+	_check_workspace_deadline(deadline)
 	if is_link_or_reparse(after) or not _same_file_identity(before, after):
 		raise OSError(f"temporary workspace directory changed while scanning it: {directory}")
 	return entries
@@ -1038,7 +1185,9 @@ def _remove_scanned_child(
 	*,
 	deferred_root_controls: list[tuple[Path, os.stat_result]] | None = None,
 	root_control: bool = False,
+	deadline: float | None = None,
 ) -> None:
+	_check_workspace_deadline(deadline)
 	parent_now = parent.lstat()
 	if is_link_or_reparse(parent_now) or not _same_file_identity(parent_identity, parent_now):
 		raise OSError(f"temporary workspace directory changed during removal: {parent}")
@@ -1061,9 +1210,13 @@ def _remove_scanned_child(
 		pending.append((path, metadata))
 	else:
 		_remove_file(path, metadata)
+	_check_workspace_deadline(deadline)
 
 
-def _remove_collected_directory(path: Path, expected: os.stat_result) -> None:
+def _remove_collected_directory(
+	path: Path, expected: os.stat_result, *, deadline: float | None = None
+) -> None:
+	_check_workspace_deadline(deadline)
 	try:
 		metadata = path.lstat()
 	except FileNotFoundError:
@@ -1074,6 +1227,7 @@ def _remove_collected_directory(path: Path, expected: os.stat_result) -> None:
 		_remove_link(path, metadata)
 	else:
 		_remove_directory(path, expected_identity=expected)
+	_check_workspace_deadline(deadline)
 
 
 def _check_ordinary_directory(path: Path, *, allow_missing: bool = False) -> os.stat_result | None:
@@ -1681,38 +1835,57 @@ def _open_windows_removal_handle(path: Path, kernel32: object) -> int:
 	return cast(int, handle)
 
 
+class _WindowsByHandleFileInformation(ctypes.Structure):
+	_fields_ = [
+		("attributes", wintypes.DWORD),
+		("creation_time_low", wintypes.DWORD),
+		("creation_time_high", wintypes.DWORD),
+		("last_access_low", wintypes.DWORD),
+		("last_access_high", wintypes.DWORD),
+		("last_write_low", wintypes.DWORD),
+		("last_write_high", wintypes.DWORD),
+		("volume_serial", wintypes.DWORD),
+		("size_high", wintypes.DWORD),
+		("size_low", wintypes.DWORD),
+		("links", wintypes.DWORD),
+		("index_high", wintypes.DWORD),
+		("index_low", wintypes.DWORD),
+	]
+
+
+class _WindowsFileIdentifier(ctypes.Structure):
+	_fields_ = [("low", ctypes.c_uint64), ("high", ctypes.c_uint64)]
+
+
+class _WindowsFileIdInformation(ctypes.Structure):
+	_fields_ = [
+		("volume_serial", ctypes.c_uint64),
+		("file_id", _WindowsFileIdentifier),
+	]
+
+
+class _WindowsFileBasicInformation(ctypes.Structure):
+	_fields_ = [
+		("creation_time", ctypes.c_longlong),
+		("last_access_time", ctypes.c_longlong),
+		("last_write_time", ctypes.c_longlong),
+		("change_time", ctypes.c_longlong),
+		("attributes", wintypes.DWORD),
+	]
+
+
+class _WindowsFileDispositionInformationEx(ctypes.Structure):
+	_fields_ = [("flags", wintypes.DWORD)]
+
+
+class _WindowsFileDispositionInformation(ctypes.Structure):
+	_fields_ = [("delete_file", wintypes.BOOLEAN)]
+
+
 def _windows_file_identity(
 	handle: int, kernel32: object
 ) -> tuple[tuple[int, int], tuple[int, int] | None, int]:
-	from ctypes import wintypes
-
-	class ByHandleFileInformation(ctypes.Structure):
-		_fields_ = [
-			("attributes", wintypes.DWORD),
-			("creation_time_low", wintypes.DWORD),
-			("creation_time_high", wintypes.DWORD),
-			("last_access_low", wintypes.DWORD),
-			("last_access_high", wintypes.DWORD),
-			("last_write_low", wintypes.DWORD),
-			("last_write_high", wintypes.DWORD),
-			("volume_serial", wintypes.DWORD),
-			("size_high", wintypes.DWORD),
-			("size_low", wintypes.DWORD),
-			("links", wintypes.DWORD),
-			("index_high", wintypes.DWORD),
-			("index_low", wintypes.DWORD),
-		]
-
-	class FileIdentifier(ctypes.Structure):
-		_fields_ = [("low", ctypes.c_uint64), ("high", ctypes.c_uint64)]
-
-	class FileIdInformation(ctypes.Structure):
-		_fields_ = [
-			("volume_serial", ctypes.c_uint64),
-			("file_id", FileIdentifier),
-		]
-
-	information = ByHandleFileInformation()
+	information = _WindowsByHandleFileInformation()
 	api = cast(Any, kernel32)
 	get_file_information = api.GetFileInformationByHandle
 	if not get_file_information(handle, ctypes.byref(information)):
@@ -1721,7 +1894,7 @@ def _windows_file_identity(
 		int(information.volume_serial),
 		(int(information.index_high) << 32) | int(information.index_low),
 	)
-	file_id_information = FileIdInformation()
+	file_id_information = _WindowsFileIdInformation()
 	get_file_information_ex = api.GetFileInformationByHandleEx
 	modern_identity: tuple[int, int] | None = None
 	if get_file_information_ex(
@@ -1763,23 +1936,12 @@ def _validate_windows_removal_identity(
 
 
 def _clear_windows_readonly_attribute(handle: int, attributes: int, kernel32: object) -> None:
-	from ctypes import wintypes
-
-	class FileBasicInformation(ctypes.Structure):
-		_fields_ = [
-			("creation_time", ctypes.c_longlong),
-			("last_access_time", ctypes.c_longlong),
-			("last_write_time", ctypes.c_longlong),
-			("change_time", ctypes.c_longlong),
-			("attributes", wintypes.DWORD),
-		]
-
 	if not attributes & _WINDOWS_FILE_ATTRIBUTE_READONLY:
 		return
 	api = cast(Any, kernel32)
 	get_file_information = api.GetFileInformationByHandleEx
 	set_file_information = api.SetFileInformationByHandle
-	basic = FileBasicInformation()
+	basic = _WindowsFileBasicInformation()
 	if not get_file_information(
 		handle,
 		_WINDOWS_FILE_BASIC_INFORMATION,
@@ -1800,13 +1962,22 @@ def _clear_windows_readonly_attribute(handle: int, attributes: int, kernel32: ob
 
 
 def _mark_windows_handle_for_deletion(handle: int, kernel32: object) -> None:
-	from ctypes import wintypes
-
-	class FileDispositionInformation(ctypes.Structure):
-		_fields_ = [("delete_file", wintypes.BOOLEAN)]
-
-	disposition = FileDispositionInformation(True)
 	set_file_information = cast(Any, kernel32).SetFileInformationByHandle
+	extended = _WindowsFileDispositionInformationEx(
+		_WINDOWS_FILE_DISPOSITION_DELETE | _WINDOWS_FILE_DISPOSITION_POSIX_SEMANTICS
+	)
+	if set_file_information(
+		handle,
+		_WINDOWS_FILE_DISPOSITION_INFORMATION_EX,
+		ctypes.byref(extended),
+		ctypes.sizeof(extended),
+	):
+		return
+	error = _windows_error()
+	if getattr(error, "winerror", None) not in _WINDOWS_UNSUPPORTED_DISPOSITION_ERRORS:
+		raise error
+	# Older systems and filesystems retain the existing delete-on-last-close behavior.
+	disposition = _WindowsFileDispositionInformation(True)
 	if not set_file_information(
 		handle,
 		_WINDOWS_FILE_DISPOSITION_INFORMATION,
@@ -1842,13 +2013,64 @@ def _remove_directory(path: Path, *, expected_identity: os.stat_result) -> None:
 	_remove_by_quarantine(path, expected_identity, kind="directory")
 
 
-def _clean_stale_entries(temp_root: Path) -> None:
+def _clean_stale_entries(temp_root: Path, *, deadline: float | None = None) -> None:
 	seen: set[str] = set()
-	for owner_record in tuple(temp_root.iterdir()):
+	for owner_record in temp_root.iterdir():
+		_check_workspace_deadline(deadline)
 		entry = _run_directory_from_owner_record(temp_root, owner_record)
 		if entry is not None and entry.name not in seen:
 			seen.add(entry.name)
-			_reclaim_stale_workspace(temp_root, entry)
+			_reclaim_stale_workspace(temp_root, entry, deadline=deadline)
+
+
+def _clean_stale_workspace_entries(temp_root: Path) -> None:
+	_check_ordinary_directory(temp_root)
+	with _locked_file(temp_root / _ROOT_LOCK_NAME):
+		_clean_stale_entries(temp_root)
+
+
+def _bounded_stale_workspace_cleanup(temp_root: Path, deadline: float | None) -> bool:
+	if deadline is None:
+		return False
+	from .operation import current_operation
+
+	operation = current_operation()
+	if operation is None:
+		return False
+	_check_workspace_deadline(deadline)
+	source_root = Path(__file__).resolve().parent.parent
+	body = (
+		"import sys\n"
+		"from pathlib import Path\n"
+		"sys.path.insert(0, sys.argv[1])\n"
+		"from quality_gate.temp_workspace import _clean_stale_workspace_entries\n"
+		"_clean_stale_workspace_entries(Path(sys.argv[2]))\n"
+	)
+	try:
+		returncode, _output, _diagnostics = operation.run_process(
+			[
+				sys.executable,
+				"-I",
+				"-S",
+				"-B",
+				"-c",
+				body,
+				str(source_root),
+				str(temp_root),
+			],
+			root=operation.root,
+			environment=dict(os.environ),
+			timeout_seconds=operation.remaining(),
+			limit=4096,
+		)
+	except Exception as error:
+		raise TemporaryWorkspaceError(
+			"stale temporary workspace cleanup did not complete within the operation budget"
+		) from error
+	if returncode != 0:
+		raise OSError("stale temporary workspace cleanup failed")
+	_check_workspace_deadline(deadline)
+	return True
 
 
 def _run_directory_from_owner_record(temp_root: Path, owner_record: Path) -> Path | None:
@@ -1872,17 +2094,22 @@ def _run_directory_from_owner_record(temp_root: Path, owner_record: Path) -> Pat
 	return temp_root / run_name
 
 
-def _reclaim_stale_workspace(temp_root: Path, entry: Path) -> None:
+def _reclaim_stale_workspace(
+	temp_root: Path, entry: Path, *, deadline: float | None = None
+) -> None:
+	_check_workspace_deadline(deadline)
 	try:
 		metadata = entry.lstat()
 	except FileNotFoundError:
-		_remove_orphan_ownership_record(temp_root, entry)
+		_remove_orphan_ownership_record(temp_root, entry, deadline=deadline)
 		return
 	if is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
 		return
+	_check_workspace_deadline(deadline)
 	owner_valid, owner_identity = _has_valid_ownership_record(temp_root, entry, metadata)
 	if not owner_valid or owner_identity is None:
 		return
+	_check_workspace_deadline(deadline)
 	cleanup_valid, cleanup_identity, active_identity, marker_identity = _has_valid_cleanup_record(
 		temp_root, entry, metadata
 	)
@@ -1904,14 +2131,19 @@ def _reclaim_stale_workspace(temp_root: Path, entry: Path) -> None:
 	if not can_reclaim or cleanup_identity is None or cleanup_controls is None:
 		return
 	try:
-		_remove_entry(entry, expected_identity=metadata)
+		_remove_entry(entry, expected_identity=metadata, deadline=deadline)
+	except TimeoutError:
+		raise
 	except OSError:
 		return
+	_check_workspace_deadline(deadline)
 	_remove_cleanup_record(temp_root, entry, metadata, expected_record=cleanup_identity)
 	_remove_ownership_record(temp_root, entry, metadata, expected_record=owner_identity)
 
 
-def _remove_orphan_ownership_record(temp_root: Path, run_directory: Path) -> None:
+def _remove_orphan_ownership_record(
+	temp_root: Path, run_directory: Path, *, deadline: float | None = None
+) -> None:
 	for path, expected_format, expected_schema in (
 		(
 			_ownership_record_path(temp_root, run_directory),
@@ -1929,6 +2161,7 @@ def _remove_orphan_ownership_record(temp_root: Path, run_directory: Path) -> Non
 			_CLEANUP_RECORD_SCHEMA,
 		),
 	):
+		_check_workspace_deadline(deadline)
 		try:
 			metadata = path.lstat()
 			if (
@@ -1987,6 +2220,7 @@ def _remove_orphan_ownership_record(temp_root: Path, run_directory: Path) -> Non
 			continue
 		try:
 			_remove_file(path, metadata)
+			_check_workspace_deadline(deadline)
 		except OSError:
 			continue
 
@@ -2628,9 +2862,11 @@ def _has_valid_ownership_marker(
 
 
 @contextmanager
-def _locked_file(path: Path) -> Iterator[None]:
+def _locked_file(path: Path, *, deadline: float | None = None) -> Iterator[None]:
 	try:
-		handle = _open_locked_file(path, blocking=True)
+		handle = _open_locked_file(path, blocking=True, deadline=deadline)
+	except TimeoutError:
+		raise
 	except OSError as error:
 		if "symbolic link" in str(error):
 			raise
@@ -2645,19 +2881,26 @@ def _locked_file(path: Path) -> Iterator[None]:
 
 def _create_run_directory(
 	temp_root: Path,
+	*,
+	deadline: float | None = None,
 ) -> tuple[Path, Path, BinaryIO, os.stat_result, os.stat_result]:
 	if _ownership_key(create=True) is None:
 		raise OSError(f"temporary workspace ownership key is unavailable: {temp_root}")
 	root_lock_path = temp_root / _ROOT_LOCK_NAME
-	with _locked_file(root_lock_path):
-		_clean_stale_entries(temp_root)
+	stale_entries_reclaimed = _bounded_stale_workspace_cleanup(temp_root, deadline)
+	with _locked_file(root_lock_path, deadline=deadline):
+		if not stale_entries_reclaimed:
+			_clean_stale_entries(temp_root, deadline=deadline)
+		_check_workspace_deadline(deadline)
 		run_directory = Path(tempfile.mkdtemp(prefix="qg-", dir=temp_root))
 		run_identity: os.stat_result | None = None
 		owner_identity: os.stat_result | None = None
 		active_lock: BinaryIO | None = None
 		try:
 			run_identity = run_directory.lstat()
-			active_lock = _open_locked_file(run_directory / _ACTIVE_LOCK_NAME, blocking=True)
+			active_lock = _open_locked_file(
+				run_directory / _ACTIVE_LOCK_NAME, blocking=True, deadline=deadline
+			)
 			if active_lock is None:
 				raise OSError("could not acquire active repository temp lock")
 			with (run_directory / _OWNERSHIP_MARKER_NAME).open("xb") as marker:
@@ -2684,20 +2927,26 @@ def _create_run_directory(
 
 def _prepare_workspace(
 	root: Path,
+	*,
+	deadline: float | None = None,
 ) -> tuple[Path, Path, BinaryIO, os.stat_result, os.stat_result]:
+	_check_workspace_deadline(deadline)
 	temp_root = root / TEMP_DIRECTORY_NAME
 	try:
 		_check_ordinary_directory(temp_root, allow_missing=True)
+		_check_workspace_deadline(deadline)
 		temp_root.mkdir(parents=True, exist_ok=True)
 		_check_ordinary_directory(temp_root)
-		return _create_run_directory(temp_root)
+		return _create_run_directory(temp_root, deadline=deadline)
 	except (OSError, RuntimeError) as error:
+		_raise_operation_timeout_if_expired(deadline, error)
 		raise TemporaryWorkspaceError(
 			f"could not prepare repository-local temporary workspace under {root}: {error}"
 		) from error
 
 
-def _fallback_workspace_root(root: Path) -> Path:
+def _fallback_workspace_root(root: Path, *, deadline: float | None = None) -> Path:
+	_check_workspace_deadline(deadline)
 	user_identity = (
 		os.environ.get("USER")
 		or os.environ.get("USERNAME")
@@ -2711,20 +2960,25 @@ def _fallback_workspace_root(root: Path) -> Path:
 	root_hash = hashlib.sha256(root_key).hexdigest()[:20]
 	user_root = SYSTEM_TEMP_DIRECTORY / f"quality-gate-workspaces-{user_key}"
 	_check_ordinary_directory(user_root, allow_missing=True)
+	_check_workspace_deadline(deadline)
 	user_root.mkdir(mode=0o700, parents=True, exist_ok=True)
 	_check_ordinary_directory(user_root)
+	_check_workspace_deadline(deadline)
 	fallback_root = user_root / root_hash
 	_check_ordinary_directory(fallback_root, allow_missing=True)
 	fallback_root.mkdir(mode=0o700, exist_ok=True)
 	_check_ordinary_directory(fallback_root)
+	_check_workspace_deadline(deadline)
 	return fallback_root
 
 
 def _prepare_workspace_with_fallback(
 	root: Path,
+	*,
+	deadline: float | None = None,
 ) -> tuple[Path, Path, BinaryIO, os.stat_result, os.stat_result]:
 	try:
-		return _prepare_workspace(root)
+		return _prepare_workspace(root, deadline=deadline)
 	except TemporaryWorkspaceError as error:
 		cause = error.__cause__
 		if not isinstance(cause, OSError) or cause.errno not in {
@@ -2734,8 +2988,8 @@ def _prepare_workspace_with_fallback(
 		}:
 			raise
 	try:
-		fallback_root = _fallback_workspace_root(root)
-		return _prepare_workspace(fallback_root)
+		fallback_root = _fallback_workspace_root(root, deadline=deadline)
+		return _prepare_workspace(fallback_root, deadline=deadline)
 	except OSError as fallback_error:
 		raise TemporaryWorkspaceError(
 			f"repository temp under {root} is not writable and its per-repository "
@@ -2833,9 +3087,23 @@ def _remove_workspace(
 
 
 @contextmanager
-def temporary_workspace(root: Path) -> Iterator[Path]:
-	"""Use repository-local temp, with a system-temp fallback for read-only roots."""
+def temporary_workspace(
+	root: Path,
+	*,
+	cleanup_owner: Callable[[Path, Path], None] | None = None,
+	workspace_registered: Callable[[Path, Path], None] | None = None,
+	deadline: float | None = None,
+) -> Iterator[Path]:
+	"""Use repository-local temp, registering operation ownership before yielding."""
 	try:
+		if deadline is not None and (
+			isinstance(deadline, bool)
+			or not isinstance(deadline, (int, float))
+			or not math.isfinite(deadline)
+		):
+			raise ValueError("temporary workspace deadline must be a finite monotonic timestamp")
+		deadline = None if deadline is None else float(deadline)
+		_check_workspace_deadline(deadline)
 		actual_root = root.expanduser().resolve()
 	except (OSError, RuntimeError) as error:
 		raise TemporaryWorkspaceError(
@@ -2846,10 +3114,30 @@ def temporary_workspace(root: Path) -> Iterator[Path]:
 		yield current[1]
 		return
 
-	with _process_lock:
+	with _locked_process_scope(deadline):
 		run_directory, root_lock_path, active_lock, run_identity, owner_identity = (
-			_prepare_workspace_with_fallback(actual_root)
+			_prepare_workspace_with_fallback(actual_root, deadline=deadline)
 		)
+		if workspace_registered is not None:
+			try:
+				workspace_registered(root_lock_path.parent, run_directory)
+			except Exception as error:
+				try:
+					_remove_workspace(
+						root_lock_path,
+						run_directory,
+						active_lock,
+						run_identity,
+						owner_identity,
+					)
+				except TemporaryWorkspaceError as cleanup_error:
+					raise TemporaryWorkspaceError(
+						"temporary workspace registration and local cleanup failed: "
+						f"{run_directory}"
+					) from cleanup_error
+				raise TemporaryWorkspaceError(
+					f"temporary workspace ownership could not be registered: {run_directory}"
+				) from error
 		previous_tempdir, previous_environment = _set_process_workspace(run_directory)
 		token = _active_workspace.set((actual_root, run_directory))
 		try:
@@ -2857,6 +3145,37 @@ def temporary_workspace(root: Path) -> Iterator[Path]:
 		finally:
 			_restore_process_workspace(previous_tempdir, previous_environment)
 			_active_workspace.reset(token)
-			_remove_workspace(
-				root_lock_path, run_directory, active_lock, run_identity, owner_identity
-			)
+			if cleanup_owner is None:
+				_remove_workspace(
+					root_lock_path, run_directory, active_lock, run_identity, owner_identity
+				)
+			else:
+				try:
+					cleanup_owner(root_lock_path.parent, run_directory)
+				except Exception as error:
+					raise TemporaryWorkspaceError(
+						f"temporary workspace cleanup ownership could not be transferred: "
+						f"{run_directory}"
+					) from error
+				finally:
+					_unlock(active_lock)
+
+
+def cleanup_handed_off_workspace(temp_root: Path, run_directory: Path) -> None:
+	"""Reclaim one workspace transferred by ``temporary_workspace``."""
+	if temp_root.is_symlink() or run_directory.is_symlink():
+		raise OSError("temporary workspace cleanup path became a symbolic link")
+	try:
+		actual_temp_root = temp_root.expanduser().resolve()
+		actual_run_directory = run_directory.expanduser().resolve()
+	except (OSError, RuntimeError) as error:
+		raise OSError("temporary workspace path could not be resolved") from error
+	if actual_run_directory.parent != actual_temp_root or not actual_run_directory.name.startswith(
+		"qg-"
+	):
+		raise OSError("temporary workspace cleanup handoff is invalid")
+	_check_ordinary_directory(actual_temp_root)
+	with _locked_file(actual_temp_root / _ROOT_LOCK_NAME):
+		_reclaim_stale_workspace(actual_temp_root, actual_run_directory)
+	if os.path.lexists(actual_run_directory):
+		raise OSError("handed-off temporary workspace was not safely removed")

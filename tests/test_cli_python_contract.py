@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -843,6 +844,27 @@ def test_cli_reports_timeout_as_unchecked_without_a_failed_verdict(
 
 
 @pytest.mark.parametrize("command", ["check", "audit"])
+def test_cli_starts_operation_before_repository_discovery(
+	command: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+	observed = []
+
+	def fail_discovery(root: Path | None) -> Path:
+		assert root is None
+		operation = runner.current_operation()
+		assert operation is not None
+		observed.append(operation)
+		raise TemporaryWorkspaceError("repository discovery unavailable")
+
+	monkeypatch.setattr(sys, "argv", ["quality-gate", command, "--verbose"])
+	monkeypatch.setattr(runner, "gate_admission", lambda: nullcontext())
+	monkeypatch.setattr(runner, "repository_root", fail_discovery)
+	assert main() == EXIT_UNCHECKED
+	assert len(observed) == 1 and observed[0].finalized
+	assert "temporary.workspace: unchecked" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["check", "audit"])
 def test_cli_renders_early_workspace_unavailability_as_unchecked(
 	command: str,
 	tmp_path: Path,
@@ -851,12 +873,10 @@ def test_cli_renders_early_workspace_unavailability_as_unchecked(
 ) -> None:
 	root = _disposable_repository(tmp_path, "valid")
 
-	def unavailable_workspace(_root: Path) -> object:
+	def unavailable_workspace(_root: Path, **_kwargs: object) -> object:
 		raise TemporaryWorkspaceError("repository workspace unavailable")
 
-	monkeypatch.setattr(
-		"quality_gate.temp_workspace.temporary_workspace", unavailable_workspace
-	)
+	monkeypatch.setattr(runner, "temporary_workspace", unavailable_workspace)
 	monkeypatch.setattr(sys, "argv", ["quality-gate", "--root", str(root), command])
 
 	result = main()

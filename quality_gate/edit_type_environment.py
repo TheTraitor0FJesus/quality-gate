@@ -233,8 +233,8 @@ def _verify_installed_wheel(
 				raise EditError("tool")
 			path = site.joinpath(*parts)
 			expected = base64.urlsafe_b64decode(row[1][7:] + "=").hex()
-			# Reuse bytes just hashed for the environment certificate, then rehash
-			# the complete environment before returning. RECORD stays authoritative.
+			# The certificate's file bytes are checked again against the full environment
+			# before returning; the installation record remains authoritative.
 			if file_identities.get(path) != (expected, int(row[2])):
 				raise EditError("tool")
 			verified.add(path)

@@ -5,8 +5,10 @@ from __future__ import annotations
 from .contracts import (
 	MAX_FINDINGS_PER_CHECK,
 	MAX_FINDINGS_TOTAL,
+	MAX_TELEMETRY_TEXT,
 	CheckResult,
 	Finding,
+	StageTiming,
 	Status,
 	Verdict,
 	redact,
@@ -23,9 +25,95 @@ def _finding_count(count: int) -> str:
 def render(verdict: Verdict, *, verbose: bool = False) -> str:
 	"""Render concise outcomes or the complete deterministic check listing."""
 
-	if verbose:
-		return _render_verbose(verdict)
-	return _render_compact(verdict)
+	output = _render_verbose(verdict) if verbose else _render_compact(verdict)
+	telemetry = _render_telemetry(verdict)
+	return "\n".join((output, *telemetry))
+
+
+def _telemetry_text(value: str, secrets: tuple[str, ...] = ()) -> str:
+	return redact(value, secrets).replace("\r", "\\r").replace("\n", "\\n")[:MAX_TELEMETRY_TEXT]
+
+
+def _timing_line(
+	label: str,
+	timing: StageTiming,
+	secrets: tuple[str, ...] = (),
+	*,
+	outcome: str | None = None,
+	test_totals: str | None = None,
+) -> str:
+	values = [
+		f"elapsed_ms={timing.elapsed_ms}",
+		f"disposition={timing.disposition}",
+		f"scope={_telemetry_text(timing.scope, secrets)}",
+		f"stage={_telemetry_text(timing.stage, secrets)}",
+		f"tool_cache={_telemetry_text(timing.tool_cache, secrets)}",
+	]
+	if outcome is not None:
+		values.append(f"outcome={outcome}")
+	if test_totals is not None:
+		values.append(f"test_totals={_telemetry_text(test_totals, secrets)}")
+	for name, value in (
+		("lookup_ms", timing.lookup_ms),
+		("validation_ms", timing.validation_ms),
+		("original_elapsed_ms", timing.original_elapsed_ms),
+	):
+		if value is not None:
+			values.append(f"{name}={value}")
+	if timing.original_operation_id is not None:
+		values.append(
+			f"original_operation={_telemetry_text(timing.original_operation_id, secrets)}"
+		)
+	if timing.reason:
+		values.append(f"reason={_telemetry_text(timing.reason, secrets)}")
+	return f"  {_telemetry_text(label, secrets)}: {'; '.join(values)}"
+
+
+def _render_telemetry(verdict: Verdict) -> list[str]:
+	lines: list[str] = []
+	operation = verdict.operation
+	if operation is not None:
+		secrets = tuple(secret for result in verdict.results for secret in result._secrets)
+		lines.extend(
+			(
+				"Operation: "
+				+ "; ".join(
+					f"{name}={_telemetry_text(value, secrets)}"
+					for name, value in (
+						("id", operation.operation_id),
+						("operation", operation.operation),
+						("profile", operation.profile),
+						("candidate", operation.candidate),
+						("scope", operation.scope),
+					)
+				),
+				f"  elapsed_ms={operation.elapsed_ms}; complete={str(operation.complete).lower()}; "
+				f"timed_out={str(operation.timed_out).lower()}; "
+				f"current_stage={_telemetry_text(operation.current_stage or 'none', secrets)}; "
+				"last_completed_stage="
+				f"{_telemetry_text(operation.last_completed_stage or 'none', secrets)}",
+			)
+		)
+		lines.extend(_timing_line(timing.stage, timing, secrets) for timing in operation.stages)
+	checks = tuple(result for result in verdict.results if result.telemetry is not None)
+	if checks:
+		lines.append("Check timings:")
+		for result in sorted(checks, key=lambda item: item.check_id):
+			if result.telemetry is None:
+				continue
+			test_totals = None
+			if result.check_id.endswith(".pytest") and result.summary.startswith("pytest totals:"):
+				test_totals = result.summary.partition(":")[2].strip()
+			lines.append(
+				_timing_line(
+					result.check_id,
+					result.telemetry,
+					result._secrets,
+					outcome=result.status.value,
+					test_totals=test_totals,
+				)
+			)
+	return lines
 
 
 def _render_compact(verdict: Verdict) -> str:

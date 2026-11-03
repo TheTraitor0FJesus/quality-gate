@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .admission import AdmissionError, queue_timeout_seconds, running_in_ci
 from .contracts import ValidationError, load_manifest, parse_manifest
+from .operation import OPERATION_CLEANUP_SECONDS
 
 _LOGGER = logging.getLogger(__name__)
 PUSH_FIELD_COUNT = 4
@@ -155,8 +156,10 @@ def _commit_gate_timeout(
 	):
 		raise ValueError("gate timeout must be a positive integer")
 	if running_in_ci(environment):
-		return gate_timeout_seconds
-	return gate_timeout_seconds + queue_timeout_seconds(environment)
+		queue_budget_seconds = 0
+	else:
+		queue_budget_seconds = queue_timeout_seconds(environment)
+	return gate_timeout_seconds + queue_budget_seconds + OPERATION_CLEANUP_SECONDS
 
 
 def run_commit_gate(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import stat
@@ -328,6 +329,21 @@ def test_candidate_snapshot_rejects_index_mutation_during_verification(tmp_path:
 			assert _git(tmp_path, "add", "tracked.txt").returncode == 0
 
 
+def test_candidate_index_identity_stays_bound_to_captured_index(tmp_path: Path) -> None:
+	(tmp_path / "tracked.txt").write_text("one\n", encoding="utf-8")
+	_init_and_stage(tmp_path, "tracked.txt")
+	with pytest.raises(SnapshotError, match="index changed"):
+		with candidate_snapshot(tmp_path) as snapshot:
+			expected = (
+				"git-index-sha256:"
+				+ hashlib.sha256(snapshot.repository_index.read_bytes()).hexdigest()
+			)
+			assert snapshot.index_identity == expected
+			(tmp_path / "tracked.txt").write_text("two\n", encoding="utf-8")
+			assert _git(tmp_path, "add", "tracked.txt").returncode == 0
+			assert snapshot.index_identity == expected
+
+
 def test_candidate_snapshot_rejects_non_positive_timeout(tmp_path: Path) -> None:
 	with pytest.raises(SnapshotError, match="snapshot timeout"):
 		with candidate_snapshot(tmp_path, timeout_seconds=0):
@@ -348,7 +364,7 @@ def test_candidate_snapshot_registers_full_owned_root_once_on_normal_exit(tmp_pa
 		assert owned_root.is_dir()
 	finally:
 		for path in registered:
-			snapshot_module._remove_snapshot(path)
+			snapshot_module.remove_snapshot(path)
 
 
 @pytest.mark.parametrize("failure", ["body", "index"])
@@ -376,7 +392,7 @@ def test_candidate_snapshot_registers_root_once_after_body_or_index_failure(
 		assert owned_root.is_dir()
 	finally:
 		for path in registered:
-			snapshot_module._remove_snapshot(path)
+			snapshot_module.remove_snapshot(path)
 
 
 def test_candidate_snapshot_registers_once_after_construction_failure(
@@ -412,7 +428,7 @@ def test_candidate_snapshot_registers_once_after_construction_failure(
 		assert registered[0].is_dir()
 	finally:
 		for path in registered:
-			snapshot_module._remove_snapshot(path)
+			snapshot_module.remove_snapshot(path)
 
 
 def test_candidate_snapshot_registers_root_when_batch_worker_cannot_start(
@@ -454,7 +470,7 @@ def test_candidate_snapshot_registers_root_when_batch_worker_cannot_start(
 		assert registered[0].is_dir()
 	finally:
 		for path in registered:
-			snapshot_module._remove_snapshot(path)
+			snapshot_module.remove_snapshot(path)
 
 
 def test_candidate_snapshot_does_not_register_when_root_allocation_fails(
@@ -486,13 +502,13 @@ def test_candidate_snapshot_wraps_registration_failure_without_local_cleanup(
 	removed: list[Path] = []
 	registration_error = RuntimeError("owner rejected cleanup registration")
 	owned_root: Path | None = None
-	real_remove = snapshot_module._remove_snapshot
+	real_remove = snapshot_module.remove_snapshot
 
 	def reject_registration(path: Path) -> None:
 		registered.append(path)
 		raise registration_error
 
-	monkeypatch.setattr(snapshot_module, "_remove_snapshot", removed.append)
+	monkeypatch.setattr(snapshot_module, "remove_snapshot", removed.append)
 	try:
 		with pytest.raises(SnapshotError, match="registration failed") as raised:
 			with candidate_snapshot(tmp_path, register_cleanup=reject_registration) as snapshot:
@@ -518,7 +534,7 @@ def test_candidate_snapshot_preserves_construction_failure_if_registration_fails
 	removed: list[Path] = []
 	registration_error = RuntimeError("owner rejected cleanup registration")
 	construction_error = SnapshotError("construction failed after staging allocation")
-	real_remove = snapshot_module._remove_snapshot
+	real_remove = snapshot_module.remove_snapshot
 
 	def fail_candidate_limits(*args: object, **kwargs: object) -> tuple[int, int]:
 		raise construction_error
@@ -528,7 +544,7 @@ def test_candidate_snapshot_preserves_construction_failure_if_registration_fails
 		raise registration_error
 
 	monkeypatch.setattr(snapshot_module, "_candidate_limits", fail_candidate_limits)
-	monkeypatch.setattr(snapshot_module, "_remove_snapshot", removed.append)
+	monkeypatch.setattr(snapshot_module, "remove_snapshot", removed.append)
 	with pytest.raises(SnapshotError, match="registration failed") as raised:
 		with candidate_snapshot(tmp_path, register_cleanup=reject_registration):
 			pass
@@ -583,7 +599,7 @@ def test_candidate_snapshot_registers_allocated_root_after_deadline_expires(
 		assert registered[0].is_dir()
 	finally:
 		for path in registered:
-			snapshot_module._remove_snapshot(path)
+			snapshot_module.remove_snapshot(path)
 
 
 def test_candidate_snapshot_rejects_expired_deadline_before_allocating_root(
