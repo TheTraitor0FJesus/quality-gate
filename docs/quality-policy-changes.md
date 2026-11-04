@@ -70,11 +70,7 @@ release. It must not import mutable source from this repository or depend on Cod
 1. Identify whether the change affects a shared policy, the runner, the manifest contract, or CI behavior.
 2. Update the source of truth in this repository. Do not add a project-local override to weaken a shared rule.
 3. Update focused tests when runner behavior or manifest handling changes.
-4. Run the relevant focused tests. The authorized commit hook runs the staged Quality Gate; this
-   policy-change procedure does not require a separate current-source check. The only routine
-   pre-review Gate outside the hook is the one explicitly required by `$implement`; a direct user
-   request can also request a standalone check. Dispatch that check through test-runner with
-   `scope.kind = "quality-gate"` and `snapshot = "staged"`.
+4. Run the relevant focused tests.
 5. Run `quality-gate audit` and the release controller before publishing a policy release.
 6. Inspect the diff for unintended changes to the shared policy or CI workflow.
 7. Commit and push to `main` only after the checks pass.

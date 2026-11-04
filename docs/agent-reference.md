@@ -46,28 +46,12 @@ read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnos
    Run `quality-gate setup` after selecting a policy release or adding/changing Python components.
    Setup provisions the tools and component runtime before editing; edit-time hooks do not
    install them, and a missing runtime is reported as `unchecked`.
-3. When an authorized commit is the next step, rely on its active commit hook to run the staged
-   Quality Gate. Outside `$implement`'s explicitly required pre-review Gate, run a
-   standalone or current-source `quality-gate check` only when the user directly requests it.
-   Generic verification, review, PR, release, or policy-change guidance does not trigger another
-   Gate. After a failed staged Gate is fixed and commit is next, run focused checks outside hook
-   coverage and retry the commit; do not run a standalone Gate before the hook. Use test-runner
-   `scope.kind = "full"`, `snapshot = "working-tree"` for complete test-suite verification. For consumers
-   without a commit-hook Gate, rely on CI and report an unavailable Gate instead of starting one
-   locally. For a direct user request or the `$implement` pre-review Gate, dispatch a separate
-   test-runner request with `scope.kind = "quality-gate"`, `snapshot = "staged"`, a fresh
-   `run_id`, and no `command` or `coverage`. This scope runs `quality-gate --root <repo> check`.
-   It runs the installed engine selected by that entry point, not the current checkout source.
-   If current-source verification is explicitly requested, establish and report the engine identity;
-   do not present the installed-engine result as current-source evidence. Use a procedure that
-   explicitly supports the requested source check, or report that it is unavailable.
-   The default report preserves every observed failed and
+3. Use test-runner `scope.kind = "full"`, `snapshot = "working-tree"` for complete test-suite
+   verification. The default report preserves every observed failed and
    unchecked check status while bounding finding details. Known and unknown upstream omissions are
    identified explicitly. Use `--verbose` for every status and all safely collected redacted
    findings.
-4. Use `quality-gate format <explicit-path>...` and stage the result. The next authorized commit
-   runs the staged Gate. Do not repeat it before the hook solely because formatting or a correction
-   changed the candidate; use focused checks outside hook coverage.
+4. Use `quality-gate format <explicit-path>...` and stage the result.
 5. The `quality-gate version` command prints the installed engine package version. The repository's
    `quality-gate.toml` selects the policy release; `quality-gate doctor` checks that release and its
    runtimes but does not print its version. `quality-gate setup` prints the selected release when it
@@ -225,7 +209,7 @@ pull-request status and any separate required supplemental-test status, and leav
 merge to a human. Use a narrower test scope for focused checks.
 
 For rollback, restore both pins to the last known-good pair in a new feature-branch candidate and
-run `doctor`; rely on the next commit hook for its staged Gate and run declared supplemental tests
+run `doctor` and run declared supplemental tests
 locally or verify their separate required CI status as above. `quality-gate sync --rollback` only changes cache retention state; it does not
 override `quality.policy_release` or the workflow SHA, so it is not a consumer rollback by itself.
 
