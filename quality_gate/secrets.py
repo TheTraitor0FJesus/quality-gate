@@ -90,7 +90,9 @@ def _run_scanner(command: list[str], root: Path, *, timeout: float) -> tuple[int
 
 def _scanner_environment() -> dict[str, str]:
 	allowed = {"LANG", "LC_ALL", "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR"}
-	return {key: value for key, value in os.environ.items() if key in allowed}
+	environment = {key: value for key, value in os.environ.items() if key in allowed}
+	environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"})
+	return environment
 
 
 def _safe_location(value: object, root: Path) -> str:
@@ -220,6 +222,7 @@ def _scan(
 	mode: str,
 	log_opts: str | None = None,
 	include_commit: bool = False,
+	timeout: float | None = None,
 ) -> CheckResult:
 	scanner = _scanner_path(prepared)
 	if scanner is None:
@@ -228,7 +231,7 @@ def _scan(
 	if log_opts is not None:
 		command.extend(["--log-opts", log_opts])
 	returncode, report = _run_scanner(
-		command, root, timeout=manifest.repository.command_timeout_seconds
+		command, root, timeout=timeout or manifest.repository.command_timeout_seconds
 	)
 	try:
 		findings = parse_secret_report(report, root, include_commit=include_commit)
@@ -245,6 +248,24 @@ def _scan(
 		"no credentials detected" if not findings else "credentials detected",
 		findings,
 		manifest,
+	)
+
+
+def secret_push_commit_result(
+	repository: Path, manifest: Manifest, prepared: PreparedScanner, commit: str, *, timeout: float
+) -> CheckResult:
+	"""Scan every parent patch of one validated outgoing commit, including roots."""
+	if not re.fullmatch(r"[0-9a-f]{40}", commit) or timeout <= 0:
+		return _unchecked("secrets.history", "outgoing history is unavailable")
+	return _scan(
+		repository,
+		manifest,
+		prepared,
+		check_id="secrets.history",
+		mode="git",
+		log_opts=f"--root -m --no-ext-diff --no-textconv --no-walk=unsorted {commit}",
+		include_commit=True,
+		timeout=timeout,
 	)
 
 

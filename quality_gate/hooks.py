@@ -7,13 +7,19 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 from .admission import AdmissionError, queue_timeout_seconds, running_in_ci
-from .contracts import ValidationError, load_manifest, parse_manifest
+from .contracts import Status, ValidationError, load_manifest, parse_manifest
+from .distribution import DistributionError, PolicyCache, verify_release
+from .edit_process import run_process
+from .edit_protocol import EditError
 from .operation import OPERATION_CLEANUP_SECONDS
+from .secrets import secret_push_commit_result
 
 _LOGGER = logging.getLogger(__name__)
 PUSH_FIELD_COUNT = 4
@@ -37,6 +43,8 @@ class PushRef:
 
 	local_ref: str
 	remote_ref: str
+	local_oid: str = ""
+	remote_oid: str = ""
 
 
 def read_push_refs(payload: str) -> tuple[PushRef, ...]:
@@ -64,7 +72,7 @@ def read_push_refs(payload: str) -> tuple[PushRef, ...]:
 			raise HookInputError(f"pre-push input line {line_number} contains an invalid ref")
 		if not REF_NAME.fullmatch(remote_ref):
 			raise HookInputError(f"pre-push input line {line_number} contains an invalid ref")
-		refs.append(PushRef(local_ref, remote_ref))
+		refs.append(PushRef(local_ref, remote_ref, local_sha.lower(), remote_sha.lower()))
 	return tuple(refs)
 
 
@@ -96,16 +104,19 @@ def remote_head(repository: Path, remote: str) -> str | None:
 	"""Read an already-known remote HEAD without network access or mutation."""
 	if not REMOTE_NAME.fullmatch(remote):
 		return None
-	result = subprocess.run(
-		["git", "symbolic-ref", "--quiet", f"refs/remotes/{remote}/HEAD"],
-		cwd=repository,
-		capture_output=True,
-		text=True,
-		encoding="utf-8",
-		check=False,
-	)
+	try:
+		code, output, _ = run_process(
+			["git", "symbolic-ref", "--quiet", f"refs/remotes/{remote}/HEAD"],
+			root=repository,
+			environment=os.environ.copy(),
+			deadline=time.monotonic() + 15,
+			own_tree=True,
+		)
+		value = output.decode("utf-8").strip()
+	except (OSError, UnicodeError, EditError):
+		return None
 	_LOGGER.debug("read remote HEAD for native push policy: remote=%s", remote)
-	return result.stdout.strip() if result.returncode == 0 else None
+	return value if code == 0 else None
 
 
 def pre_push(repository: Path, remote: str, payload: str) -> int:
@@ -123,14 +134,101 @@ def pre_push(repository: Path, remote: str, payload: str) -> int:
 		)
 		return 2
 	blocked = protected_push_refs(refs, branches)
-	if not blocked:
+	if blocked:
+		names = ", ".join(sorted({item.remote_ref for item in blocked}))
+		sys.stderr.write(
+			"PUSH BLOCKED: default branch update or deletion is not allowed "
+			f"({names}). Push a feature branch and open a pull request.\n",
+		)
+		return 1
+	zero = "0" * OBJECT_ID_LENGTH
+	if any(
+		(item.local_ref == "(delete)") != (item.local_oid == zero)
+		or (item.local_ref == "(delete)" and item.remote_oid == zero)
+		for item in refs
+	):
+		sys.stderr.write(
+			"PUSH UNCHECKED: inconsistent ref and object IDs. Retry the push with Git.\n"
+		)
+		return 2
+	updates = [item for item in refs if item.local_ref != "(delete)"]
+	if not updates:
 		return 0
-	names = ", ".join(sorted({item.remote_ref for item in blocked}))
-	sys.stderr.write(
-		"PUSH BLOCKED: default branch update or deletion is not allowed "
-		f"({names}). Push a feature branch and open a pull request.\n",
+	try:
+		return _scan_push_updates(repository, updates, zero)
+	except (OSError, UnicodeError, ValueError, DistributionError, EditError):
+		sys.stderr.write(
+			"PUSH UNCHECKED: outgoing history or pinned scanner is unavailable. "
+			"Fetch or repair the required history, restore the pinned release, and retry.\n"
+		)
+		return 2
+
+
+def _scan_push_updates(repository: Path, updates: list[PushRef], zero: str) -> int:
+	manifest = load_manifest(repository)
+	deadline = time.monotonic() + manifest.repository.command_timeout_seconds
+	commits = _outgoing_commits(repository, updates, zero, deadline)
+	if not commits:
+		return 0
+	policy_root = PolicyCache().releases / manifest.policy_release
+	release = verify_release(policy_root)
+	if release.version != manifest.policy_release:
+		raise ValueError("release mismatch")
+	prepared = SimpleNamespace(policy_root=policy_root, release_manifest=release)
+	for commit in sorted(commits):
+		result = secret_push_commit_result(
+			repository, manifest, prepared, commit, timeout=deadline - time.monotonic()
+		)
+		if result.status is Status.FAILED:
+			sys.stderr.write("PUSH BLOCKED: credentials detected in outgoing history.\n")
+			for finding in result.findings:
+				sys.stderr.write(f"{finding.path}: {finding.message}\n")
+			return 1
+		if result.status not in {Status.PASSED, Status.WAIVED}:
+			raise ValueError("scanner unavailable")
+	return 0
+
+
+def _outgoing_commits(
+	repository: Path, updates: list[PushRef], zero: str, deadline: float
+) -> set[str]:
+	environment = os.environ.copy()
+	environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"})
+
+	def git(*args: str) -> str:
+		code, output, _ = run_process(
+			["git", *args],
+			root=repository,
+			environment=environment,
+			deadline=deadline,
+			own_tree=True,
+		)
+		if code:
+			raise ValueError("Git history unavailable")
+		return output.decode("ascii").strip()
+
+	if git("rev-parse", "--is-shallow-repository") != "false":
+		raise ValueError("shallow history")
+	config_code, config_output, _ = run_process(
+		["git", "config", "--get-regexp", r"^(remote\..*\.promisor|extensions\.partialclone)$"],
+		root=repository,
+		environment=environment,
+		deadline=deadline,
+		own_tree=True,
 	)
-	return 1
+	if config_code not in {0, 1} or config_output:
+		raise ValueError("partial clone history")
+	commits: set[str] = set()
+	for item in updates:
+		local = git("rev-parse", "--verify", f"{item.local_oid}^{{commit}}")
+		negative = (
+			[]
+			if item.remote_oid == zero
+			else ["^" + git("rev-parse", "--verify", f"{item.remote_oid}^{{commit}}")]
+		)
+		git("rev-list", "--objects", "--no-object-names", "--missing=error", local, *negative)
+		commits.update(git("rev-list", local, *negative).splitlines())
+	return commits
 
 
 def commit_gate_timeout_seconds(
