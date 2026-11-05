@@ -152,7 +152,7 @@ def _provider_updates(client: GitHub, tree: Mapping[str, str], version: str) -> 
 	paths = (
 		"quality-gate.toml",
 		"tests/fixtures/release-parity/quality-gate.toml",
-		"tests/test_ci_workflow.py",
+		"tests/test_ci_workflow_contract.py",
 		"tests/test_integrity.py",
 	)
 	contents = {path: _mapping_file(client, tree, path) for path in paths}
@@ -167,8 +167,8 @@ def _provider_updates(client: GitHub, tree: Mapping[str, str], version: str) -> 
 	contents["tests/fixtures/release-parity/quality-gate.toml"] = update_policy_release(
 		contents["tests/fixtures/release-parity/quality-gate.toml"], version
 	)
-	contents["tests/test_ci_workflow.py"] = _replace_one(
-		contents["tests/test_ci_workflow.py"],
+	contents["tests/test_ci_workflow_contract.py"] = _replace_one(
+		contents["tests/test_ci_workflow_contract.py"],
 		r'^(?P<prefix>[ \t]*assert manifest\["quality"\]\["policy_release"\] == )'
 		r'"v[0-9]+\.[0-9]+\.[0-9]+"$',
 		_keep_prefix(f'"{policy_version}"'),

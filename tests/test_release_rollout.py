@@ -333,7 +333,7 @@ def _provider_client() -> FakeGitHub:
 		for path in (
 			"quality-gate.toml",
 			"tests/fixtures/release-parity/quality-gate.toml",
-			"tests/test_ci_workflow.py",
+			"tests/test_ci_workflow_contract.py",
 			"tests/test_integrity.py",
 		)
 	}
@@ -386,7 +386,7 @@ def test_published_provider_activates_both_pins_and_valid_assertions_in_no_relea
 	files = _branch_files(client)
 	for path in ("quality-gate.toml", "tests/fixtures/release-parity/quality-gate.toml"):
 		assert 'policy_release = "v4.2.1"' in files[path]
-	for path in ("tests/test_ci_workflow.py", "tests/test_integrity.py"):
+	for path in ("tests/test_ci_workflow_contract.py", "tests/test_integrity.py"):
 		ast.parse(files[path])
 		assert '== "v4.2.1"' in files[path]
 	assert WAIVER_MARKER not in files["quality-gate.toml"]

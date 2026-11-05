@@ -130,7 +130,7 @@ steps. Neither path uses `RELEASE_TOKEN`, a GHCR PAT, or another long-lived cred
 
 Recovery may fail closed when the release target changes a workflow file and GitHub requires
 `Workflows: write`. That permission cannot be assigned to the built-in `GITHUB_TOKEN`; the original
-candidate remains available for the [original-run publisher recovery](publication.md#historical-403-requiring-workflows-write).
+candidate remains available for the [original-run publisher recovery](publication-recovery.md#historical-403-requiring-workflows-write).
 For a private GHCR package owned by another repository, grant the caller repository access under
 that package's **Manage Actions access** settings. This is a package ACL setting. Administrative
 access and native GitHub immutable-release settings are optional publication conditions. Existing
@@ -182,7 +182,8 @@ activation job also requests Pull requests write. Both installation tokens are s
 repository. The dispatch and activation jobs keep their built-in `GITHUB_TOKEN` read-only.
 
 The provider activation pull request updates `quality-gate.toml`, the release-parity fixture, and
-active policy-version assertions in `tests/test_ci_workflow.py` and `tests/test_integrity.py`. If a
+active policy-version assertions in `tests/test_ci_workflow_contract.py` and
+`tests/test_integrity.py`. If a
 release-candidate waiver is temporary, put `# quality-gate-rollout:remove-after-release` immediately
 before its `[[waivers]]` table. The bot removes only marked waiver tables; leave permanent waivers
 unmarked. Preserve comparator outcomes and the permanent non-gating parity waiver. This activation

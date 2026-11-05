@@ -1,16 +1,76 @@
-"""Validated schema 2, verdict, finding, and typed-waiver contracts."""
+"""Schema and waiver contracts."""
 
 from __future__ import annotations
 
-import hashlib
 import re
 import tomllib
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping
 from datetime import date
-from enum import StrEnum
 from pathlib import Path
 from typing import cast
+
+from .contract_inputs import (
+	MAX_COMPONENT_SOURCE_ROOTS as MAX_COMPONENT_SOURCE_ROOTS,
+)
+from .contract_inputs import (
+	MAX_COMPONENT_STUB_ROOTS as MAX_COMPONENT_STUB_ROOTS,
+)
+from .contract_inputs import (
+	_component_source_roots,
+	_component_stub_roots,
+	_date,
+	_ensure_unique,
+	_keys,
+	_list,
+	_positive_int,
+	_relative_path,
+	_string,
+	_table,
+	_type,
+)
+from .contract_models import (
+	_CHECK_ID,
+	Manifest,
+	PythonComponent,
+	RepositoryContract,
+	SupplementalTest,
+	Waiver,
+	WebComponent,
+)
+from .contract_models import (
+	CheckResult as CheckResult,
+)
+from .contract_models import (
+	Finding as Finding,
+)
+from .contract_models import (
+	Status as Status,
+)
+from .contract_models import (
+	Verdict as Verdict,
+)
+from .contract_models import (
+	fingerprint_secret as fingerprint_secret,
+)
+from .contract_models import (
+	redact as redact,
+)
+from .contract_supplemental import (
+	MAX_SUPPLEMENTAL_TARGET_BYTES as MAX_SUPPLEMENTAL_TARGET_BYTES,
+)
+from .contract_supplemental import (
+	MAX_SUPPLEMENTAL_TARGET_MATCHES as MAX_SUPPLEMENTAL_TARGET_MATCHES,
+)
+from .contract_supplemental import (
+	MAX_SUPPLEMENTAL_TOTAL_BYTES as MAX_SUPPLEMENTAL_TOTAL_BYTES,
+)
+from .contract_supplemental import (
+	MAX_SUPPLEMENTAL_TOTAL_MATCHES as MAX_SUPPLEMENTAL_TOTAL_MATCHES,
+)
+from .contract_supplemental import (
+	ValidationError,
+	_validate_supplemental_targets,
+)
 
 MANIFEST_NAME = "quality-gate.toml"
 SCHEMA_VERSION = 2
@@ -27,314 +87,9 @@ MAX_FINDINGS_TOTAL = 100
 MAX_SUPPLEMENTAL_TESTS = 32
 MAX_SUPPLEMENTAL_TARGET_PATTERNS = 32
 MAX_SUPPLEMENTAL_TARGET_LENGTH = 256
-MAX_SUPPLEMENTAL_TARGET_MATCHES = 1024
-MAX_SUPPLEMENTAL_TARGET_BYTES = 64 * 1024
-MAX_SUPPLEMENTAL_TOTAL_MATCHES = 4096
-MAX_SUPPLEMENTAL_TOTAL_BYTES = 256 * 1024
-MAX_COMPONENT_STUB_ROOTS = 32
-MAX_COMPONENT_SOURCE_ROOTS = 32
-ASCII_C0_END = 32
-ASCII_DELETE = 127
-_CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 _FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 _WILDCARD = re.compile(r"[*?\[\]{}]")
 _HUMAN_BLOCKLIST = {"bot", "automation", "automated", "dependabot", "github-actions"}
-
-
-class Status(StrEnum):
-	PASSED = "passed"
-	FAILED = "failed"
-	UNCHECKED = "unchecked"
-	NOT_APPLICABLE = "not_applicable"
-	WAIVED = "waived"
-
-
-class ValidationError(ValueError):
-	"""A safe, path-aware contract validation error."""
-
-	def __init__(self, path: str, message: str) -> None:
-		self.path = path
-		self.message = message
-		super().__init__(f"{path}: {message}")
-
-
-def _type(value: object, expected: type | tuple[type, ...], path: str) -> object:
-	allows_bool = expected is bool or (isinstance(expected, tuple) and bool in expected)
-	if not isinstance(value, expected) or (isinstance(value, bool) and not allows_bool):
-		names = (
-			", ".join(t.__name__ for t in expected)
-			if isinstance(expected, tuple)
-			else expected.__name__
-		)
-		raise ValidationError(path, f"expected {names}")
-	return value
-
-
-def _table(value: object, path: str) -> dict[str, object]:
-	return cast(dict[str, object], _type(value, dict, path))
-
-
-def _keys(table: Mapping[str, object], allowed: set[str], path: str) -> None:
-	unknown = sorted(set(table) - allowed)
-	if unknown:
-		raise ValidationError(path, f"unknown field {unknown[0]!r}")
-
-
-def _string(value: object, path: str) -> str:
-	result = cast(str, _type(value, str, path))
-	if not result.strip():
-		raise ValidationError(path, "must not be empty")
-	return result
-
-
-def _list(value: object, path: str) -> list[object]:
-	return cast(list[object], _type(value, list, path))
-
-
-def _ensure_unique(values: Iterable[str], path: str, message: str) -> None:
-	values = tuple(values)
-	if len(set(values)) != len(values):
-		raise ValidationError(path, message)
-
-
-def _relative_path(value: object, path: str) -> str:
-	result = _string(value, path).replace("\\", "/")
-	candidate = Path(result)
-	if (
-		"\x00" in result
-		or ":" in result
-		or candidate.is_absolute()
-		or bool(candidate.drive)
-		or result == "."
-		or any(part in {".", ".."} for part in candidate.parts)
-	):
-		raise ValidationError(path, "must be a repository-relative path")
-	return result
-
-
-def _positive_int(value: object, path: str) -> int:
-	result = cast(int, _type(value, int, path))
-	if result <= 0:
-		raise ValidationError(path, "must be greater than zero")
-	return result
-
-
-def _date(value: object, path: str) -> date:
-	raw = _string(value, path)
-	try:
-		return date.fromisoformat(raw)
-	except ValueError as exc:
-		raise ValidationError(path, "must use YYYY-MM-DD") from exc
-
-
-def _component_stub_roots(value: object, path: str) -> tuple[str, ...]:
-	roots = tuple(
-		_string(item, f"{path}[{index}]") for index, item in enumerate(_list(value, path))
-	)
-	if len(roots) > MAX_COMPONENT_STUB_ROOTS:
-		raise ValidationError(path, f"must contain at most {MAX_COMPONENT_STUB_ROOTS} paths")
-	_ensure_unique(roots, path, "must contain unique paths")
-	for index, root in enumerate(roots):
-		if "\\" in root or ":" in root or any(part in {"", ".", ".."} for part in root.split("/")):
-			raise ValidationError(f"{path}[{index}]", "must be a component-relative POSIX path")
-	return roots
-
-
-def _component_source_roots(value: object, path: str, component_path: str) -> tuple[str, ...]:
-	roots = tuple(
-		_string(item, f"{path}[{index}]") for index, item in enumerate(_list(value, path))
-	)
-	if len(roots) > MAX_COMPONENT_SOURCE_ROOTS:
-		raise ValidationError(path, f"must contain at most {MAX_COMPONENT_SOURCE_ROOTS} paths")
-	_ensure_unique(roots, path, "must contain unique paths")
-	if len({root.casefold() for root in roots}) != len(roots):
-		raise ValidationError(path, "must contain unique paths")
-	if component_path == "." and roots:
-		raise ValidationError(
-			path, "source roots cannot be declared for a repository-root component"
-		)
-	paths = [component_path, *roots]
-	for index, root in enumerate(roots):
-		if (
-			"\\" in root
-			or ":" in root
-			or any(
-				ord(character) < ASCII_C0_END or ord(character) == ASCII_DELETE
-				for character in root
-			)
-			or any(part in {"", ".", ".."} for part in root.split("/"))
-		):
-			raise ValidationError(
-				f"{path}[{index}]", "must be a repository-relative POSIX directory"
-			)
-	for index, root in enumerate(roots):
-		canonical = root.casefold()
-		if any(
-			canonical == other.casefold()
-			or canonical.startswith(f"{other.casefold()}/")
-			or other.casefold().startswith(f"{canonical}/")
-			for other in paths[: index + 1]
-		):
-			raise ValidationError(
-				path, "source roots must not overlap each other or the component path"
-			)
-	return tuple(sorted(roots))
-
-
-@dataclass(frozen=True, slots=True)
-class RepositoryContract:
-	name: str
-	domains: tuple[str, ...]
-	required_documents: tuple[str, ...]
-	max_blob_size_mib: int
-	command_timeout_seconds: int
-	test_timeout_seconds: int
-	gate_timeout_seconds: int
-
-
-@dataclass(frozen=True, slots=True)
-class PythonComponent:
-	name: str
-	path: str
-	python_version: str
-	dependency_inputs: tuple[str, ...]
-	test_paths: tuple[str, ...]
-	tests_applicable: bool
-	tests_reason: str | None
-	timeout_seconds: int
-	typecheck: bool = True
-	stub_roots: tuple[str, ...] = ()
-	source_roots: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class WebComponent:
-	name: str
-	root: str
-	javascript: tuple[str, ...]
-	css: tuple[str, ...]
-	exclude: tuple[str, ...]
-	javascript_file_kib: int
-	css_file_kib: int
-	javascript_total_kib: int
-	css_total_kib: int
-
-
-@dataclass(frozen=True, slots=True)
-class SupplementalTest:
-	name: str
-	runner: str
-	targets: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class Waiver:
-	kind: str
-	check_id: str
-	target: str
-	reason: str
-	approved_by: str
-	reviewed_on: date
-	expires_on: date
-	fingerprint: str | None
-
-	def is_current(self, today: date | None = None) -> bool:
-		current_day = today or date.today()
-		return self.reviewed_on <= current_day <= self.expires_on
-
-	def matches(self, check_id: str, target: str, fingerprint: str | None = None) -> bool:
-		if self.check_id != check_id or self.target != target or not self.is_current():
-			return False
-		return self.fingerprint == fingerprint
-
-
-@dataclass(frozen=True, slots=True)
-class Manifest:
-	policy_release: str
-	repository: RepositoryContract
-	python: tuple[PythonComponent, ...]
-	web: tuple[WebComponent, ...]
-	supplemental_tests: tuple[SupplementalTest, ...]
-	waivers: tuple[Waiver, ...]
-
-	def resolve_waiver(
-		self, check_id: str, target: str, fingerprint: str | None = None
-	) -> Waiver | None:
-		for waiver in self.waivers:
-			if waiver.matches(check_id, target, fingerprint):
-				return waiver
-		return None
-
-
-@dataclass(frozen=True, slots=True)
-class Finding:
-	path: str = ""
-	line: int | None = None
-	message: str = ""
-	action: str = ""
-
-	def sort_key(self) -> tuple[str, int, str, str]:
-		return self.path, self.line or 0, self.message, self.action
-
-
-@dataclass(frozen=True, slots=True)
-class CheckResult:
-	check_id: str
-	status: Status
-	summary: str
-	findings: tuple[Finding, ...] = ()
-	recovery_action: str | None = None
-	waiver_target: str | None = None
-	_secrets: tuple[str, ...] = field(default=(), repr=False, compare=False)
-	omitted_findings: int | None = 0
-
-	def __post_init__(self) -> None:
-		if not _CHECK_ID.fullmatch(self.check_id):
-			raise ValueError(f"invalid check id: {self.check_id!r}")
-		if not self.summary.strip():
-			raise ValueError("check summaries must not be empty")
-		if self.omitted_findings is not None and (
-			not isinstance(self.omitted_findings, int)
-			or isinstance(self.omitted_findings, bool)
-			or self.omitted_findings < 0
-		):
-			raise ValueError("omitted finding count must be a non-negative integer or unknown")
-		if (
-			self.status in {Status.FAILED, Status.UNCHECKED, Status.NOT_APPLICABLE}
-			and not self.recovery_action
-		):
-			raise ValueError(f"{self.status.value} results require a recovery action")
-		if self.status is Status.WAIVED and (
-			not self.waiver_target
-			or not self.waiver_target.strip()
-			or _WILDCARD.search(self.waiver_target)
-		):
-			raise ValueError("waived results require one exact target")
-		if self.status is Status.PASSED and self.findings:
-			raise ValueError("passed results cannot contain findings")
-		if self.status is Status.PASSED and self.omitted_findings != 0:
-			raise ValueError("passed results cannot contain omitted findings")
-
-	@property
-	def ordered_findings(self) -> tuple[Finding, ...]:
-		return tuple(sorted(self.findings, key=Finding.sort_key))
-
-
-@dataclass(frozen=True, slots=True)
-class Verdict:
-	results: tuple[CheckResult, ...]
-
-	def __post_init__(self) -> None:
-		ids = [result.check_id for result in self.results]
-		if len(set(ids)) != len(ids):
-			raise ValueError("check ids must be unique within a verdict")
-
-	@property
-	def exit_code(self) -> int:
-		statuses = {result.status for result in self.results}
-		if Status.UNCHECKED in statuses:
-			return 2
-		return 1 if Status.FAILED in statuses else 0
 
 
 def _parse_component(value: object, index: int) -> PythonComponent:
@@ -702,72 +457,15 @@ def _validate_typing_policy(root: Mapping[str, object], policy_release: str) -> 
 	version = tuple(int(part) for part in policy_release[1:].split("."))
 	for index, component in enumerate(_list(root.get("python", []), "python")):
 		table = _table(component, f"python[{index}]")
-		if "typecheck" in table and version < (3, 1, 0):
-			raise ValidationError(f"python[{index}].typecheck", "requires policy v3.1.0 or newer")
-		if "stub_roots" in table and version < (3, 2, 0):
-			raise ValidationError(f"python[{index}].stub_roots", "requires policy v3.2.0 or newer")
-		if "source_roots" in table and version < (4, 6, 0):
-			raise ValidationError(
-				f"python[{index}].source_roots", "requires policy v4.6.0 or newer"
-			)
-
-
-def _validate_supplemental_match(match: Path, root: Path, path: str) -> int:
-	try:
-		resolved_match = match.resolve()
-	except OSError as exc:
-		raise ValidationError(path, "must resolve inside the repository") from exc
-	if resolved_match != root and root not in resolved_match.parents:
-		raise ValidationError(path, "must match only paths inside the repository")
-	return len(resolved_match.relative_to(root).as_posix().encode("utf-8"))
-
-
-def _validate_supplemental_target(root: Path, target: str, path: str) -> tuple[int, int]:
-	try:
-		matches: list[Path] = []
-		for match in root.glob(target):
-			if len(matches) >= MAX_SUPPLEMENTAL_TARGET_MATCHES:
+		for field, minimum in (
+			("typecheck", (3, 1, 0)),
+			("stub_roots", (3, 2, 0)),
+			("source_roots", (4, 6, 0)),
+		):
+			if field in table and version < minimum:
+				required = ".".join(str(part) for part in minimum)
 				raise ValidationError(
-					path,
-					f"must match at most {MAX_SUPPLEMENTAL_TARGET_MATCHES} repository paths",
-				)
-			matches.append(match)
-	except ValidationError:
-		raise
-	except (OSError, ValueError) as exc:
-		raise ValidationError(path, "must be a valid repository-relative target") from exc
-	if not matches:
-		raise ValidationError(path, "must match at least one repository path")
-	matched_bytes = sum(_validate_supplemental_match(match, root, path) for match in matches)
-	if matched_bytes > MAX_SUPPLEMENTAL_TARGET_BYTES:
-		raise ValidationError(
-			path, f"matched paths must use at most {MAX_SUPPLEMENTAL_TARGET_BYTES} bytes"
-		)
-	return len(matches), matched_bytes
-
-
-def _validate_supplemental_targets(root: Path, tests: tuple[SupplementalTest, ...]) -> None:
-	try:
-		resolved_root = root.resolve()
-	except OSError as exc:
-		raise ValidationError("manifest", "repository root cannot be resolved") from exc
-	total_matches = 0
-	total_bytes = 0
-	for test_index, supplemental_test in enumerate(tests):
-		for target_index, target in enumerate(supplemental_test.targets):
-			path = f"supplemental_tests[{test_index}].targets[{target_index}]"
-			match_count, matched_bytes = _validate_supplemental_target(resolved_root, target, path)
-			total_matches += match_count
-			total_bytes += matched_bytes
-			if total_matches > MAX_SUPPLEMENTAL_TOTAL_MATCHES:
-				raise ValidationError(
-					path,
-					f"all targets must match at most {MAX_SUPPLEMENTAL_TOTAL_MATCHES} paths",
-				)
-			if total_bytes > MAX_SUPPLEMENTAL_TOTAL_BYTES:
-				raise ValidationError(
-					path,
-					f"all matched paths must use at most {MAX_SUPPLEMENTAL_TOTAL_BYTES} bytes",
+					f"python[{index}].{field}", f"requires policy v{required} or newer"
 				)
 
 
@@ -787,22 +485,3 @@ def load_manifest(root: Path | str = ".", manifest_name: str = MANIFEST_NAME) ->
 		raise ValidationError("manifest", "cannot read valid UTF-8 TOML") from exc
 	_validate_supplemental_targets(path.parent, manifest.supplemental_tests)
 	return manifest
-
-
-def fingerprint_secret(value: str) -> str:
-	return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def redact(text: str, secrets: Iterable[str] = ()) -> str:
-	result = text
-	tokens = {secret for secret in secrets if secret}
-	for secret in tuple(tokens):
-		tokens.update(secret[:length] for length in range(8, len(secret) + 1))
-	for token in sorted(tokens, key=len, reverse=True):
-		result = result.replace(token, "<REDACTED>")
-	for pattern in (
-		r"(?i)(?:ghp_|github_pat_|sk-|xox[baprs]-)[A-Za-z0-9_-]{8,}",
-		r"(?i)(?:password|passwd|token|secret|api[_-]?key)\s*[=:]\s*[^\s,;]+",
-	):
-		result = re.sub(pattern, "<REDACTED>", result)
-	return result
