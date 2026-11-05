@@ -15,6 +15,7 @@ import quality_gate.release as release
 from quality_gate.release import (
 	WINDOWS_MAX_WORKSPACE_PATH_CHARS,
 	ReleaseControllerError,
+	verify_product_candidate,
 	verify_release_candidate,
 )
 from quality_gate.release_contract import (
@@ -163,6 +164,9 @@ def _artifact(root: Path, version: str = "2.0.0", *, valid_wheel: bool = True) -
 				"def bootstrap_audit(root, *, policy_release):\n"
 				'    print("release artifact audit diagnostic", flush=True)\n'
 				'    record("audit", policy_release, root)\n'
+				"    return SimpleNamespace(exit_code=0)\n"
+				"def bootstrap_product_audit(root, *, policy_release):\n"
+				'    record("product-audit", policy_release, root)\n'
 				"    return SimpleNamespace(exit_code=0)\n",
 			)
 			archive.writestr(
@@ -237,6 +241,15 @@ def test_release_controller_accepts_a_verified_self_host_candidate(tmp_path: Pat
 
 	assert candidate.version == "v2.0.0"
 	assert candidate.manifest.wheel is not None
+
+
+def test_product_verification_does_not_authorize_an_unready_release(tmp_path: Path) -> None:
+	_source(tmp_path)
+	(tmp_path / ".release" / "notes.md").write_text("", encoding="utf-8")
+	artifact = _artifact(tmp_path)
+	assert verify_product_candidate(tmp_path, artifact).manifest.wheel is not None
+	with pytest.raises(ReleaseControllerError, match="release notes"):
+		verify_release_candidate(tmp_path, artifact)
 
 
 def test_windows_release_workspace_path_accepts_the_limit(
@@ -316,9 +329,7 @@ def test_provider_release_candidate_preflight_reuses_the_allocated_path(
 		fixturenames=("release_candidate_path",),
 		stash={},
 	)
-	session = SimpleNamespace(
-		items=(item,), config=SimpleNamespace(_tmp_path_factory=factory)
-	)
+	session = SimpleNamespace(items=(item,), config=SimpleNamespace(_tmp_path_factory=factory))
 	monkeypatch.setattr(conftest, "_default_release_workspace", lambda: None)
 
 	conftest._preflight_release_test_paths(session)

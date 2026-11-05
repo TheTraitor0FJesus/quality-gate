@@ -246,3 +246,5 @@ acceptance in the final release workflow.
 The release preserves the schema 2 CLI, schema 2 hook/runtime contract, platform ZIP delivery, consumer
 activation, rollback, cache retention, and backup responsibilities. Publishing the provider opens
 reviewed activation pull requests; it does not merge them or deploy consumer services.
+
+Read-only PR product verification and its producer evidence contract are described in [product verification](product-verification.md).

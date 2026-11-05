@@ -1,0 +1,312 @@
+"""Quality Gate runner: python checks operations."""
+
+from __future__ import annotations
+
+from . import runner as _runner
+
+
+def _append_missing_component_check(
+	results: _runner._OperationResults, context: _runner._PythonCheckContext
+) -> None:
+	check_id = f"python.component_{context.component_index}.path"
+	component_scope = context.component.path.relative_to(context.root).as_posix()
+	missing_component = _runner.CheckResult(
+		check_id=check_id,
+		status=_runner.Status.UNCHECKED,
+		summary="Python component path is unavailable",
+		findings=(
+			_runner.Finding(
+				path=component_scope,
+				message="declared component path does not exist",
+				action="restore the declared component path",
+			),
+		),
+		recovery_action="restore the declared component path and retry the quality gate",
+	)
+	results.append(
+		_runner.observe_check(
+			check_id,
+			component_scope,
+			_runner._fixed_check_result(missing_component),
+		)
+	)
+	results.append(context.dependency_result())
+	_runner._mark_component_checks_not_run(
+		results,
+		context.component,
+		context.component_index,
+		context.prepared,
+		"declared component path is unavailable",
+	)
+
+
+def _append_missing_test_path_checks(
+	results: _runner._OperationResults,
+	root: _runner.Path,
+	component: _runner.PythonComponent,
+	component_index: int,
+) -> None:
+	for missing_index, missing_path in enumerate(component.missing_test_paths, start=1):
+		check_id = f"python.component_{component_index}.test_path_{missing_index}"
+		missing_test_path = _runner.CheckResult(
+			check_id=check_id,
+			status=_runner.Status.UNCHECKED,
+			summary="declared test path is unavailable",
+			findings=(
+				_runner.Finding(
+					path=missing_path.relative_to(root).as_posix(),
+					message="declared test path does not exist",
+					action="restore the declared test path",
+				),
+			),
+			recovery_action="restore the declared test path and retry the quality gate",
+		)
+		results.append(
+			_runner.observe_check(
+				check_id,
+				missing_path.relative_to(root).as_posix(),
+				_runner._fixed_check_result(missing_test_path),
+			)
+		)
+
+
+def _append_unavailable_runtime_checks(
+	results: _runner._OperationResults,
+	context: _runner._PythonCheckContext,
+	error: _runner.QualityGateError,
+) -> None:
+	results.append(_runner._error_result(error))
+	results.append(context.dependency_result())
+	_runner._mark_component_checks_not_run(
+		results,
+		context.component,
+		context.component_index,
+		context.prepared,
+		"component runtime is unavailable",
+	)
+
+
+def _run_ready_python_component_checks(
+	results: _runner._OperationResults,
+	context: _runner._PythonCheckContext,
+	python_executable: _runner.Path,
+	environment: dict[str, str],
+) -> tuple[list[str], list[_runner.QualityGateError], dict[str, str]]:
+	results.append(context.dependency_result(python_executable))
+	component = context.component
+	prefix = f"python.component_{context.component_index}"
+	if component.tests is not None and not component.test_paths:
+		test_paths = tuple(
+			path.relative_to(context.root).as_posix()
+			for path in (*component.test_paths, *component.missing_test_paths)
+		)
+		component_scope = component.path.relative_to(context.root).as_posix()
+		test_scope = f"{component_scope}; tests={','.join(test_paths)}"
+		reason = "no declared test path is available"
+		results.append_not_run(f"{prefix}.pytest", test_scope, reason)
+		if _runner._has_pinned_coverage(context.prepared):
+			results.append_not_run(f"{prefix}.coverage", test_scope, reason)
+			results.append_not_run(f"{prefix}.coverage_report", test_scope, reason)
+	return _runner._execute_commands(
+		context.root,
+		environment,
+		_runner._component_commands(
+			context.root,
+			context.manifest,
+			component,
+			context.prepared,
+			context.component_index,
+			python_executable,
+		),
+		component.timeout_seconds,
+		context.deadline,
+		prepared=context.prepared,
+		component=component,
+		component_index=context.component_index,
+		manifest=context.manifest,
+	)
+
+
+def _run_python_component_checks(
+	results: _runner._OperationResults,
+	context: _runner._PythonCheckContext,
+	environment: dict[str, str],
+) -> tuple[list[str], list[_runner.QualityGateError], dict[str, str]]:
+	if not context.component.path_exists:
+		_runner._append_missing_component_check(results, context)
+		return [], [], {}
+	_runner._append_missing_test_path_checks(
+		results, context.root, context.component, context.component_index
+	)
+	try:
+		python_executable = _runner._runtime_python(context.prepared, context.component_index)
+	except _runner.QualityGateError as error:
+		_runner._append_unavailable_runtime_checks(results, context, error)
+		return [], [], {}
+	return _runner._run_ready_python_component_checks(
+		results, context, python_executable, environment
+	)
+
+
+def _append_not_applicable_python_checks(
+	results: _runner._OperationResults,
+	components: list[_runner.PythonComponent],
+	prepared: _runner.PreparedEnvironment,
+) -> None:
+	for component_index, component in enumerate(components, start=1):
+		tests_not_applicable = component.tests is None
+		has_coverage = _runner._has_pinned_coverage(prepared)
+		if not component.typecheck:
+			results.append(
+				_runner.CheckResult(
+					check_id=f"python.component_{component_index}.mypy",
+					status=_runner.Status.NOT_APPLICABLE,
+					summary="typing is explicitly disabled by the component contract",
+					recovery_action="enable typecheck when component typing is required",
+				)
+			)
+		if tests_not_applicable:
+			results.append(
+				_runner.CheckResult(
+					check_id=f"python.component_{component_index}.pytest",
+					status=_runner.Status.NOT_APPLICABLE,
+					summary="tests are explicitly not applicable",
+					recovery_action="declare test paths if tests apply",
+				)
+			)
+		if tests_not_applicable or not has_coverage:
+			summary = (
+				"coverage is not applicable without tests"
+				if tests_not_applicable and has_coverage
+				else "coverage provider is not in the pinned policy inventory"
+			)
+			recovery_action = (
+				"declare test paths before collecting report-only coverage"
+				if tests_not_applicable and has_coverage
+				else "add a pinned coverage provider only when report-only coverage is required"
+			)
+			results.append(
+				_runner.CheckResult(
+					check_id=f"python.component_{component_index}.coverage",
+					status=_runner.Status.NOT_APPLICABLE,
+					summary=summary,
+					recovery_action=recovery_action,
+				)
+			)
+
+
+def _run_python_checks(
+	actual_root: _runner.Path,
+	manifest: _runner.Manifest,
+	components: list[_runner.PythonComponent],
+	prepared: _runner.PreparedEnvironment,
+	*,
+	deadline: float,
+) -> list[_runner.CheckResult]:
+	results = _runner._OperationResults(actual_root)
+	results.manifest = manifest
+	with _runner.temporary_directory(actual_root) as temporary_path:
+		environment = _runner._safe_environment(temporary_path)
+		environment["QUALITY_GATE_POLICY_ROOT"] = str(prepared.policy_root)
+		temporary_root = _runner.Path(temporary_path)
+		run_errors: list[_runner.QualityGateError] = []
+		executed: list[str] = []
+		run_outputs: dict[str, str] = {}
+		for component_index, component in enumerate(components, start=1):
+			context = _runner._PythonCheckContext(
+				actual_root,
+				manifest,
+				component,
+				prepared,
+				component_index,
+				temporary_root / f"deptry-{component_index}.json",
+				deadline,
+			)
+			component_executed, component_errors, component_outputs = (
+				_runner._run_python_component_checks(
+					results,
+					context,
+					environment,
+				)
+			)
+			executed.extend(component_executed)
+			run_errors.extend(component_errors)
+			run_outputs.update(component_outputs)
+	results.extend(_runner._command_results(executed, run_errors, run_outputs))
+	_runner._append_not_applicable_python_checks(results, components, prepared)
+	return results
+
+
+def format_paths(root: _runner.Path | None, paths: tuple[str, ...]) -> None:
+	"""Format only the explicit Python paths with the pinned Ruff release."""
+	actual_root = _runner.repository_root(root)
+	try:
+		manifest = _runner.load_manifest(actual_root)
+		components = _runner.load_components(actual_root)
+	except _runner.ValidationError as error:
+		raise _runner._manifest_error(error) from error
+	if not components:
+		raise _runner.QualityGateError(
+			"no Python component is declared",
+			check_id="python.components",
+			exit_code=_runner.EXIT_UNCHECKED,
+			recovery_action="declare a Python component before formatting Python files",
+		)
+	prepared = _runner.prepare(actual_root)
+	deadline = _runner.time.monotonic() + manifest.repository.gate_timeout_seconds
+	selected: dict[int, list[str]] = {}
+	for raw_path in paths:
+		candidate = _runner.relative_path(actual_root, raw_path, "format path")
+		if not candidate.exists():
+			raise _runner.QualityGateError(
+				f"format path does not exist: {raw_path}",
+				check_id="python.format",
+				exit_code=_runner.EXIT_UNCHECKED,
+				recovery_action=f"restore {raw_path} and retry format",
+			)
+		for index, component in enumerate(components):
+			if candidate == component.path or component.path in candidate.parents:
+				selected.setdefault(index, []).append(str(candidate.relative_to(actual_root)))
+				break
+		else:
+			raise _runner.QualityGateError(
+				f"format path is outside every Python component: {raw_path}",
+				check_id="python.format",
+				exit_code=_runner.EXIT_UNCHECKED,
+				recovery_action="format only paths declared by a Python component",
+			)
+	with _runner.temporary_directory(actual_root) as temporary_path:
+		environment = _runner._safe_environment(temporary_path)
+		format_errors: list[_runner.QualityGateError] = []
+		for index, explicit_paths in selected.items():
+			python_executable = _runner._runtime_python(prepared, index + 1)
+			try:
+				_runner.run(
+					[
+						*_runner._tool_command(prepared, python_executable, "ruff"),
+						"format",
+						"--config",
+						str(prepared.policy_root / "quality_gate" / "policy" / "ruff.toml"),
+						*explicit_paths,
+					],
+					actual_root,
+					environment,
+					timeout=_runner._remaining(
+						deadline, manifest.repository.command_timeout_seconds
+					),
+				)
+			except _runner.QualityGateError as error:
+				format_errors.append(error)
+		if format_errors:
+			raise _runner.QualityGateError(
+				"\n".join(str(error) for error in format_errors),
+				check_id="python.format",
+				exit_code=(
+					_runner.EXIT_UNCHECKED
+					if any(error.exit_code == _runner.EXIT_UNCHECKED for error in format_errors)
+					else 1
+				),
+				recovery_action="restore formatting verification and retry format",
+			)
+
+	_runner.emit("format: complete - stage the changes, then run check")

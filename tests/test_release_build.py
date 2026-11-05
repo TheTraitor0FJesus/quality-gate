@@ -131,3 +131,82 @@ def test_release_build_isolates_test_history_and_preserves_evidence(
 		assert evidence["run_id"] == 123
 		assert evidence["attempt"] == 2
 		assert (output / package.name).read_bytes() == package.read_bytes()
+
+
+def test_pr_build_does_not_require_publication_candidate(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	source_sha = "a" * 40
+	platform = "windows" if os.name == "nt" else "linux"
+	for key, value in {
+		"SOURCE_SHA": source_sha,
+		"BASE_SHA": "b" * 40,
+		"RELEASE_PLATFORM": platform,
+		"GITHUB_REPOSITORY": "owner/quality-gate",
+		"GITHUB_RUN_ID": "123",
+		"GITHUB_RUN_ATTEMPT": "1",
+		"RUNNER_TEMP": str(tmp_path),
+	}.items():
+		monkeypatch.setenv(key, value)
+	monkeypatch.delenv("CANDIDATE_PATH", raising=False)
+	monkeypatch.delenv("CANDIDATE_DIGEST", raising=False)
+	package = tmp_path / "quality-gate-v2.3.0.zip"
+	package.write_bytes(b"verified artifact")
+	identity = {
+		"path": str(package),
+		"name": package.name,
+		"version": "2.3.0",
+		"source_sha": source_sha,
+		"platform": platform,
+		"sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
+	}
+	commands: list[list[str]] = []
+
+	def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+		commands.append(command)
+		if "build" in command:
+			cast(BinaryIO, options["stdout"]).write(json.dumps(identity).encode())
+		return subprocess.CompletedProcess(command, 0, stdout="")
+
+	monkeypatch.setattr(subprocess, "run", run)
+	release_build.main(pull_request=True)
+	evidence_path = tmp_path / "quality-gate-release" / platform / "verification.json"
+	evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+	assert evidence["base_sha"] == "b" * 40
+	assert evidence["head_sha"] == source_sha
+	assert evidence["artifact"]["sha256"] == identity["sha256"]
+	assert any("verify-pr" in command for command in commands)
+	assert not (evidence_path.parent / "evidence.json").exists()
+
+
+def test_pr_build_rejects_checkout_changed_during_build(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	platform = "windows" if os.name == "nt" else "linux"
+	for key, value in {
+		"SOURCE_SHA": "a" * 40,
+		"BASE_SHA": "b" * 40,
+		"RELEASE_PLATFORM": platform,
+		"GITHUB_REPOSITORY": "owner/quality-gate",
+		"GITHUB_RUN_ID": "123",
+		"GITHUB_RUN_ATTEMPT": "1",
+		"RUNNER_TEMP": str(tmp_path),
+	}.items():
+		monkeypatch.setenv(key, value)
+	checks = 0
+
+	def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+		nonlocal checks
+		if command[:2] == ["git", "status"]:
+			checks += 1
+			return subprocess.CompletedProcess(
+				command, 0, stdout=" M source.py\n" if checks == 2 else ""
+			)
+		if "build" in command:
+			cast(BinaryIO, options["stdout"]).write(b"{}")
+		return subprocess.CompletedProcess(command, 0, stdout="")
+
+	monkeypatch.setattr(subprocess, "run", run)
+	with pytest.raises(SystemExit, match="clean exact-head checkout"):
+		release_build.main(pull_request=True)
+	assert not (tmp_path / "quality-gate-release" / platform / "verification.json").exists()

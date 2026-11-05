@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,26 @@ from _pytest.tmpdir import _mk_tmp
 
 from quality_gate.release import ReleaseControllerError, _default_release_workspace
 from quality_gate.temp_workspace import temporary_workspace
+
+
+def _configure_short_basetemp(config: pytest.Config, start: Path, *, windows: bool) -> None:
+	"""Use a private repository-local base only when pytest has no explicit base."""
+	if not windows or config.option.basetemp is not None:
+		return
+	root = next((path for path in (start, *start.parents) if (path / ".git").exists()), None)
+	if root is None:
+		raise pytest.UsageError("cannot find the repository root for the pytest temp directory")
+	temp_root = root / "temp"
+	temp_root.mkdir(exist_ok=True)
+	owner = tempfile.TemporaryDirectory(prefix="p", dir=temp_root)
+	config.add_cleanup(owner.cleanup)
+	config.option.basetemp = str(Path(owner.name) / "b")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config: pytest.Config) -> None:
+	_configure_short_basetemp(config, Path(__file__).resolve().parent, windows=os.name == "nt")
+
 
 _RELEASE_CANDIDATE_PATH = pytest.StashKey[Path]()
 

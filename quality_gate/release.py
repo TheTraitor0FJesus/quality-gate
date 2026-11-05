@@ -119,8 +119,8 @@ def _expected_version(authoritative_version: str, requested: str | None) -> str:
 	return version
 
 
-def validate_release_source(root: Path | str = ".", *, version: str | None = None) -> Manifest:
-	"""Validate the self-host manifest, documents, package version, and lessons."""
+def validate_product_source(root: Path | str = ".", *, version: str | None = None) -> Manifest:
+	"""Validate the product inputs needed to verify an installed artifact."""
 	actual_root = Path(root).resolve()
 	try:
 		manifest = load_manifest(actual_root)
@@ -135,6 +135,13 @@ def validate_release_source(root: Path | str = ".", *, version: str | None = Non
 		)
 	if _runtime_version(actual_root) != authoritative_version:
 		raise ReleaseControllerError("runtime __version__ does not match .release/version.toml")
+	return manifest
+
+
+def validate_release_source(root: Path | str = ".", *, version: str | None = None) -> Manifest:
+	"""Validate product inputs and the additional release-readiness obligations."""
+	actual_root = Path(root).resolve()
+	manifest = validate_product_source(actual_root, version=version)
 	_release_notes(actual_root)
 	documents = required_documents_result(actual_root, manifest)
 	if documents.status is not Status.PASSED:
@@ -337,6 +344,8 @@ def _execute_artifact_gate(
 	release_manifest: ReleaseManifest,
 	workspace: Path,
 	timeout_seconds: int,
+	*,
+	product_only: bool = False,
 ) -> None:
 	wheel = release_manifest.wheel
 	if wheel is None:
@@ -415,11 +424,12 @@ def _execute_artifact_gate(
 		deadline=deadline,
 		stage="runtime setup",
 	)
+	audit_entry = "bootstrap_product_audit" if product_only else "bootstrap_audit"
 	audit_script = (
 		"import sys\n"
 		"from pathlib import Path\n"
-		"from quality_gate.runner import bootstrap_audit\n"
-		"verdict = bootstrap_audit(\n"
+		f"from quality_gate.runner import {audit_entry}\n"
+		f"verdict = {audit_entry}(\n"
 		"    Path(sys.argv[1]),\n"
 		"    policy_release=sys.argv[2],\n"
 		")\n"
@@ -449,7 +459,39 @@ def verify_release_candidate(
 ) -> ReleaseCandidate:
 	"""Validate the source and verify one immutable release directory or archive."""
 	actual_root = Path(root).resolve()
-	manifest = validate_release_source(actual_root, version=version)
+	validate_release_source(actual_root, version=version)
+	return _verify_candidate(
+		actual_root,
+		artifact,
+		version=version,
+		workspace_parent=workspace_parent,
+		product_only=False,
+	)
+
+
+def verify_product_candidate(
+	root: Path | str = ".",
+	artifact: Path | str = ".",
+	*,
+	version: str | None = None,
+	workspace_parent: Path | str | None = None,
+) -> ReleaseCandidate:
+	"""Verify an artifact without authorizing or requiring release readiness."""
+	return _verify_candidate(
+		root, artifact, version=version, workspace_parent=workspace_parent, product_only=True
+	)
+
+
+def _verify_candidate(
+	root: Path | str,
+	artifact: Path | str,
+	*,
+	version: str | None,
+	workspace_parent: Path | str | None,
+	product_only: bool,
+) -> ReleaseCandidate:
+	actual_root = Path(root).resolve()
+	manifest = validate_product_source(actual_root, version=version)
 	release_version = _expected_version(_version_authority(actual_root), version)
 	artifact_path = Path(artifact).resolve()
 	try:
@@ -463,6 +505,7 @@ def verify_release_candidate(
 					checked,
 					workspace,
 					manifest.repository.gate_timeout_seconds,
+					product_only=product_only,
 				)
 	except TemporaryWorkspaceError as error:
 		raise ReleaseControllerError(f"release workspace is unavailable: {error}") from error

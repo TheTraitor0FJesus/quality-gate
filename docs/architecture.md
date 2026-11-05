@@ -22,4 +22,7 @@ Use this map before non-trivial codebase questions, design work, or code changes
 
 - **Outgoing push secrets** — `quality_gate/hooks.py` validates push updates, selects the pinned scanner and enumerates outgoing commits under one deadline; `quality_gate/secrets.py` scans each commit's parent patches, including roots. Missing or ambiguous history fails closed. Host wrapper activation is a separate deployment boundary; see [the operating guide](agent-reference-operations.md).
 
+- **Runner modules** — `runner_snapshot.py` owns snapshot orchestration; `runner_process.py` owns process and deadline helpers; `runner_domain.py`, `runner_dependencies.py`, `runner_python_checks.py`, `runner_python_tools.py` and `runner_web.py` hold check-specific implementation behind `runner.py`.
+- **Read-only product verification** — `quality_gate/product_verification.py` validates product evidence content and transport separately; `scripts/release_build.py` and `scripts/release_adapter.py` produce candidate artifacts. Neither validation alone is a complete CI verdict; see [the verification contract](product-verification.md).
+
 See [architecture flows](architecture-flows.md) for execution and publication paths.
