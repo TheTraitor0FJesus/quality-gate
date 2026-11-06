@@ -14,6 +14,7 @@ from test_temp_workspace import (
 
 import quality_gate.temp_workspace as temp_workspace
 import quality_gate.workspace_keys as workspace_keys
+import quality_gate.workspace_quarantine as workspace_quarantine
 import quality_gate.workspace_reclaim as workspace_reclaim
 import quality_gate.workspace_records as workspace_records
 import quality_gate.workspace_tree as workspace_tree
@@ -368,7 +369,7 @@ def test_cleanup_area_recovery_restores_nonempty_quarantined_directory(tmp_path:
 	token = "interrupted"
 	quarantine_name = f"entry-{workspace_identity.st_dev:x}-{workspace_identity.st_ino:x}-{token}"
 	try:
-		journal_name, _journal_identity = temp_workspace._write_quarantine_journal(
+		journal_name, _journal_identity = workspace_quarantine._write_quarantine_journal(
 			temp_root,
 			workspace,
 			workspace_identity,

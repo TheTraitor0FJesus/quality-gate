@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-import tomllib
 from collections.abc import Callable, Mapping
 from typing import Protocol, cast
 from urllib.parse import quote, urlencode
@@ -74,6 +73,20 @@ def _version(value: object) -> str:
 	return value
 
 
+def _mapping_file(client: GitHub, tree: Mapping[str, str], path: str) -> str:
+	blob_sha = tree.get(path)
+	if blob_sha is None:
+		raise RolloutError(f"required file is missing: {path}")
+	blob = _mapping(client.get(f"/git/blobs/{_sha(blob_sha)}"), f"Git blob for {path}")
+	if blob.get("encoding") != "base64":
+		raise RolloutError(f"required file is not a base64 Git blob: {path}")
+	encoded = _text(blob.get("content"), f"Git blob content for {path}")
+	try:
+		return base64.b64decode(encoded.replace("\n", ""), validate=True).decode("utf-8")
+	except (ValueError, UnicodeError) as error:
+		raise RolloutError(f"Git blob is not valid UTF-8 text: {path}") from error
+
+
 def update_policy_release(content: str, version: str) -> str:
 	"""Replace exactly one policy_release value in the TOML quality section."""
 	policy_version = f"v{_version(version)}"
@@ -114,84 +127,6 @@ def remove_marked_waivers(content: str) -> str:
 			end += 1
 		del lines[index:end]
 	return "".join(lines)
-
-
-def _keep_prefix(value: str) -> Callable[[re.Match[str]], str]:
-	return lambda match: f"{match.group('prefix')}{value}{match.groupdict().get('suffix', '')}"
-
-
-def _replace_one(
-	content: str,
-	pattern: str,
-	replacement: str | Callable[[re.Match[str]], str],
-	description: str,
-) -> str:
-	updated, count = re.subn(pattern, replacement, content, flags=re.MULTILINE)
-	if count != 1:
-		raise RolloutError(f"expected exactly one active {description}")
-	return updated
-
-
-def _mapping_file(client: GitHub, tree: Mapping[str, str], path: str) -> str:
-	blob_sha = tree.get(path)
-	if blob_sha is None:
-		raise RolloutError(f"required file is missing: {path}")
-	blob = _mapping(client.get(f"/git/blobs/{_sha(blob_sha)}"), f"Git blob for {path}")
-	if blob.get("encoding") != "base64":
-		raise RolloutError(f"required file is not a base64 Git blob: {path}")
-	encoded = _text(blob.get("content"), f"Git blob content for {path}")
-	try:
-		return base64.b64decode(encoded.replace("\n", ""), validate=True).decode("utf-8")
-	except (ValueError, UnicodeError) as error:
-		raise RolloutError(f"Git blob is not valid UTF-8 text: {path}") from error
-
-
-def _provider_updates(client: GitHub, tree: Mapping[str, str], version: str) -> dict[str, str]:
-	policy_version = f"v{_version(version)}"
-	assertion_suffix = version.replace(".", "")
-	paths = (
-		"quality-gate.toml",
-		"tests/fixtures/release-parity/quality-gate.toml",
-		"tests/test_ci_workflow_contract.py",
-		"tests/test_integrity.py",
-	)
-	contents = {path: _mapping_file(client, tree, path) for path in paths}
-	for path in paths[:2]:
-		current = tomllib.loads(contents[path])["quality"]["policy_release"]
-		current_version = _version(_text(current, "current policy release").removeprefix("v"))
-		if tuple(map(int, current_version.split("."))) > tuple(map(int, version.split("."))):
-			raise RolloutError("older event cannot downgrade the active provider policy")
-	contents["quality-gate.toml"] = remove_marked_waivers(
-		update_policy_release(contents["quality-gate.toml"], version)
-	)
-	contents["tests/fixtures/release-parity/quality-gate.toml"] = update_policy_release(
-		contents["tests/fixtures/release-parity/quality-gate.toml"], version
-	)
-	contents["tests/test_ci_workflow_contract.py"] = _replace_one(
-		contents["tests/test_ci_workflow_contract.py"],
-		r'^(?P<prefix>[ \t]*assert manifest\["quality"\]\["policy_release"\] == )'
-		r'"v[0-9]+\.[0-9]+\.[0-9]+"$',
-		_keep_prefix(f'"{policy_version}"'),
-		"provider policy assertion",
-	)
-	contents["tests/test_integrity.py"] = _replace_one(
-		contents["tests/test_integrity.py"],
-		r"^(?P<prefix>[ \t]*def test_provider_self_policy_v)[0-9]+"
-		r"(?P<suffix>_uses_only_the_parity_waiver\(\) -> None:)$",
-		_keep_prefix(assertion_suffix),
-		"provider waiver test name",
-	)
-	contents["tests/test_integrity.py"] = _replace_one(
-		contents["tests/test_integrity.py"],
-		r'^(?P<prefix>[ \t]*assert manifest\.policy_release == )"v[0-9]+\.[0-9]+\.[0-9]+"$',
-		_keep_prefix(f'"{policy_version}"'),
-		"provider policy integrity assertion",
-	)
-	return {
-		path: value
-		for path, value in contents.items()
-		if _mapping_file(client, tree, path) != value
-	}
 
 
 def _tree(client: GitHub, commit_sha: str) -> dict[str, str]:
@@ -493,20 +428,9 @@ def _verify_published_release(
 
 def activate_provider(client: GitHub, repository: str, version: str, provider_sha: str) -> str:
 	"""Validate the published event and update only a provider activation PR branch."""
-	version = _version(version)
-	provider_sha = _sha(provider_sha)
-	if re.fullmatch(r"[A-Za-z0-9_.-]+/quality-gate", repository) is None:
-		raise RolloutError("provider activation must target the Quality Gate repository")
-	_verify_published_release(client, repository, version, provider_sha)
-	owner, name = repository.split("/")
-	return _update_rollout(
-		client,
-		owner,
-		name,
-		version,
-		provider_sha,
-		lambda api, tree: _provider_updates(api, tree, version),
-	)
+	from .release_rollout_provider import activate_provider as activate_provider_rollout
+
+	return activate_provider_rollout(client, repository, version, provider_sha)
 
 
 def dispatch_release(client: GitHub, repository: str, version: str, provider_sha: str) -> None:
