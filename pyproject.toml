@@ -12,10 +12,10 @@ requires-python = ">=3.11"
 tools = [
     "deptry==0.25.1",
     "mypy==2.4.1",
-    "pytest==9.1.1",
+    "pytest==9.2.0",
     "ruff==0.17.3",
 ]
-test = ["deptry==0.25.1", "pytest==9.1.1"]
+test = ["deptry==0.25.1", "pytest==9.2.0"]
 
 [tool.deptry]
 optional_dependencies_dev_groups = ["test", "tools"]
