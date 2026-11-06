@@ -43,6 +43,7 @@ SUPPORTED_POLICIES = frozenset(
 		"v4.5.0",
 		"v4.6.0",
 		"v4.7.0",
+		"v4.8.0",
 	}
 )
 SAFE_FIXES = ("I001", "F401")
@@ -53,7 +54,7 @@ RECOVERY = {
 	"limits": "Split the edit into bounded batches and retry every unchecked path.",
 	"stale_input": "Capture current file/configuration identities and retry the complete batch.",
 	"manifest": "Correct the working-tree manifest and run quality-gate validate.",
-	"unsupported_policy": "Follow the explicit consumer release update in docs/agent-reference.md.",
+	"unsupported_policy": "Follow the explicit consumer release update in docs/consumer-setup.md.",
 	"release": "Run quality-gate sync for the exact immutable policy release, then edit-setup.",
 	"runtime": (
 		"Run quality-gate setup for managed components; restore the selected baseline Python."

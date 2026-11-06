@@ -24,11 +24,14 @@ from quality_gate.contracts import load_manifest
 from quality_gate.distribution import ReleaseManifest, default_cache_root, verify_release
 from quality_gate.edit_type_environment import MYPY_DEPENDENCIES
 from quality_gate.path_safety import is_link_or_reparse
+from quality_gate.release_contract import UNIFIED_RELEASE, UNIFIED_RELEASE_PACKAGE_VERSION
 from quality_gate.runtime import RuntimeManager, runtime_fingerprint, runtime_identity
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 BACKGROUND_SCHEMA = 2
 MEASUREMENT_CASES = 4
+CANDIDATE_RELEASE = UNIFIED_RELEASE
+CANDIDATE_ENGINE_VERSION = UNIFIED_RELEASE_PACKAGE_VERSION
 
 
 def digest(content: bytes) -> str:
@@ -156,8 +159,8 @@ def candidate_typing_cache(
 	cache_parent = _candidate_typing_cache_parent(typing_policy)
 	with tempfile.TemporaryDirectory(prefix="qg-candidate-", dir=cache_parent) as directory:
 		cache = Path(directory).resolve()
-		prepare_edit_cache(cache, "v4.7.0")
-		candidate_root = cache / "releases/v4.7.0"
+		prepare_edit_cache(cache, CANDIDATE_RELEASE)
+		candidate_root = cache / "releases" / CANDIDATE_RELEASE
 		candidate = verify_release(candidate_root)
 		published = verify_release(typing_policy)
 		replacements: dict[str, Path] = {}
@@ -197,7 +200,7 @@ def candidate_typing_cache(
 			shutil.copy2(source_path, candidate_root / relative)
 		_update_candidate_release_digests(candidate_root, replacements)
 		verified = verify_release(candidate_root)
-		assert verified.version == "v4.7.0"
+		assert verified.version == CANDIDATE_RELEASE
 		assert (candidate_root / product.path).read_bytes() == candidate_engine_wheel.read_bytes()
 		yield cache
 
@@ -405,7 +408,7 @@ class _StubSelection:
 def _argus_typing_manifest() -> str:
 	return f'''[quality]
 schema = 2
-policy_release = "v4.7.0"
+policy_release = "{CANDIDATE_RELEASE}"
 [repository]
 name = "argus-source-roots"
 domains = ["repository", "python"]
@@ -500,7 +503,7 @@ def argus_project(
 def _run_candidate_types(
 	project: Path, cache: Path, wheel: Path, *paths: str, network_guard: bool = True
 ) -> tuple[int, dict[str, Any]]:
-	policy = cache / "releases/v4.7.0"
+	policy = cache / "releases" / CANDIDATE_RELEASE
 	return invoke_candidate_wheel(
 		request(project, policy, *paths, background=True), wheel, network_guard=network_guard
 	)

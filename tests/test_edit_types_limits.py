@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 from test_edit_types import (
+	CANDIDATE_ENGINE_VERSION,
+	CANDIDATE_RELEASE,
 	_run_candidate_types,
 	digest,
 	invoke,
@@ -226,7 +228,7 @@ def test_candidate_wheel_checks_argus_sibling_sources_and_local_stubs(
 		network_guard=True,
 	)
 	assert (code, result["status"]) == (1, "failed"), json.dumps(result, indent=2)
-	assert result["engine_version"] == "4.7.0"
+	assert result["engine_version"] == CANDIDATE_ENGINE_VERSION
 	assert [record["name"] for record in result["components"]] == ["bot", "worker"]
 	component = result["components"][0]
 	assert {item["path"] for item in component["inventory"]} == {
@@ -243,7 +245,7 @@ def test_candidate_wheel_checks_argus_sibling_sources_and_local_stubs(
 		{"path": "bot/main.py", "line": 5, "column": 21, "code": "arg-type"}
 	]
 	assert result["selections"][0]["mypy_version"] == "2.3.1"
-	policy = candidate_typing_cache / "releases/v4.7.0"
+	policy = candidate_typing_cache / "releases" / CANDIDATE_RELEASE
 	candidate = verify_release(policy)
 	mypy = next(item for item in candidate.tools if item.name == "mypy")
 	assert result["selections"][0]["mypy_sha256"] == digest((policy / mypy.path).read_bytes())
@@ -270,7 +272,7 @@ def test_candidate_wheel_checks_argus_sibling_sources_and_local_stubs(
 	assert result["components"][0]["diagnostics"] == []
 	assert result["components"][1]["reason"] == "typecheck_disabled"
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.7.0"
+		CANDIDATE_RELEASE
 	]
 
 

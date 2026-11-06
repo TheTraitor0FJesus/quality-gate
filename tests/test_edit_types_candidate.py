@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 from test_edit_types import (
+	CANDIDATE_ENGINE_VERSION,
+	CANDIDATE_RELEASE,
 	_assert_candidate_stale_mutation,
 	_prepare_argus_layout,
 	_prepare_candidate_runtime,
@@ -80,22 +82,26 @@ def test_candidate_wheel_runs_ruff_writer_and_validator_with_candidate_only_cach
 	path = project / "example.py"
 	original = b"import os\nimport sys\n\nvalue = (os.name, sys.version)\n"
 	path.write_bytes(original)
-	policy = candidate_typing_cache / "releases/v4.7.0"
+	policy = candidate_typing_cache / "releases" / CANDIDATE_RELEASE
 	payload = request(project, policy, "example.py")
 	payload["baseline"] = {
-		"policy_release": "v4.7.0",
+		"policy_release": CANDIDATE_RELEASE,
 		"python": sys.executable,
 		"python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
 	}
 	payload["phase"] = phase
 	code, result = invoke_candidate_wheel(payload, candidate_engine_wheel, command="edit-check")
-	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.7.0"), result
-	assert result["selections"][0]["policy_release"] == "v4.7.0"
+	assert (code, result["status"], result["engine_version"]) == (
+		0,
+		"passed",
+		CANDIDATE_ENGINE_VERSION,
+	), result
+	assert result["selections"][0]["policy_release"] == CANDIDATE_RELEASE
 	assert result["files"][0]["format"] == "passed"
 	assert result["files"][0]["sha256"] == digest(original)
 	assert path.read_bytes() == original
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.7.0"
+		CANDIDATE_RELEASE
 	]
 
 
@@ -107,16 +113,20 @@ def test_candidate_wheel_runs_secrets_with_candidate_only_cache(
 	project = tmp_path / "secrets-candidate"
 	project.mkdir()
 	(project / "settings.py").write_text("token = 'ordinary value'\n", encoding="utf-8")
-	policy = candidate_typing_cache / "releases/v4.7.0"
+	policy = candidate_typing_cache / "releases" / CANDIDATE_RELEASE
 	code, result = invoke_candidate_wheel(
 		request(project, policy, "settings.py"), candidate_engine_wheel, command="edit-secrets"
 	)
-	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.7.0"), result
-	assert result["selections"][0]["policy_release"] == "v4.7.0"
+	assert (code, result["status"], result["engine_version"]) == (
+		0,
+		"passed",
+		CANDIDATE_ENGINE_VERSION,
+	), result
+	assert result["selections"][0]["policy_release"] == CANDIDATE_RELEASE
 	assert result["selections"][0]["scanner_version"] == "8.30.1"
 	assert result["files"][0]["findings"] == []
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.7.0"
+		CANDIDATE_RELEASE
 	]
 
 
@@ -128,15 +138,19 @@ def test_candidate_wheel_runs_integrity_with_candidate_only_cache(
 	project = tmp_path / "integrity-candidate"
 	project.mkdir()
 	(project / "clean.py").write_text("value: int = 1\n", encoding="utf-8")
-	policy = candidate_typing_cache / "releases/v4.7.0"
+	policy = candidate_typing_cache / "releases" / CANDIDATE_RELEASE
 	code, result = invoke_candidate_wheel(
 		request(project, policy, "clean.py"), candidate_engine_wheel, command="edit-integrity"
 	)
-	assert (code, result["status"], result["engine_version"]) == (0, "passed", "4.7.0"), result
-	assert result["selections"][0]["policy_release"] == "v4.7.0"
+	assert (code, result["status"], result["engine_version"]) == (
+		0,
+		"passed",
+		CANDIDATE_ENGINE_VERSION,
+	), result
+	assert result["selections"][0]["policy_release"] == CANDIDATE_RELEASE
 	assert result["files"][0]["status"] == "passed"
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.7.0"
+		CANDIDATE_RELEASE
 	]
 
 

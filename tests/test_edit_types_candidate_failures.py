@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from test_edit_types import (
+	CANDIDATE_RELEASE,
 	MEASUREMENT_CASES,
 	_argus_typing_manifest,
 	_prepare_argus_layout,
@@ -50,7 +51,7 @@ def test_candidate_cli_fails_closed_for_missing_or_linked_source_roots(
 		except OSError as error:
 			pytest.skip(f"Directory symlinks are unavailable: {error}")
 		(project / "apscheduler").mkdir()
-	cache_policy = candidate_typing_cache / "releases/v4.7.0"
+	cache_policy = candidate_typing_cache / "releases" / CANDIDATE_RELEASE
 	code, result = invoke_candidate_wheel(
 		request(project, cache_policy, "bot/main.py", background=True), candidate_engine_wheel
 	)
@@ -80,7 +81,7 @@ def test_candidate_cli_fails_closed_for_missing_or_unsafe_component_stub_roots(
 		),
 		encoding="utf-8",
 	)
-	policy = candidate_typing_cache / "releases/v4.7.0"
+	policy = candidate_typing_cache / "releases" / CANDIDATE_RELEASE
 	code, result = invoke_candidate_wheel(
 		request(project, policy, "bot/main.py", background=True), candidate_engine_wheel
 	)
@@ -98,7 +99,7 @@ def test_candidate_cli_does_not_import_undeclared_working_tree_modules(
 		"from unlisted import helper\nvalue: int = helper()\n",
 		encoding="utf-8",
 	)
-	policy = candidate_typing_cache / "releases/v4.7.0"
+	policy = candidate_typing_cache / "releases" / CANDIDATE_RELEASE
 	code, result = invoke_candidate_wheel(
 		request(argus_project, policy, "bot/main.py", background=True),
 		candidate_engine_wheel,
@@ -106,7 +107,7 @@ def test_candidate_cli_does_not_import_undeclared_working_tree_modules(
 	assert (code, result["status"], result["reason"]) == (2, "unchecked", "dependencies"), result
 	assert result["components"] == []
 	assert sorted(item.name for item in (candidate_typing_cache / "releases").iterdir()) == [
-		"v4.7.0"
+		CANDIDATE_RELEASE
 	]
 
 
