@@ -109,7 +109,7 @@ def runtimes(root: Path | None, cache_dir: Path | None) -> int:
 	try:
 		requested_root = (root.expanduser() if root is not None else Path.cwd()).resolve()
 	except (OSError, RuntimeError, ValueError):
-		requested_root = root if root is not None else Path(".")
+		requested_root = (root if root is not None else Path(".")).absolute()
 		code = "root_not_found" if root is not None else "inspection_failed"
 		message = (
 			"The requested repository root cannot be resolved."

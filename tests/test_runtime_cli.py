@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import zipfile
@@ -340,6 +341,28 @@ def test_runtimes_json_reports_unresolvable_current_directory(
 	report = json.loads(output.out)
 	assert report["schema"] == 1
 	assert report["error"]["reason_code"] == "inspection_failed"
+	assert Path(report["root"]).is_absolute()
+	assert "runtimes:" in output.err
+
+
+def test_runtimes_json_reports_absolute_relative_root_when_unresolvable(
+	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+	def unavailable(self: Path, strict: bool = False) -> Path:
+		del self, strict
+		raise OSError("root cannot be resolved")
+
+	monkeypatch.setattr(Path, "resolve", unavailable)
+	root = Path("missing/repository")
+
+	result = runtime_cli.runtimes(root, None)
+
+	output = capsys.readouterr()
+	report = json.loads(output.out)
+	assert result == UNAVAILABLE_EXIT
+	assert report["error"]["reason_code"] == "root_not_found"
+	assert report["root"] == os.path.abspath(root)
+	assert Path(report["root"]).is_absolute()
 	assert "runtimes:" in output.err
 
 
@@ -375,6 +398,10 @@ def test_runtimes_json_runs_from_candidate_wheel_on_pythonpath(
 			".git", ".venv", ".quality-gate-tmp", "build", "temp", "*.egg-info", "__pycache__"
 		),
 	)
+	# The checked candidate can have read-only directory modes; the wheel build needs a writable copy.
+	for path in (source, *source.rglob("*")):
+		if not path.is_symlink():
+			path.chmod(path.stat().st_mode | stat.S_IWUSR)
 	wheel_directory = tmp_path / "wheel"
 	wheel_directory.mkdir()
 	build_python = Path(sys.base_prefix) / ("python.exe" if os.name == "nt" else "bin/python3")
