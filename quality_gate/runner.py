@@ -226,6 +226,11 @@ def _run_python_checks(
 	*,
 	deadline: float,
 ) -> list[CheckResult]:
+	"""Run component checks and return results, including unavailable prerequisites.
+
+	Use deadline as an absolute time.monotonic() limit for command execution.
+	Convert unavailable runtimes and command failures into results and include
+	explicitly inapplicable typing, test, and coverage checks."""
 	results: list[CheckResult] = []
 	with temporary_directory(actual_root) as temporary_path:
 		environment = _safe_environment(temporary_path)

@@ -142,7 +142,12 @@ class RuntimeManager:
 		return self.root / _repository_key(root) / runtime_fingerprint(identity)
 
 	def inspect(self, root: Path, identity: RuntimeIdentity) -> RuntimeInspection:
-		"""Inspect whether the runtime for an identity is current and executable."""
+		"""Inspect runtime files and metadata without executing or provisioning Python.
+
+		Return current=True only when both paths are files and metadata matches the
+		identity. Missing, unreadable, corrupt, or stale state is returned with a
+		reason rather than raised. The Python path may be retained for corrupt or
+		stale metadata; executable permissions and interpreter health are not checked."""
 		path = self.path_for(root, identity)
 		python = _python_executable(path)
 		metadata = path / "runtime.json"

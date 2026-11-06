@@ -93,6 +93,12 @@ def _cleanup_area_marker(temp_root: Path, identity: os.stat_result) -> bytes:
 
 
 def _open_cleanup_area(temp_root: Path) -> tuple[Path, int]:
+	"""Open or create a safe cleanup area and return its path and directory descriptor.
+
+	Reuse an area authenticated by the ownership or recovery key when available.
+	The caller must close the descriptor. Raise OSError when a safe area cannot
+	be opened; an unreadable recovery key is ignored. Ownership key creation may
+	write private state."""
 	_check_ordinary_directory(temp_root)
 	key = _ownership_key(create=True)
 	if key is None:
@@ -484,6 +490,10 @@ def _restore_quarantined_entry(
 	parent_descriptor: int,
 	cleanup_descriptor: int,
 ) -> None:
+	"""Move a quarantined entry back to path without replacing an existing entry.
+
+	Names are resolved relative to the supplied parent and cleanup directory
+	descriptors. Propagate OSError if the rename fails or is unsupported."""
 	workspace_keys._rename_without_replacement(
 		quarantine_name, path.name, cleanup_descriptor, parent_descriptor
 	)

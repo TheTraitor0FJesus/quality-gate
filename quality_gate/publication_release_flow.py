@@ -131,6 +131,11 @@ class _ReleaseFlow(_PublisherContext):
 		items: list[dict[str, object]],
 		receipt: Mapping[str, object],
 	) -> None:
+		"""Validate retained writer evidence against the candidate and image deliverables.
+
+		Raise PublicationError for invalid or conflicting receipt identities, missing
+		image coverage, or mismatched producer proofs. Archive-only receipts must
+		contain no image writer evidence."""
 		images = [item for item in items if item.get("kind") == "image"]
 		verification = record(receipt.get("verification"), "publication verification")
 		writer = verification.get("image_writer")
