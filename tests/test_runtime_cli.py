@@ -6,16 +6,16 @@ import os
 import shutil
 import subprocess
 import sys
-import uuid
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from quality_gate import runtime_cli
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import PolicyCache
-from quality_gate.runtime import RuntimeManager
+from quality_gate.runtime import RuntimeIdentity, RuntimeInspection, RuntimeManager
 
 UNAVAILABLE_EXIT = 2
 
@@ -142,13 +142,11 @@ def _prepare_runtime(root: Path, cache: Path, component_name: str = "app") -> Pa
 
 
 @pytest.fixture
-def short_runtime_cache() -> Iterator[Path]:
-	cache = Path(__file__).resolve().parents[1] / "temp" / f"runtime-cli-{uuid.uuid4().hex[:10]}"
-	cache.mkdir(parents=True, exist_ok=False)
-	try:
-		yield cache
-	finally:
-		shutil.rmtree(cache)
+def short_runtime_cache(tmp_path: Path) -> Iterator[Path]:
+	cache = tmp_path / "runtime-cache"
+	cache.mkdir()
+	yield cache
+	shutil.rmtree(cache)
 
 
 def test_runtimes_json_reports_existing_exact_environment_read_only(
@@ -185,6 +183,37 @@ def test_runtimes_json_reports_existing_exact_environment_read_only(
 	assert report["error"] is None
 	assert _tree_snapshot(root) == before_project
 	assert _tree_snapshot(cache) == before_cache
+
+
+def test_component_inventory_does_not_execute_cached_interpreter(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	root = tmp_path / "project"
+	root.mkdir()
+	_manifest(root)
+	manifest = load_manifest(root)
+	executable = tmp_path / "untrusted-python"
+	executable.write_text("untrusted interpreter", encoding="utf-8")
+	manager = RuntimeManager(tmp_path / "cache")
+
+	def inspect(
+		_manager: RuntimeManager, _root: Path, _identity: RuntimeIdentity
+	) -> RuntimeInspection:
+		return RuntimeInspection(tmp_path / "runtime", executable, True)
+
+	def reject_execution(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+		raise AssertionError("the inventory executed a cached interpreter")
+
+	monkeypatch.setattr(RuntimeManager, "inspect", inspect)
+	monkeypatch.setattr(subprocess, "run", reject_execution)
+
+	component, available = runtime_cli._component_record(
+		root, manifest.python[0], manifest, manager
+	)
+
+	assert available
+	assert component["available"] is True
+	assert component["python_executable"] == str(executable)
 
 
 def test_runtimes_json_reports_missing_runtime_and_missing_policy_without_losing_inventory(
@@ -295,6 +324,25 @@ def test_runtimes_json_invalid_manifest_and_missing_root_are_parseable(tmp_path:
 	assert json.loads(missing_root.stdout)["error"]["reason_code"] == "root_not_found"
 
 
+def test_runtimes_json_reports_unresolvable_current_directory(
+	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+	def unavailable(cls: type[Path]) -> Path:
+		del cls
+		raise OSError("current directory is unavailable")
+
+	monkeypatch.setattr(Path, "cwd", classmethod(unavailable))
+
+	result = runtime_cli.runtimes(None, None)
+
+	output = capsys.readouterr()
+	assert result == UNAVAILABLE_EXIT
+	report = json.loads(output.out)
+	assert report["schema"] == 1
+	assert report["error"]["reason_code"] == "inspection_failed"
+	assert "runtimes:" in output.err
+
+
 def test_runtime_command_help_has_no_side_effects(tmp_path: Path) -> None:
 	root = tmp_path / "project"
 	root.mkdir()
@@ -344,6 +392,7 @@ def test_runtimes_json_runs_from_candidate_wheel_on_pythonpath(
 		],
 		capture_output=True,
 		text=True,
+		timeout=300,
 		check=False,
 	)
 	assert built.returncode == 0, built.stderr

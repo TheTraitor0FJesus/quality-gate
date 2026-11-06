@@ -10,10 +10,11 @@ quality-gate --root <repository> runtimes --json
 
 The command is read-only. It validates the manifest, verifies the exact selected policy release,
 and inspects each component's exact runtime identity using the same fingerprint and paths as
-Quality Gate setup. It does not select or quarantine policy entries, create cache directories,
-prepare environments, install dependencies, run tests, or create a temporary workspace. It probes
-each recorded Python executable with isolated mode, without site imports or bytecode writes, and
-requires its major.minor version to match the manifest.
+Quality Gate setup. It checks that the recorded interpreter file is present but does not execute it;
+`available` means the runtime metadata matches the manifest and the executable path exists, not that
+the interpreter has been started or its binary integrity has been verified. It does not select or
+quarantine policy entries, create cache directories, prepare environments, install dependencies,
+run tests, or create a temporary workspace.
 
 ## Schema 1
 
@@ -49,11 +50,11 @@ the selected policy is unavailable.
 
 For unavailable components, `python_executable` is `null`, and `reason_code` and `reason` are
 non-empty strings. Defined component reason codes are `runtime_missing`, `runtime_stale`,
-`runtime_state_corrupt`, `runtime_state_unreadable`, `runtime_inputs_unavailable`,
-`python_unavailable`, and `python_version_mismatch`. Policy reason codes are `invalid_release`,
-`release_unavailable`, and `release_mismatch`. A repository-level error uses an empty `components`
-array, `policy: null`, and an `error` object containing `reason_code` and `reason`; current codes
-are `root_not_found`, `repository_not_found`, `manifest_invalid`, and `inspection_failed`.
+`runtime_state_corrupt`, `runtime_state_unreadable`, and `runtime_inputs_unavailable`. Policy reason
+codes are `invalid_release`, `release_unavailable`, and `release_mismatch`. A repository-level
+error uses an empty `components` array, `policy: null`, and an `error` object containing
+`reason_code` and `reason`; current codes are `root_not_found`, `repository_not_found`,
+`manifest_invalid`, and `inspection_failed`.
 
 Exit code `0` means the selected policy is verified and every declared Python runtime is ready.
 Exit code `2` means at least one prerequisite is unavailable or the repository could not be

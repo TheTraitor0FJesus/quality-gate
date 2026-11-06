@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -89,37 +88,8 @@ def _component_record(
 		base["reason_code"] = code
 		base["reason"] = message
 		return base, False
-	try:
-		probe = subprocess.run(
-			[
-				str(inspection.python),
-				"-I",
-				"-S",
-				"-B",
-				"-c",
-				"import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
-			],
-			cwd=root,
-			capture_output=True,
-			text=True,
-			encoding="utf-8",
-			timeout=10,
-			check=False,
-		)
-	except (OSError, subprocess.TimeoutExpired):
-		base["reason_code"] = "python_unavailable"
-		base["reason"] = "The recorded Python executable cannot be started."
-		return base, False
-	if probe.returncode != 0:
-		base["reason_code"] = "python_unavailable"
-		base["reason"] = "The recorded Python executable cannot be started."
-		return base, False
-	if probe.stdout.strip() != item.python_version:
-		base["reason_code"] = "python_version_mismatch"
-		base["reason"] = "The runtime interpreter version does not match the manifest."
-		return base, False
 	base["available"] = True
-	base["python_executable"] = str(inspection.python.resolve())
+	base["python_executable"] = str(inspection.python)
 	return base, True
 
 
@@ -136,20 +106,20 @@ def _error_result(root: Path, code: str, message: str) -> dict[str, object]:
 
 def runtimes(root: Path | None, cache_dir: Path | None) -> int:
 	"""Emit one schema-1 inventory and return 0 only when all prerequisites are ready."""
-	requested_root = Path.cwd().resolve()
-	if root is not None:
-		try:
-			requested_root = root.expanduser().resolve()
-		except (OSError, RuntimeError, ValueError):
-			requested_root = root.expanduser().absolute()
-			result = _error_result(
-				requested_root,
-				"root_not_found",
-				"The requested repository root cannot be resolved.",
-			)
-			sys.stdout.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
-			sys.stderr.write("runtimes: one or more declared prerequisites are unavailable\n")
-			return 2
+	try:
+		requested_root = (root.expanduser() if root is not None else Path.cwd()).resolve()
+	except (OSError, RuntimeError, ValueError):
+		requested_root = root if root is not None else Path(".")
+		code = "root_not_found" if root is not None else "inspection_failed"
+		message = (
+			"The requested repository root cannot be resolved."
+			if root is not None
+			else "The current repository root cannot be resolved."
+		)
+		result = _error_result(requested_root, code, message)
+		sys.stdout.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
+		sys.stderr.write("runtimes: one or more declared prerequisites are unavailable\n")
+		return 2
 	try:
 		actual_root = repository_root(requested_root if root is not None else None)
 		if not actual_root.is_dir():

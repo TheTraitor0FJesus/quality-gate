@@ -388,7 +388,7 @@ def test_cleanup_area_recovery_restores_nonempty_quarantined_directory(tmp_path:
 		os.fsync(root_descriptor)
 		os.fsync(cleanup_descriptor)
 
-		temp_workspace._recover_quarantined_entries(temp_root, cleanup_descriptor)
+		workspace_quarantine._recover_quarantined_entries(temp_root, cleanup_descriptor)
 
 		assert content.read_text(encoding="utf-8") == "preserve"
 		assert not (area / quarantine_name).exists()
