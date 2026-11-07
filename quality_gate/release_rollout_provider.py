@@ -37,11 +37,6 @@ def _replace_one(
 
 
 def _provider_updates(client: GitHub, tree: Mapping[str, str], version: str) -> dict[str, str]:
-	"""Return changed provider manifest and policy assertion contents for version.
-
-	Read files through client without publishing updates. Prefer the split CI
-	contract test when present. Raise RolloutError for missing assertions or a
-	policy downgrade; file retrieval and TOML parsing errors propagate."""
 	policy_version = f"v{_version(version)}"
 	assertion_suffix = version.replace(".", "")
 	policy_test_path = next(

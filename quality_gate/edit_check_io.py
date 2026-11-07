@@ -17,11 +17,6 @@ if TYPE_CHECKING:
 
 
 def format_report(code: int, output: bytes, workspace: Path, included: set[str]) -> set[str]:
-	"""Return repository-relative paths reported as unformatted by Ruff.
-
-	Filenames are resolved relative to workspace and must belong to included.
-	Raise EditError("tool_output") for malformed JSON, invalid paths, or a report
-	inconsistent with a success or formatting-needed exit code."""
 	try:
 		report = json.loads(output)
 		if not isinstance(report, list) or (code == 0 and report):
@@ -39,12 +34,6 @@ def format_report(code: int, output: bytes, workspace: Path, included: set[str])
 def publish(
 	invocation: Invocation, files: list[SourceFile], workspace: Path, records: list[dict[str, Any]]
 ) -> None:
-	"""Replace changed working-tree files with staged files after freshness checks.
-
-	Preserve each target's mode and verify configuration and final file hashes.
-	Raise EditError on stale inputs, unsafe paths, size limits, or an expired
-	deadline; filesystem errors propagate. Replacements occur one file at a time,
-	so a later failure can leave earlier replacements in place."""
 	assert_inputs_current(invocation, files)
 	for file, record in zip(files, records, strict=True):
 		if not record["changed"]:
@@ -67,10 +56,6 @@ def publish(
 
 
 def assert_inputs_current(invocation: Invocation, files: list[SourceFile]) -> None:
-	"""Verify configuration, tool artifacts, and captured source hashes are current.
-
-	Raise EditError on stale or unsafe inputs or exceeded read limits. Filesystem
-	errors from resolving or reading inputs propagate."""
 	invocation.assert_configuration_current()
 	invocation.assert_artifacts_current()
 	for file in files:

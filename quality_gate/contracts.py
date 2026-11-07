@@ -454,10 +454,6 @@ def _load_table(raw: Mapping[str, object]) -> Manifest:
 
 
 def _validate_typing_policy(root: Mapping[str, object], policy_release: str) -> None:
-	"""Reject typing fields unsupported by the selected policy release.
-
-	Raise ValidationError for unsupported fields or malformed component tables,
-	even when an unsupported field is explicitly set to its default value."""
 	version = tuple(int(part) for part in policy_release[1:].split("."))
 	for index, component in enumerate(_list(root.get("python", []), "python")):
 		table = _table(component, f"python[{index}]")

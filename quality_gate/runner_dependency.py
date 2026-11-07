@@ -348,12 +348,6 @@ def _dependency_hygiene_result(
 	deadline: float,
 	run_bounded: Callable[[list[str], Path, dict[str, str], float | None], tuple[int, str]],
 ) -> CheckResult:
-	"""Run deptry and return a result honoring exact current dependency waivers.
-
-	Use the one-based component_index in the check ID and write JSON to report_path.
-	The absolute monotonic deadline bounds the command timeout. Missing runtime or
-	metadata, caught execution errors, and invalid reports become UNCHECKED;
-	components with no dependency inputs are NOT_APPLICABLE."""
 	check_id = f"python.component_{component_index}.deptry"
 	if not component.dependency_inputs:
 		return CheckResult(

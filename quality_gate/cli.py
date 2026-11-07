@@ -15,7 +15,6 @@ from . import __version__  # noqa: E402
 
 
 def parser() -> argparse.ArgumentParser:
-	"""Build the CLI parser with a required subcommand and command-specific options."""
 	result = argparse.ArgumentParser(prog="quality-gate")
 	result.add_argument("--root", type=Path, help="Repository root. Defaults to the Git root.")
 	subcommands = result.add_subparsers(dest="command", required=True)
@@ -192,10 +191,6 @@ def _dispatch(arguments: argparse.Namespace) -> int:
 
 
 def _dispatch_lightweight_command(arguments: argparse.Namespace) -> int | None:
-	"""Dispatch runtime inventory or JSON edit commands and return their exit code.
-
-	Return None for commands handled by the full gate dispatcher. Exceptions from
-	these entry points propagate to the caller."""
 	if arguments.command == "runtimes":
 		from .runtime_cli import runtimes
 
@@ -217,11 +212,6 @@ def _dispatch_lightweight_command(arguments: argparse.Namespace) -> int | None:
 
 
 def main() -> int:
-	"""Parse process arguments, run the selected command, and return its exit code.
-
-	Report manifest, runtime, distribution, and temporary workspace failures for
-	full gate commands as unchecked results. Lightweight command errors are
-	handled by their own entry points; argparse may raise SystemExit."""
 	arguments = parser().parse_args()
 	lightweight_result = _dispatch_lightweight_command(arguments)
 	if lightweight_result is not None:

@@ -49,7 +49,6 @@ def _policy_record(cache: PolicyCache, version: str) -> dict[str, object]:
 
 
 def _runtime_failure(reason: str) -> tuple[str, str]:
-	"""Map an inspection reason to a public reason code and message, with a fallback."""
 	if reason == "runtime is missing":
 		return "runtime_missing", "The exact runtime for the current component inputs is missing."
 	if reason == "runtime identity is stale":
@@ -67,11 +66,6 @@ def _component_record(
 	manifest: Manifest,
 	manager: RuntimeManager,
 ) -> tuple[dict[str, object], bool]:
-	"""Return a component inventory record and whether its exact runtime is current.
-
-	Read dependency inputs and inspect cached state without running Python.
-	Convert OSError and RuntimeUnavailable into an unavailable-input record;
-	missing, stale, or unreadable runtimes also produce unavailable records."""
 	item = component
 	base: dict[str, object] = {
 		"name": item.name,
@@ -100,7 +94,6 @@ def _component_record(
 
 
 def _error_result(root: Path, code: str, message: str) -> dict[str, object]:
-	"""Build a schema-1 error inventory with no policy or component records."""
 	return {
 		"schema": 1,
 		"engine_version": __version__,
@@ -112,14 +105,7 @@ def _error_result(root: Path, code: str, message: str) -> dict[str, object]:
 
 
 def runtimes(root: Path | None, cache_dir: Path | None) -> int:
-	"""Write a schema-1 JSON inventory to stdout without provisioning or changing caches.
-
-	Use root when supplied, otherwise discover the Git root from the current
-	directory; cache_dir selects the cache to inspect. Preserve component records
-	when policy or individual runtimes are unavailable. Return 0 when the policy
-	and every declared runtime are available, otherwise write a stderr diagnostic
-	and return 2. Caught discovery, manifest, and inspection errors become JSON
-	error records; output stream errors propagate."""
+	"""Emit one schema-1 inventory and return 0 only when all prerequisites are ready."""
 	try:
 		requested_root = (root.expanduser() if root is not None else Path.cwd()).resolve()
 	except (OSError, RuntimeError, ValueError):

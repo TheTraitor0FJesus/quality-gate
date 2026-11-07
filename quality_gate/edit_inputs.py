@@ -235,10 +235,6 @@ class Configuration:
 
 
 def component_for_path(manifest: Manifest | None, path: str) -> PythonComponent | None:
-	"""Return the first declared component containing the repository-relative path.
-
-	Match paths lexically, including the component path itself. Return None when
-	there is no manifest or no matching component."""
 	if manifest is None:
 		return None
 	return next(
