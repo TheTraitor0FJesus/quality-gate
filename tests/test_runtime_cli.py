@@ -341,7 +341,7 @@ def test_runtimes_json_reports_unresolvable_current_directory(
 	report = json.loads(output.out)
 	assert report["schema"] == 1
 	assert report["error"]["reason_code"] == "inspection_failed"
-	assert Path(report["root"]).is_absolute()
+	assert report["root"] is None
 	assert "runtimes:" in output.err
 
 

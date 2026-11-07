@@ -55,6 +55,8 @@ codes are `invalid_release`, `release_unavailable`, and `release_mismatch`. A re
 error uses an empty `components` array, `policy: null`, and an `error` object containing
 `reason_code` and `reason`; current codes are `root_not_found`, `repository_not_found`,
 `manifest_invalid`, and `inspection_failed`.
+If the command cannot resolve the current directory, `root` is `null`. It cannot report an absolute
+path without querying that directory again.
 
 Exit code `0` means the selected policy is verified and every declared Python runtime is ready.
 Exit code `2` means at least one prerequisite is unavailable or the repository could not be

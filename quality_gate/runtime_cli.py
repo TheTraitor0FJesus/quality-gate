@@ -93,11 +93,11 @@ def _component_record(
 	return base, True
 
 
-def _error_result(root: Path, code: str, message: str) -> dict[str, object]:
+def _error_result(root: Path | None, code: str, message: str) -> dict[str, object]:
 	return {
 		"schema": 1,
 		"engine_version": __version__,
-		"root": str(root),
+		"root": str(root) if root is not None else None,
 		"policy": None,
 		"components": [],
 		"error": {"reason_code": code, "reason": message},
@@ -109,14 +109,14 @@ def runtimes(root: Path | None, cache_dir: Path | None) -> int:
 	try:
 		requested_root = (root.expanduser() if root is not None else Path.cwd()).resolve()
 	except (OSError, RuntimeError, ValueError):
-		requested_root = (root if root is not None else Path(".")).absolute()
+		failed_root = root.absolute() if root is not None else None
 		code = "root_not_found" if root is not None else "inspection_failed"
 		message = (
 			"The requested repository root cannot be resolved."
 			if root is not None
 			else "The current repository root cannot be resolved."
 		)
-		result = _error_result(requested_root, code, message)
+		result = _error_result(failed_root, code, message)
 		sys.stdout.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
 		sys.stderr.write("runtimes: one or more declared prerequisites are unavailable\n")
 		return 2
