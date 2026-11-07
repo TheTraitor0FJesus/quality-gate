@@ -2,7 +2,7 @@ waivers = []
 
 [quality]
 schema = 2
-policy_release = "v4.7.0"
+policy_release = "v4.8.0"
 
 [repository]
 name = "REVIEW_REQUIRED"
@@ -55,7 +55,7 @@ gate_timeout_seconds = 600
 # css_total_kib = 100
 # Biome lint and formatting use the release-pinned standalone binary and policy.
 
-# Optionally declare repository-owned functional tests for the typed test-runner.
+# Optionally declare repository-owned functional tests for CI or another test executor.
 # Quality Gate validates these targets but never executes them; repository CI remains responsible
 # for enforcing them outside the gate.
 # [[supplemental_tests]]

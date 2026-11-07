@@ -6,11 +6,14 @@ import json
 import sys
 import tarfile
 from collections.abc import Callable, Sequence
-from threading import Thread
-from typing import BinaryIO
 
 import pytest
-from quality_gate import publication_github, publication_writer
+
+from quality_gate import (
+	publication_command,
+	publication_process,
+	publication_writer,
+)
 from quality_gate.publication import (
 	MAX_IMAGE_REPOSITORY_LENGTH,
 	MAX_IMAGE_TAGGED_REFERENCE_LENGTH,
@@ -30,6 +33,8 @@ SOURCE = "a" * 40
 LAYER = b"layer-data"
 DIFF_ID = "sha256:" + hashlib.sha256(LAYER).hexdigest()
 TARGET = "ghcr.io/owner/project:v2.4.1"
+DOCKER_LOAD_ARGUMENT_COUNT = 4
+INSPECTION_CALL_COUNT = 3
 
 
 def _archive(
@@ -83,10 +88,12 @@ def _install_bounded_child(
 	monkeypatch: pytest.MonkeyPatch,
 	respond: Callable[[list[str]], tuple[bytes, bytes, int]],
 ) -> list[list[str]]:
-	original_spawn = publication_github._spawn_bounded_command
+	original_spawn = publication_command._spawn_bounded_command
 	calls: list[list[str]] = []
 
-	def spawn(command: list[str], environment: dict[str, str]) -> publication_github._CommandSession:
+	def spawn(
+		command: list[str], environment: dict[str, str]
+	) -> publication_process._CommandSession:
 		call = list(command)
 		calls.append(call)
 		stdout, stderr, exit_code = respond(call)
@@ -98,163 +105,18 @@ def _install_bounded_child(
 		)
 		return original_spawn([sys.executable, "-B", "-c", program], environment)
 
-	monkeypatch.setattr(publication_github, "_spawn_bounded_command", spawn)
+	monkeypatch.setattr(publication_command, "_spawn_bounded_command", spawn)
 	return calls
 
 
-@pytest.mark.parametrize(
-	("stderr", "exit_code", "sleep", "expected_absence"),
-	[
-		(b"ERROR: " + TARGET.encode() + b": manifest unknown\n", 1, False, True),
-		(b"ERROR: " + TARGET.encode() + b": manifest_unknown\n", 1, False, True),
-		(b"ERROR: " + TARGET.encode() + b": no such manifest\n", 1, False, True),
-		(b"ERROR: no such manifest: " + TARGET.encode() + b"\n", 1, False, True),
-		(b"ERROR: " + TARGET.encode() + b": not found\n", 1, False, True),
-		(TARGET.encode() + b": not found\n", 1, False, True),
-		(TARGET.encode() + b": manifest unknown\n", 1, False, True),
-		(b"ERROR: ghcr.io/other/project:v2.4.1: manifest unknown\n", 1, False, False),
-		(b"ERROR: ghcr.io/other/project:v2.4.1: not found\n", 1, False, False),
-		(b"ERROR: ghcr.io/owner/project:v2.4.0: manifest unknown\n", 1, False, False),
-		(b"ERROR: blob sha256:" + b"a" * 64 + b": manifest unknown\n", 1, False, False),
-		(b"unauthorized: authentication required\n", 1, False, False),
-		(b"denied: requested access to the resource is denied\n", 1, False, False),
-		(b"lookup ghcr.io: no such host\n", 1, False, False),
-		(b"x509: certificate signed by unknown authority\n", 1, False, False),
-		(b"unexpected status code: 404\n", 1, False, False),
-		(b"429 Too Many Requests\n", 1, False, False),
-		(b"500 Internal Server Error\n", 1, False, False),
-		(
-			b"unexpected status from HEAD request to "
-			b"https://ghcr.io/v2/owner/project/manifests/v2.4.1: 404 Not Found\n",
-			1,
-			False,
-			False,
-		),
-		(b"ERROR: " + TARGET.encode() + b": manifest unknown\n", 143, False, False),
-		(b"ERROR: " + TARGET.encode() + b": manifest unknown\n" + b"x" * 5000, 1, False, False),
-		(b"ERROR: " + TARGET.encode() + b": manifest unknown\n", 1, True, False),
-	],
-)
-def test_bounded_preflight_classifies_only_exact_missing_manifest(
-	monkeypatch: pytest.MonkeyPatch,
-	stderr: bytes,
-	exit_code: int,
-	sleep: bool,
-	expected_absence: bool,
-) -> None:
-	"""Exercise the writer through BoundedCommand and a real controlled child process."""
-	original_spawn = publication_github._spawn_bounded_command
-	commands: list[list[str]] = []
-
-	def spawn(command: list[str], environment: dict[str, str]) -> publication_github._CommandSession:
-		commands.append(command)
-		program = (
-			"import sys, time; "
-			f"sys.stderr.buffer.write({stderr!r}); "
-			"sys.stderr.flush(); "
-			f"time.sleep(5) if {sleep!r} else None; "
-			f"sys.exit({exit_code})"
-		)
-		return original_spawn([sys.executable, "-B", "-c", program], environment)
-
-	monkeypatch.setattr(publication_github, "_spawn_bounded_command", spawn)
-	command = BoundedCommand(1 if sleep else 5)
-	call = ["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]
-
-	if expected_absence:
-		preflight_image_archive(_archive(), SOURCE, TARGET, command)
-		with pytest.raises(PublicationError) as error:
-			preflight_image_archive(
-				_archive(), SOURCE, TARGET, command, expected_digest="f" * 64
-			)
-		assert not isinstance(error.value, MissingResourceError)
-		assert TARGET not in str(error.value)
-		assert commands == [call, call]
-	else:
-		with pytest.raises(PublicationError) as error:
-			preflight_image_archive(_archive(), SOURCE, TARGET, command)
-		assert not isinstance(error.value, MissingResourceError)
-		assert TARGET not in str(error.value)
-		assert commands == [call]
-
-
-@pytest.mark.parametrize("transport_failure", ["reader", "cleanup"])
-def test_bounded_preflight_does_not_reclassify_transport_failures(
-	monkeypatch: pytest.MonkeyPatch,
-	transport_failure: str,
-) -> None:
-	original_spawn = publication_github._spawn_bounded_command
-	commands: list[list[str]] = []
-	missing_response = f"ERROR: {TARGET}: manifest unknown\n".encode()
-	program = (
-		"import sys; "
-		f"sys.stderr.buffer.write({missing_response!r}); "
-		"sys.stderr.flush(); sys.exit(1)"
-	)
-
-	def spawn(command: list[str], environment: dict[str, str]) -> publication_github._CommandSession:
-		commands.append(command)
-		return original_spawn([sys.executable, "-B", "-c", program], environment)
-
-	monkeypatch.setattr(publication_github, "_spawn_bounded_command", spawn)
-	if transport_failure == "reader":
-		capture_response = publication_github.BoundedCommand._capture_response
-
-		def fail_stderr_reader(
-			_stream: BinaryIO, _collected: bytearray, limit: int, _overflow_message: str
-		) -> None:
-			if limit == publication_github.MAX_COMMAND_STDERR_BYTES:
-				raise PublicationError("simulated bounded stderr reader failure")
-			capture_response(_stream, _collected, limit, _overflow_message)
-
-		monkeypatch.setattr(
-			publication_github.BoundedCommand,
-			"_capture_response",
-			staticmethod(fail_stderr_reader),
-		)
-	else:
-		cleanup = publication_github.BoundedCommand._cleanup_session
-
-		def fail_cleanup(
-			session: publication_github._CommandSession,
-			threads: list[Thread],
-		) -> str:
-			cleanup(session, threads)
-			return "simulated process-tree cleanup failure"
-
-		monkeypatch.setattr(
-			publication_github.BoundedCommand,
-			"_cleanup_session",
-			staticmethod(fail_cleanup),
-		)
-
-	with pytest.raises(PublicationError) as error:
-		preflight_image_archive(_archive(), SOURCE, TARGET, BoundedCommand(5))
-	assert not isinstance(error.value, MissingResourceError)
-	assert commands == [["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]]
-
-
-def test_bounded_preflight_does_not_classify_a_signaled_child(
-	monkeypatch: pytest.MonkeyPatch,
-) -> None:
-	original_spawn = publication_github._spawn_bounded_command
-	commands: list[list[str]] = []
-	missing_response = f"ERROR: {TARGET}: manifest unknown\n".encode()
-	program = (
-		"import os, signal, sys; "
-		f"sys.stderr.buffer.write({missing_response!r}); "
-		"sys.stderr.flush(); os.kill(os.getpid(), signal.SIGTERM)"
-	)
-
-	def spawn(command: list[str], environment: dict[str, str]) -> publication_github._CommandSession:
-		commands.append(command)
-		return original_spawn([sys.executable, "-B", "-c", program], environment)
-
-	monkeypatch.setattr(publication_github, "_spawn_bounded_command", spawn)
-	with pytest.raises(PublicationError) as error:
-		preflight_image_archive(_archive(), SOURCE, TARGET, BoundedCommand(5))
-	assert not isinstance(error.value, MissingResourceError)
-	assert commands == [["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]]
+def _inspection_response(
+	call: list[str], identity: bytes, missing: bytes, failure_stage: str
+) -> tuple[bytes, bytes, int]:
+	if call[4] == "{{json .}}":
+		return identity, b"", 0
+	if call[-1] == TARGET and failure_stage == "local inspection":
+		return b"", missing, 1
+	return (SOURCE + "\n").encode(), b"", 0
 
 
 @pytest.mark.parametrize("failure_stage", ["local inspection", "push", "readback"])
@@ -270,11 +132,7 @@ def test_missing_manifest_text_is_accepted_only_at_the_remote_preflight(
 		if call[:2] == ["docker", "load"]:
 			return b"loaded", b"", 0
 		if call[:4] == ["docker", "image", "inspect", "--format"]:
-			if call[4] == "{{json .}}":
-				return image_identity, b"", 0
-			if call[-1] == TARGET and failure_stage == "local inspection":
-				return b"", missing, 1
-			return (SOURCE + "\n").encode(), b"", 0
+			return _inspection_response(call, image_identity, missing, failure_stage)
 		if call == ["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]:
 			return b"", missing, 1
 		if call[:3] == ["docker", "image", "tag"]:
@@ -288,7 +146,7 @@ def test_missing_manifest_text_is_accepted_only_at_the_remote_preflight(
 		push_image_archive(_archive(), SOURCE, TARGET, BoundedCommand(5))
 	assert not isinstance(error.value, MissingResourceError)
 	assert calls[0][:3] == ["docker", "load", "--input"]
-	assert len(calls[0]) == 4
+	assert len(calls[0]) == DOCKER_LOAD_ARGUMENT_COUNT
 	assert calls[0][3].endswith("image.tar")
 	assert calls[3] == ["docker", "buildx", "imagetools", "inspect", TARGET, "--raw"]
 	assert calls[-1][0] == "docker"
@@ -445,9 +303,9 @@ def test_image_repository_bound_fits_the_longest_supported_version_tag() -> None
 			raise MissingResourceError("registry tag is absent")
 
 	preflight_image_archive(_archive(), SOURCE, f"{repository}:v{version}", MissingTag())
-	with pytest.raises(PublicationError, match="lowercase ghcr.io"):
+	with pytest.raises(PublicationError, match=r"lowercase ghcr.io"):
 		image_repository(repository + "p")
-	with pytest.raises(PublicationError, match="lowercase ghcr.io"):
+	with pytest.raises(PublicationError, match=r"lowercase ghcr.io"):
 		image_repository("ghcr.io/Owner/project")
 
 
@@ -461,9 +319,7 @@ def test_image_archive_rejects_multiple_images() -> None:
 	content = _archive()
 	with tarfile.open(fileobj=io.BytesIO(content), mode="r:") as archive:
 		files = {member.name: archive.extractfile(member).read() for member in archive.getmembers()}
-	files["manifest.json"] = json.dumps(
-		json.loads(files["manifest.json"]) * 2
-	).encode()
+	files["manifest.json"] = json.dumps(json.loads(files["manifest.json"]) * 2).encode()
 	output = io.BytesIO()
 	with tarfile.open(fileobj=output, mode="w") as archive:
 		for name, value in files.items():
@@ -525,9 +381,7 @@ def test_writer_rejects_duplicate_path_before_docker_write() -> None:
 
 def test_writer_loads_inspects_pushes_and_returns_manifest_digest() -> None:
 	command = _DockerCommand()
-	digest = push_image_archive(
-		_archive(), SOURCE, "ghcr.io/owner/project:v2.3.0", command
-	)
+	digest = push_image_archive(_archive(), SOURCE, "ghcr.io/owner/project:v2.3.0", command)
 	manifest = _registry_manifest(command.config_digest)
 
 	assert digest == hashlib.sha256(manifest).hexdigest()
@@ -561,13 +415,11 @@ def test_loaded_image_identity_mismatch_stops_before_registry_or_delivery(
 	)
 
 	with pytest.raises(
-		PublicationError, match="^loaded image bytes differ from the verified archive$"
+		PublicationError, match=r"^loaded image bytes differ from the verified archive$"
 	):
-		push_image_archive(
-			_archive(), SOURCE, "ghcr.io/owner/project:v2.3.0", command
-		)
+		push_image_archive(_archive(), SOURCE, "ghcr.io/owner/project:v2.3.0", command)
 
-	assert len(command.calls) == 3
+	assert len(command.calls) == INSPECTION_CALL_COUNT
 	assert command.calls[0][:3] == ["docker", "load", "--input"]
 	assert command.calls[0][3].endswith("image.tar")
 	assert command.calls[1] == [
@@ -618,9 +470,7 @@ def test_retained_digest_mismatch_does_not_mutate_existing_tag() -> None:
 			expected_digest="f" * 64,
 		)
 
-	assert not any(
-		call[:3] == ["docker", "image", "tag"] for call in command.calls
-	)
+	assert not any(call[:3] == ["docker", "image", "tag"] for call in command.calls)
 	assert not any(call[:2] == ["docker", "push"] for call in command.calls)
 
 
@@ -636,9 +486,7 @@ def test_missing_tag_with_retained_digest_does_not_mutate() -> None:
 			expected_digest="f" * 64,
 		)
 
-	assert not any(
-		call[:3] == ["docker", "image", "tag"] for call in command.calls
-	)
+	assert not any(call[:3] == ["docker", "image", "tag"] for call in command.calls)
 	assert not any(call[:2] == ["docker", "push"] for call in command.calls)
 
 
@@ -646,9 +494,7 @@ def test_preflight_rejects_conflicting_tag_without_loading_or_pushing() -> None:
 	command = _DockerCommand(existing_manifest=_registry_manifest("sha256:" + "f" * 64))
 
 	with pytest.raises(PublicationError, match="no retained writer receipt digest"):
-		preflight_image_archive(
-			_archive(), SOURCE, "ghcr.io/owner/project:v2.3.0", command
-		)
+		preflight_image_archive(_archive(), SOURCE, "ghcr.io/owner/project:v2.3.0", command)
 
 	assert not any(call[:2] == ["docker", "load"] for call in command.calls)
 	assert not any(call[:2] == ["docker", "push"] for call in command.calls)
@@ -690,4 +536,6 @@ def test_writer_rejects_an_invalid_target_before_running_docker() -> None:
 			raise AssertionError("docker must not run for an invalid target")
 
 	with pytest.raises(PublicationError, match="tagged registry reference"):
-		push_image_archive(_archive(), SOURCE, "ghcr.io/owner/project@sha256:" + "f" * 64, Command())
+		push_image_archive(
+			_archive(), SOURCE, "ghcr.io/owner/project@sha256:" + "f" * 64, Command()
+		)

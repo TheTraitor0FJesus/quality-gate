@@ -146,12 +146,26 @@ class RuntimeManager:
 		path = self.path_for(root, identity)
 		python = _python_executable(path)
 		metadata = path / "runtime.json"
-		if not metadata.is_file() or not python.is_file():
-			return RuntimeInspection(
-				path, python if python.is_file() else None, False, "runtime is missing"
-			)
+		try:
+			metadata.stat()
+			python.stat()
+		except FileNotFoundError:
+			return RuntimeInspection(path, None, False, "runtime is missing")
+		except OSError:
+			return RuntimeInspection(path, None, False, "runtime state is unreadable")
+		try:
+			metadata_is_file = metadata.is_file()
+			python_is_file = python.is_file()
+		except OSError:
+			return RuntimeInspection(path, None, False, "runtime state is unreadable")
+		if not python_is_file:
+			return RuntimeInspection(path, None, False, "runtime is missing")
+		if not metadata_is_file:
+			return RuntimeInspection(path, None, False, "runtime state is unreadable")
 		try:
 			stored = json.loads(metadata.read_text(encoding="utf-8"))
+		except PermissionError:
+			return RuntimeInspection(path, None, False, "runtime state is unreadable")
 		except (OSError, UnicodeError, json.JSONDecodeError):
 			return RuntimeInspection(path, python, False, "runtime metadata is corrupt")
 		if stored != _runtime_metadata(identity):

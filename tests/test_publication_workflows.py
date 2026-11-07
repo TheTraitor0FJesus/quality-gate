@@ -88,7 +88,7 @@ def test_product_only_builds_required_candidates_and_uses_job_scoped_github_toke
 
 def test_shared_image_writer_uses_a_job_scoped_package_write_token() -> None:
 	workflow = (ROOT / ".github/workflows/image-writer.yml").read_text(encoding="utf-8")
-	flow = (ROOT / "quality_gate/publication_flow.py").read_text(encoding="utf-8")
+	flow = (ROOT / "quality_gate/publication_images.py").read_text(encoding="utf-8")
 	_assert_job_permission(workflow, "push-images", "packages: write")
 	assert "      - name: Write images\n" in workflow
 	assert 'checks = ["Write images"]' in flow
