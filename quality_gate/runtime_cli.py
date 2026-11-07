@@ -26,7 +26,7 @@ def _policy_record(cache: PolicyCache, version: str) -> dict[str, object]:
 		}
 	try:
 		manifest = verify_release(cache.releases / version)
-	except DistributionError:
+	except (DistributionError, OSError):
 		return {
 			"release": version,
 			"available": False,
@@ -109,7 +109,10 @@ def runtimes(root: Path | None, cache_dir: Path | None) -> int:
 	try:
 		requested_root = (root.expanduser() if root is not None else Path.cwd()).resolve()
 	except (OSError, RuntimeError, ValueError):
-		failed_root = root.absolute() if root is not None else None
+		try:
+			failed_root = root.absolute() if root is not None else None
+		except (OSError, RuntimeError, ValueError):
+			failed_root = None
 		code = "root_not_found" if root is not None else "inspection_failed"
 		message = (
 			"The requested repository root cannot be resolved."
