@@ -4,36 +4,29 @@ Python 3.11+ CLI providing a shared quality contract for local Git hooks and Git
 
 ## Project map
 
-`quality_gate/` contains the CLI, runner, release machinery, and shared `policy/`; `tests/` contains tests; `templates/` contains consumer configuration; `.github/workflows/` contains CI; `docs/` contains project contracts.
+`quality_gate/` contains the CLI, runner, release machinery, and shared `policy/`; `tests/` contains tests; `templates/` contains consumer configuration; `.github/workflows/` contains CI; `docs/` contains project guidance and release contracts.
+
+At the start of a task, from the Quality Gate repository root, run `quality-gate --help` once.
+Before first using a command, read its `--help`. When applicable, locate existing Python
+environments with `quality-gate --root <repository> runtimes --json`. Existing verification and
+authorization rules still apply.
 
 ## Agent skills
-
-### Issue tracker
-
-GitHub Issues are the required tracker for project specifications and implementation tickets. See `docs/agents/issue-tracker.md`.
 
 ### Quality contract
 
 When adding, moving, or removing a Python component, its test directory, or its development requirements file, update `quality-gate.toml` in the same change. Keep shared Ruff and mypy policy and quality CI in Quality Gate; do not add project-local overrides or duplicate quality CI jobs.
 
-### When answering codebase questions, designing, or changing code
+### Architecture map maintenance
 
-Before a non-trivial codebase question, design task, or code change, read [the architecture map](docs/architecture.md). Use it to navigate, then verify relevant claims in code, the source of truth. In the same change, update the map when code makes one of its facts, links, or search routes inaccurate.
+Update [the architecture map](docs/architecture.md) when code changes make its navigation facts inaccurate.
 
 ## When changing shared quality behavior
 
-Before changing the runner, a shared tool policy, the manifest contract, or the reusable CI workflow, read [the quality policy change guide](docs/quality-policy-changes.md). Consumers select an immutable policy release and a pinned reusable-workflow SHA; activation requires an explicit consumer update, as described in [the agent reference](docs/agent-reference.md).
+Before changing the runner, a shared tool policy, the manifest contract, or the reusable CI workflow, read [the quality policy change guide](docs/quality-policy-changes.md). Consumers select an immutable policy release and a pinned reusable-workflow SHA; activation requires an explicit consumer update, as described in [consumer setup](docs/consumer-setup.md).
 
-This repository's commit hook runs the pinned released Quality Gate against staged changes. Run a
-standalone Gate only when task instructions explicitly require a pre-review full check
-or the user directly requests one; generic verification, review, PR, release, or policy-change
-guidance does not authorize it. After fixing a failed staged Gate, if an authorized commit is next,
-run only focused checks outside hook coverage, then retry the commit and let its hook verify the
-corrected staged candidate. For an authorized standalone staged Gate, dispatch the configured
-test-runner with `scope.kind = "quality-gate"` and `snapshot = "staged"`. See
-[verification details](docs/agent-reference.md#normal-operation).
-
-Before full-suite, audit or release verification, size test, Gate, runner, hook and CI timeout budgets for the operation, allowing outer budgets to cover inner work and cleanup; edit-hook deadlines retain their separate contract.
+This repository's commit hook runs the pinned released Quality Gate against staged changes. See
+[operations guidance](docs/operations.md) for recovery and verification routes.
 
 ## Release and public contract changes
 

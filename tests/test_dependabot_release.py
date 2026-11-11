@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from quality_gate.integrity import _parse_workflow, _single_workflow_findings
+from quality_gate.integrity_workflow_parser import _parse_workflow
+from quality_gate.integrity_workflows import _single_workflow_findings
 from quality_gate.publication import PUBLICATION, PublicationError, parse_decision
 from scripts.dependabot_release import DECISION, update_decision
 

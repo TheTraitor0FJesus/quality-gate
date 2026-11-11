@@ -63,6 +63,21 @@ def parser() -> argparse.ArgumentParser:
 	doctor_parser.add_argument("--cache-dir", type=Path)
 	setup_parser = subcommands.add_parser("setup", help="Prepare the pinned policy and runtimes.")
 	setup_parser.add_argument("--cache-dir", type=Path)
+	runtimes_parser = subcommands.add_parser(
+		"runtimes",
+		help="Inspect existing Python runtimes as JSON without provisioning.",
+		description=(
+			"Print a schema-1 inventory of exact prepared Python runtimes. "
+			"This command does not provision or mutate cache state."
+		),
+		epilog="Example: quality-gate --root . runtimes --json",
+	)
+	runtimes_parser.add_argument(
+		"--json", action="store_true", required=True, help="Emit the schema-1 JSON inventory."
+	)
+	runtimes_parser.add_argument(
+		"--cache-dir", type=Path, help="Inspect a non-default Quality Gate cache directory."
+	)
 	subcommands.add_parser("version", help="Print the installed Quality Gate version.")
 	return result
 
@@ -175,16 +190,32 @@ def _dispatch(arguments: argparse.Namespace) -> int:
 	return verdict.exit_code
 
 
+def _dispatch_lightweight_command(arguments: argparse.Namespace) -> int | None:
+	if arguments.command == "runtimes":
+		from .runtime_cli import runtimes
+
+		return runtimes(arguments.root, arguments.cache_dir)
+	if arguments.command not in {
+		"edit-check",
+		"edit-secrets",
+		"edit-types",
+		"edit-integrity",
+	}:
+		return None
+	from .edit_cli import main as edit_main
+
+	return edit_main(
+		secrets=arguments.command == "edit-secrets",
+		types=arguments.command == "edit-types",
+		integrity=arguments.command == "edit-integrity",
+	)
+
+
 def main() -> int:
 	arguments = parser().parse_args()
-	if arguments.command in {"edit-check", "edit-secrets", "edit-types", "edit-integrity"}:
-		from .edit_cli import main as edit_main
-
-		return edit_main(
-			secrets=arguments.command == "edit-secrets",
-			types=arguments.command == "edit-types",
-			integrity=arguments.command == "edit-integrity",
-		)
+	lightweight_result = _dispatch_lightweight_command(arguments)
+	if lightweight_result is not None:
+		return lightweight_result
 	# The edit path shares the JSON-only entry's lean startup. Full Gate modules
 	# are loaded only for commands which need their repository orchestration.
 	from .contracts import ValidationError, Verdict
