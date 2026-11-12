@@ -71,6 +71,21 @@ def parser() -> argparse.ArgumentParser:
 	doctor_parser.add_argument("--cache-dir", type=Path)
 	setup_parser = subcommands.add_parser("setup", help="Prepare the pinned policy and runtimes.")
 	setup_parser.add_argument("--cache-dir", type=Path)
+	runtimes_parser = subcommands.add_parser(
+		"runtimes",
+		help="Inspect existing Python runtimes as JSON without provisioning.",
+		description=(
+			"Print a schema-1 inventory of exact prepared Python runtimes. "
+			"This command does not provision or mutate cache state."
+		),
+		epilog="Example: quality-gate --root . runtimes --json",
+	)
+	runtimes_parser.add_argument(
+		"--json", action="store_true", required=True, help="Emit the schema-1 JSON inventory."
+	)
+	runtimes_parser.add_argument(
+		"--cache-dir", type=Path, help="Inspect a non-default Quality Gate cache directory."
+	)
 	subcommands.add_parser("version", help="Print the installed Quality Gate version.")
 	return result
 
@@ -304,6 +319,10 @@ def _run_standard_command(arguments: argparse.Namespace) -> int:
 
 def main() -> int:
 	arguments = parser().parse_args()
+	if arguments.command == "runtimes":
+		from .runtime_cli import runtimes
+
+		return runtimes(arguments.root, arguments.cache_dir)
 	if arguments.command in {"edit-check", "edit-secrets", "edit-types", "edit-integrity"}:
 		return _run_edit_command(arguments.command)
 	if arguments.command == "edit-setup":

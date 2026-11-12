@@ -11,7 +11,7 @@ expires_on = "2027-08-26"
 
 [quality]
 schema = 2
-policy_release = "v4.7.0"
+policy_release = "v4.8.0"
 
 [repository]
 name = "quality-gate"
@@ -27,12 +27,8 @@ required_documents = [
     ".release/publisher.toml",
     ".coderabbit.yaml",
     "README.md",
-    "docs/agent-reference.md",
-    "docs/integrations.md",
-    "docs/edit-check.md",
-    "docs/edit-secrets.md",
-    "docs/edit-integrity.md",
-    "docs/edit-types.md",
+    "docs/consumer-setup.md",
+    "docs/operations.md",
     "docs/architecture.md",
     "docs/coding-standards.md",
     "docs/lessons.md",
@@ -54,6 +50,7 @@ required_documents = [
     "scripts/release_build.py",
     "scripts/release_metadata.py",
     "quality_gate/release_rollout.py",
+    "quality_gate/release_rollout_provider.py",
     "quality_gate/consumer_rollout.py",
     "quality-gate.toml",
 ]

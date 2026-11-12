@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .contracts import Manifest, PythonComponent
 from .edit_policy import sha256
 from .edit_protocol import (
 	FIRST_PRINTABLE_CHARACTER,
@@ -231,3 +232,12 @@ class Configuration:
 		return [
 			{"path": path, "sha256": digest} for path, digest in sorted(self.identities.items())
 		]
+
+
+def component_for_path(manifest: Manifest | None, path: str) -> PythonComponent | None:
+	if manifest is None:
+		return None
+	return next(
+		(component for component in manifest.python if Path(path).is_relative_to(component.path)),
+		None,
+	)

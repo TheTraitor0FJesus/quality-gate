@@ -1,72 +1,384 @@
-"""Behavior at the executable working-tree edit-check boundary."""
+"""Shared fixtures for working-tree edit-check tests."""
 
-from edit_check_support78 import (
-	edit_cache as edit_cache,
-	engine_wheel as engine_wheel,
-	prepare_edit_cache as prepare_edit_cache,
-	process_alive as process_alive,
-	wheel_cache as wheel_cache,
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from collections.abc import Iterator
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from quality_gate.contracts import load_manifest
+from quality_gate.distribution import (
+	DistributionError,
+	ExternalTool,
+	default_cache_root,
+	verify_release,
+)
+from quality_gate.edit_protocol import SUPPORTED_POLICIES as EDIT_SUPPORTED_POLICIES
+from quality_gate.release_contract import (
+	UNIFIED_RELEASE_DEPENDENCIES,
+	UNIFIED_RELEASE_PLATFORM_TOOL_PATHS,
+	UNIFIED_RELEASE_POLICY_FILES,
+	UNIFIED_RELEASE_TOOLS,
+)
+from quality_gate.runtime import RuntimeManager
+
+REPOSITORY = Path(__file__).resolve().parents[1]
+EXIT_UNCHECKED = 2
+EXPECTED_SELECTIONS = 2
+FRESH_PROCESSES = 8
+REUSED_PROCESSES = 3
+REUSED_TWO_SELECTION_PROCESSES = 4
+STILL_ACTIVE = 259
+TIMEOUT_WITH_CLEANUP_SECONDS = 5
+RELEASED_EDIT_POLICIES = frozenset(
+	{
+		"v2.4.2",
+		"v2.5.0",
+		"v2.6.0",
+		"v2.6.1",
+		"v2.6.2",
+		"v3.0.0",
+		"v3.1.0",
+		"v3.2.0",
+		"v4.0.0",
+		"v4.1.0",
+		"v4.2.0",
+		"v4.2.1",
+		"v4.3.0",
+		"v4.4.0",
+		"v4.5.0",
+		"v4.6.0",
+		"v4.7.0",
+	}
 )
 
-from edit_check_cases78_1 import (
-	test_supported_policy_matrix_keeps_all_released_pins as test_supported_policy_matrix_keeps_all_released_pins,
-	test_configuration_recapture_preserves_first_identity as test_configuration_recapture_preserves_first_identity,
-	test_prepare_edit_cache_uses_selected_release_ruff_not_dev_distribution as test_prepare_edit_cache_uses_selected_release_ruff_not_dev_distribution,
-	test_prepare_edit_cache_uses_candidate_when_configured_root_is_selected as test_prepare_edit_cache_uses_candidate_when_configured_root_is_selected,
-	test_prepare_edit_cache_requires_selected_verified_release as test_prepare_edit_cache_requires_selected_verified_release,
-	test_wheel_exposes_read_only_edits_without_extraction as test_wheel_exposes_read_only_edits_without_extraction,
-	test_wheel_on_pythonpath_checks_working_files_without_extraction as test_wheel_on_pythonpath_checks_working_files_without_extraction,
-	test_unchanged_final_result_reuses_verified_selection as test_unchanged_final_result_reuses_verified_selection,
-	test_import_layout_change_invalidates_reuse as test_import_layout_change_invalidates_reuse,
-)
 
-from edit_check_cases78_2 import (
-	test_nested_package_import_order_matches_full_tree as test_nested_package_import_order_matches_full_tree,
-	test_policy_selection_change_requires_fresh_ruff as test_policy_selection_change_requires_fresh_ruff,
-	test_unbounded_or_unlexable_import_context_runs_ruff as test_unbounded_or_unlexable_import_context_runs_ruff,
-	test_working_tree_changes_invalidate_reuse as test_working_tree_changes_invalidate_reuse,
-	test_corrupt_reuse_cannot_supply_a_clean_verdict as test_corrupt_reuse_cannot_supply_a_clean_verdict,
-	test_invalid_request_is_unchecked_and_does_not_echo_input as test_invalid_request_is_unchecked_and_does_not_echo_input,
-	test_expired_invocation_is_unchecked_before_file_selection as test_expired_invocation_is_unchecked_before_file_selection,
-	test_invalid_envelope_is_source_free as test_invalid_envelope_is_source_free,
-	test_write_phase_removes_safe_f401_unused_import_from_module as test_write_phase_removes_safe_f401_unused_import_from_module,
-	test_write_phase_preserves_explicit_public_reexport_in_init as test_write_phase_preserves_explicit_public_reexport_in_init,
-	test_safe_fixes_remove_unused_import_and_report_residual_lint as test_safe_fixes_remove_unused_import_and_report_residual_lint,
-	test_read_only_validation_reports_final_ruff_findings_without_writing as test_read_only_validation_reports_final_ruff_findings_without_writing,
-	test_read_only_validation_supports_every_policy_pin as test_read_only_validation_supports_every_policy_pin,
-	test_read_only_validation_rejects_inputs_changed_during_checks as test_read_only_validation_rejects_inputs_changed_during_checks,
-)
+def assert_project_files_after_cleanup(root: Path, *names: str) -> None:
+	assert {item.name for item in root.iterdir()} == {*names, "temp"}
+	temp_root = root / "temp"
+	if os.name == "nt":
+		assert {item.name for item in temp_root.iterdir()} == {".quality-gate.lock"}
+		return
+	entries = list(temp_root.iterdir())
+	areas = [item for item in entries if item.name.startswith(".quality-gate-cleanup-")]
+	assert len(areas) == 1
+	area = areas[0]
+	assert {item.name for item in entries} == {".quality-gate.lock", area.name}
+	assert area.is_dir() and not area.is_symlink()
+	assert area.stat().st_mode & 0o077 == 0
+	assert {item.name for item in area.iterdir()} == {".quality-gate-cleanup-area"}
+	assert (area / ".quality-gate-cleanup-area").is_file()
 
-from edit_check_cases78_3 import (
-	test_write_phase_applies_only_safe_fixes_and_formatting as test_write_phase_applies_only_safe_fixes_and_formatting,
-	test_read_only_validation_keeps_unchecked_prerequisites_incomplete as test_read_only_validation_keeps_unchecked_prerequisites_incomplete,
-	test_unknown_edit_phase_is_rejected_without_falling_back_to_writer as test_unknown_edit_phase_is_rejected_without_falling_back_to_writer,
-	test_ruff_phase_is_rejected_by_other_edit_readers as test_ruff_phase_is_rejected_by_other_edit_readers,
-	test_preexisting_rules_production_test_suppression_and_redaction as test_preexisting_rules_production_test_suppression_and_redaction,
-	test_stale_input_never_rewrites_any_file as test_stale_input_never_rewrites_any_file,
-	test_managed_old_pin_and_outside_component_baseline_are_distinct as test_managed_old_pin_and_outside_component_baseline_are_distinct,
-	test_manifest_failures_never_fall_back_to_baseline as test_manifest_failures_never_fall_back_to_baseline,
-	test_unrelated_unprepared_component_does_not_block_managed_edit as test_unrelated_unprepared_component_does_not_block_managed_edit,
-	test_version_probe_never_runs_installed_startup_hooks as test_version_probe_never_runs_installed_startup_hooks,
-	test_baseline_interpreter_symlink_is_supported as test_baseline_interpreter_symlink_is_supported,
-	test_interpreter_change_during_probe_invalidates_result as test_interpreter_change_during_probe_invalidates_result,
-	test_working_tree_is_checked_without_reading_or_rewriting_index as test_working_tree_is_checked_without_reading_or_rewriting_index,
-	test_empty_non_python_duplicate_and_policy_excluded_inputs as test_empty_non_python_duplicate_and_policy_excluded_inputs,
-	test_bounded_input_failures_never_publish as test_bounded_input_failures_never_publish,
-	test_syntax_error_is_redacted_and_does_not_prevent_other_file_formatting as test_syntax_error_is_redacted_and_does_not_prevent_other_file_formatting,
-)
 
-from edit_check_cases78_4 import (
-	test_missing_and_corrupt_prerequisites_are_unchecked as test_missing_and_corrupt_prerequisites_are_unchecked,
-	test_nonexecutable_tool_invalidates_a_cached_verdict as test_nonexecutable_tool_invalidates_a_cached_verdict,
-	test_process_alive_distinguishes_live_and_zombie_processes as test_process_alive_distinguishes_live_and_zombie_processes,
-	test_deadline_terminates_owned_runtime_descendants as test_deadline_terminates_owned_runtime_descendants,
-	test_runtime_boundary_and_freshness_fail_closed as test_runtime_boundary_and_freshness_fail_closed,
-	test_policy_change_during_check_invalidates_result as test_policy_change_during_check_invalidates_result,
-	test_setup_verifies_the_pinned_wheel_native_record as test_setup_verifies_the_pinned_wheel_native_record,
-	test_result_delivery_obeys_the_same_deadline as test_result_delivery_obeys_the_same_deadline,
-	test_unicode_spaces_duplicate_and_noop_preserve_content_identity as test_unicode_spaces_duplicate_and_noop_preserve_content_identity,
-	test_gitignore_explicit_file_semantics_and_working_tree_identity as test_gitignore_explicit_file_semantics_and_working_tree_identity,
-	test_malformed_optional_baseline_is_rejected as test_malformed_optional_baseline_is_rejected,
-	test_junction_or_symlink_escape_is_rejected as test_junction_or_symlink_escape_is_rejected,
-)
+def digest(content: bytes) -> str:
+	return hashlib.sha256(content).hexdigest()
+
+
+@lru_cache(maxsize=8)
+def _selected_ruff_artifact(
+	configured_release_path: Path | None,
+	selected_cache_path: Path,
+	pinned_release: str,
+) -> tuple[ExternalTool, bytes]:
+	# Release audits select the candidate explicitly while the source manifest remains pinned.
+	release_paths: list[tuple[Path, bool]] = []
+	if configured_release_path is not None:
+		release_paths.append((configured_release_path, True))
+	if configured_release_path != selected_cache_path:
+		release_paths.append((selected_cache_path, False))
+
+	last_error: DistributionError | OSError | None = None
+	for release_path, is_configured in release_paths:
+		try:
+			manifest = verify_release(release_path)
+			if not is_configured and manifest.version != pinned_release:
+				last_error = DistributionError(
+					f"cached release {pinned_release} contains manifest {manifest.version}"
+				)
+				continue
+			ruff = next((tool for tool in manifest.tools if tool.name == "ruff"), None)
+			if ruff is None:
+				last_error = DistributionError(
+					f"selected release {manifest.version} does not declare Ruff"
+				)
+				continue
+			content = (release_path / ruff.path).read_bytes()
+			if digest(content) != ruff.sha256:
+				last_error = DistributionError(f"release checksum mismatch: {ruff.path}")
+				continue
+			return ruff, content
+		except (DistributionError, OSError) as error:
+			last_error = error
+
+	error = last_error or DistributionError(f"pinned release {pinned_release} is unavailable")
+	raise AssertionError(
+		f"Prepare the pinned policy release {pinned_release} in the local cache with "
+		f"quality-gate sync and quality-gate setup before running this suite: {error}"
+	) from error
+
+
+@pytest.fixture(scope="module")
+def edit_cache() -> Iterator[Path]:
+	"""Immutable test infrastructure: selected release Ruff, synthetic other inventory."""
+	# Avoid ensurepip's Windows path limit inside Gate's nested temporary workspace.
+	parent = next(
+		(path for path in (REPOSITORY, *REPOSITORY.parents) if (path / ".git").exists()),
+		REPOSITORY,
+	) / "temp"
+	parent.mkdir(exist_ok=True)
+	with tempfile.TemporaryDirectory(prefix="quality-gate-edit-", dir=parent) as directory:
+		yield prepare_edit_cache(Path(directory))
+
+
+def prepare_edit_cache(cache: Path, version: str = "v2.4.2") -> Path:
+	selected_release = load_manifest(REPOSITORY).policy_release
+	configured_policy_root = os.environ.get("QUALITY_GATE_POLICY_ROOT")
+	configured_release_root = Path(configured_policy_root) if configured_policy_root else None
+	selected_cache_root = default_cache_root() / "releases" / selected_release
+	ruff_tool, ruff_content = _selected_ruff_artifact(
+		configured_release_root, selected_cache_root, selected_release
+	)
+	release = cache / "releases" / version
+	release.mkdir(parents=True)
+	files = {
+		f"quality_gate-{version.removeprefix('v')}-py3-none-any.whl": (
+			"artifact",
+			b"policy wheel fixture",
+		)
+	}
+	files.update(
+		{
+			f"{name}-{version}-py3-none-any.whl": ("dependency", b"dependency fixture")
+			for name, version in UNIFIED_RELEASE_DEPENDENCIES.items()
+		}
+	)
+	files.update(
+		{
+			path: ("policy", (REPOSITORY / path).read_bytes())
+			for path in UNIFIED_RELEASE_POLICY_FILES
+		}
+	)
+	manifest = ["[release]", f'version = "{version}"']
+	for path, (kind, content) in files.items():
+		target = release / path
+		target.parent.mkdir(parents=True, exist_ok=True)
+		target.write_bytes(content)
+		manifest.extend(
+			[
+				"[[release.files]]",
+				f'path = "{path}"',
+				f'kind = "{kind}"',
+				f'sha256 = "{digest(content)}"',
+			]
+		)
+	platform = "windows" if os.name == "nt" else "linux"
+	for name, tool_version in UNIFIED_RELEASE_TOOLS.items():
+		source_tool = ruff_tool if name == "ruff" else None
+		path = (
+			source_tool.path
+			if source_tool is not None
+			else UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform].get(
+				name, f"{name}-{tool_version}-py3-none-any.whl"
+			)
+		)
+		if source_tool is not None:
+			tool_version = source_tool.version
+			content = ruff_content
+		else:
+			content = b"tool fixture"
+		(release / path).write_bytes(content)
+		manifest.extend(
+			[
+				"[[release.tools]]",
+				f'name = "{name}"',
+				f'version = "{tool_version}"',
+				f'path = "{path}"',
+				f'sha256 = "{digest(content)}"',
+			]
+		)
+	(release / "release.toml").write_text("\n".join(manifest) + "\n", encoding="utf-8")
+	result = subprocess.run(
+		[
+			sys.executable,
+			"-B",
+			"-m",
+			"quality_gate.cli",
+			"edit-setup",
+			"--policy-release",
+			version,
+			"--cache-dir",
+			str(cache),
+		],
+		cwd=REPOSITORY,
+		capture_output=True,
+		check=False,
+	)
+	assert result.returncode == 0, result.stdout + result.stderr
+	return cache
+
+
+@pytest.fixture(scope="module")
+def wheel_cache(tmp_path_factory: pytest.TempPathFactory) -> Path:
+	cache = tmp_path_factory.mktemp("wheel-cache")
+	for version in sorted(EDIT_SUPPORTED_POLICIES):
+		prepare_edit_cache(cache, version)
+	return cache
+
+
+@pytest.fixture(scope="module")
+def engine_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+	"""Build immutable packaging infrastructure once; never extract it for execution."""
+	root = tmp_path_factory.mktemp("engine-wheel")
+	source = root / "source"
+	source.mkdir()
+	shutil.copy2(REPOSITORY / "pyproject.toml", source)
+	shutil.copytree(
+		REPOSITORY / "quality_gate",
+		source / "quality_gate",
+		ignore=shutil.ignore_patterns("__pycache__"),
+	)
+	# The release build backend lives in the base build environment, not project runtimes.
+	build_python = Path(sys.base_prefix) / ("python.exe" if os.name == "nt" else "bin/python3")
+	result = subprocess.run(
+		[
+			str(build_python),
+			"-B",
+			"-m",
+			"pip",
+			"wheel",
+			"--no-deps",
+			"--no-build-isolation",
+			"--no-cache-dir",
+			"--wheel-dir",
+			str(root),
+			str(source),
+		],
+		cwd=root,
+		capture_output=True,
+		check=False,
+		timeout=60,
+	)
+	assert result.returncode == 0, result.stdout + result.stderr
+	return next(root.glob("quality_gate-*.whl"))
+
+
+def request(root: Path, cache: Path, *paths: str) -> dict[str, Any]:
+	return {
+		"schema": 1,
+		"root": str(root),
+		"files": [{"path": path, "sha256": digest((root / path).read_bytes())} for path in paths],
+		"cache_dir": str(cache),
+		"baseline": {
+			"policy_release": "v2.4.2",
+			"python": sys.executable,
+			"python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+		},
+		"deadline_unix_ms": int(time.time() * 1000) + 10_000,
+	}
+
+
+def invoke(payload: object, *, engine_wheel: Path | None = None) -> tuple[int, dict[str, Any]]:
+	invocation_environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+	if engine_wheel is not None:
+		invocation_environment["PYTHONPATH"] = str(engine_wheel)
+	if isinstance(payload, dict) and isinstance(payload.get("root"), str):
+		project = Path(payload["root"])
+		# Keep mutable result reuse local to this test, independently of shared releases.
+		cache_home = str(project.parent / f"{project.name}-user-cache")
+		invocation_environment.update(LOCALAPPDATA=cache_home, XDG_CACHE_HOME=cache_home)
+	result = subprocess.run(
+		[sys.executable, "-B", "-m", "quality_gate.cli", "edit-check"],
+		input=payload if isinstance(payload, bytes) else json.dumps(payload).encode(),
+		cwd=REPOSITORY if engine_wheel is None else engine_wheel.parent,
+		env=invocation_environment,
+		capture_output=True,
+		check=False,
+		timeout=15,
+	)
+	assert result.stderr == b"", result.stderr.decode(errors="replace")
+	return result.returncode, json.loads(result.stdout)
+
+
+def managed(root: Path, cache: Path, *, version: str = "v2.4.2", setup: bool = True) -> Path:
+	(root / "src").mkdir(exist_ok=True)
+	(root / "requirements.txt").write_bytes(b"")
+	(root / "quality-gate.toml").write_text(
+		f'''[quality]
+schema = 2
+policy_release = "{version}"
+[repository]
+name = "edit-fixture"
+domains = ["repository", "python"]
+required_documents = ["quality-gate.toml"]
+[[python]]
+name = "app"
+path = "src"
+python_version = "{sys.version_info.major}.{sys.version_info.minor}"
+dependency_inputs = ["requirements.txt"]
+test_paths = []
+tests_applicable = false
+tests_reason = "Disposable lint-only fixture."
+''',
+		encoding="utf-8",
+	)
+	if setup:
+		manifest = load_manifest(root)
+		RuntimeManager(cache).ensure(
+			root,
+			manifest,
+			manifest.python[0],
+			python_executable=Path(sys.executable),
+			install=lambda *_: None,
+		)
+	path = root / "src/example.py"
+	path.write_bytes(b"value=  1\n")
+	return path
+
+
+def runtime_wrapper(root: Path, body: str) -> Path:
+	wrapper = root / ("runtime.cmd" if os.name == "nt" else "runtime")
+	helper = root / "runtime_helper.py"
+	helper.write_text(body, encoding="utf-8")
+	if os.name == "nt":
+		wrapper.write_text(f'@"{sys.executable}" "{helper}"\n', encoding="utf-8")
+	else:
+		wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{helper}"\n', encoding="utf-8")
+		wrapper.chmod(0o700)
+	return wrapper
+
+
+def process_alive(pid: int) -> bool:
+	if os.name == "nt":
+		import ctypes
+		from ctypes import wintypes
+
+		kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+		kernel.OpenProcess.restype = wintypes.HANDLE
+		kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+		kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+		kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+		handle = kernel.OpenProcess(0x1000, False, pid)
+		if not handle:
+			return False
+		try:
+			code = wintypes.DWORD()
+			assert kernel.GetExitCodeProcess(handle, ctypes.byref(code))
+			return code.value == STILL_ACTIVE
+		finally:
+			kernel.CloseHandle(handle)
+	try:
+		os.kill(pid, 0)
+	except ProcessLookupError:
+		return False
+	return True

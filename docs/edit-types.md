@@ -58,77 +58,24 @@ separators, without a trailing newline. Host validation rejects unknown schemas,
 inconsistent exit/status, incomplete evidence and expired/stale results.
 
 ```json
-{
-  "schema": 1,
-  "check_id": "mypy",
-  "engine_version": "3.1.0",
-  "status": "failed",
-  "reason": null,
-  "action": null,
-  "writes_may_have_occurred": false,
-  "root": "/absolute/project",
-  "root_identity": {"device": 1, "inode": 123},
-  "files": [{"path": "app/api.py", "input_sha256": "<sha256>", "final_sha256": "<sha256>"}],
-  "configuration": [{"path": "quality-gate.toml", "sha256": "<sha256>"}],
-  "selections": [{
-    "policy_release": "v2.4.2",
-    "release_sha256": "<sha256>",
-    "policy_sha256": "<sha256>",
-    "mypy_version": "2.3.1",
-    "mypy_sha256": "<sha256>",
-    "python": "/external/runtime/python",
-    "python_version": "3.12",
-    "python_sha256": "<sha256>",
-    "base_python": "/system/python",
-    "base_python_sha256": "<sha256>",
-    "runtime_fingerprint": "<sha256>",
-    "environment_sha256": "<sha256>",
-    "environment": {"path": "/external/runtime", "sha256": "<sha256>", "file_count": 100, "bytes": 1000000}
-  }],
-  "components": [{
-    "name": "app",
-    "path": "app",
-    "coverage": "managed",
-    "status": "failed",
-    "reason": null,
-    "selection": 0,
-    "inventory": [{"path": "app/api.py", "sha256": "<sha256>"}, {"path": "app/consumer.py", "sha256": "<sha256>"}],
-    "directories": [{"path": "app", "entries": [{"name": "api.py", "kind": "file"}, {"name": "consumer.py", "kind": "file"}]}],
-    "scope_sha256": "<sha256>",
-    "dependency_inputs": [{"path": "requirements.txt", "sha256": "<sha256>"}],
-    "diagnostics": [{"path": "app/consumer.py", "line": 4, "column": 9, "code": "arg-type"}],
-    "source_count": 2,
-    "import_count": 1,
-    "analysis_ms": 120
-  }],
-  "freshness_sha256": "<sha256>",
-  "process_count": 4,
-  "elapsed_ms": 450
-}
+{"schema":1,"check_id":"mypy","engine_version":"3.1.0","status":"failed","reason":null,"action":null,"writes_may_have_occurred":false,"root":"/absolute/project","root_identity":{"device":1,"inode":123},"files":[{"path":"app/api.py","input_sha256":"<sha256>","final_sha256":"<sha256>"}],"configuration":[{"path":"quality-gate.toml","sha256":"<sha256>"}],"selections":[{"policy_release":"v2.4.2","release_sha256":"<sha256>","policy_sha256":"<sha256>","mypy_version":"2.3.1","mypy_sha256":"<sha256>","python":"/external/runtime/python","python_version":"3.12","python_sha256":"<sha256>","base_python":"/system/python","base_python_sha256":"<sha256>","runtime_fingerprint":"<sha256>","environment_sha256":"<sha256>","environment":{"path":"/external/runtime","sha256":"<sha256>","file_count":100,"bytes":1000000}}],"components":[{"name":"app","path":"app","coverage":"managed","status":"failed","reason":null,"selection":0,"inventory":[{"path":"app/api.py","sha256":"<sha256>"},{"path":"app/consumer.py","sha256":"<sha256>"}],"directories":[{"path":"app","entries":[{"name":"api.py","kind":"file"},{"name":"consumer.py","kind":"file"}]}],"scope_sha256":"<sha256>","dependency_inputs":[{"path":"requirements.txt","sha256":"<sha256>"}],"diagnostics":[{"path":"app/consumer.py","line":4,"column":9,"code":"arg-type"}],"source_count":2,"import_count":1,"analysis_ms":120}],"freshness_sha256":"<sha256>","process_count":4,"elapsed_ms":450}
 ```
 
-The example hashes and timestamp are placeholders. `engine_version` is the
-executing engine's package version; its immutable wheel identity remains the
-host launcher's trust responsibility. `root` is canonical absolute, and
-`root_identity` contains nonnegative integer `device`/`inode` from stat before
-analysis, revalidated at completion. `files` includes every normalized request
-path with nullable input/final hashes; this interface is read-only, so they match.
-`configuration` captures existing and absent named configuration files using
-nullable hashes. `selections` contains exact policy/release/tool/interpreter
-identities, major.minor Python version, runtime fingerprint, and an absolute
-environment tree record described below. `python` must be inside `environment.path`
-at `Scripts/python.exe` (Windows) or `bin/python` (POSIX). For managed coverage the
-environment path is the prepared runtime selected by the working-tree component
-contract; for baseline coverage it is exactly `root/.venv`. Multiple components
-may share a selection only when every provenance field is identical. Policy files
-and tools belong to the verified cache's `releases/<policy_release>` inventory;
-they never come from the project, baseline substitution, or the engine's policy.
-`base_python` is the canonical absolute base executable reported by the isolated
-probe; `base_python_sha256` binds its bytes. Managed environment ownership is
-`<cache>/runtimes/<repository-key>/<runtime_fingerprint>`, where repository-key is
-the first 32 hex digits of SHA-256 of the canonical root string casefolded and
-UTF-8 encoded, matching existing Gate setup. The host validates this ownership
-and baseline `.venv` ownership before opening environment evidence paths.
+`engine_version` is the executing package version; the host launcher verifies the
+immutable wheel. `root` is canonical absolute; `root_identity` has nonnegative stat
+`device`/`inode` revalidated at completion. `files` contains each normalized request
+path and matching nullable input/final hashes. `configuration` records present and
+absent named files. Selections bind exact release, policy, mypy, interpreter,
+runtime fingerprint and environment tree. `python` is `Scripts/python.exe` on
+Windows or `bin/python` on POSIX inside `environment.path`. Managed coverage uses
+the prepared component runtime; baseline uses exactly `root/.venv`. Components
+share a selection only when every provenance field matches. Policy and tools come
+from the verified `releases/<policy_release>` inventory. `base_python` is the
+canonical isolated-probe executable and `base_python_sha256` binds its bytes.
+Managed ownership is `<cache>/runtimes/<repository-key>/<runtime_fingerprint>`,
+where repository-key is the first 32 hex digits of SHA-256 of the casefolded,
+UTF-8 canonical root. The host validates managed and baseline ownership before
+opening environment evidence.
 
 `components[].path` is root-relative (`.` for unmanaged), `coverage` is `managed`
 or `baseline`, and `selection` is a zero-based index or null for an opt-out.
@@ -146,27 +93,16 @@ are nonnegative integers. `import_count` counts static import statements in the
 analyzed source, not mypy's transitive dependency graph size.
 
 `freshness_sha256` hashes `{root,root_identity,files,configuration,selections,components}`
-with component `analysis_ms` removed. The result keeps the existing wire shape:
-there is no separate `source_roots` component key. A host verifier obtains the
-roots from the verified working-tree manifest, matched by component name and path,
-then requires `directories` to be exactly the recursive closure of `component.path`
-and those roots. It rejects missing, extra or undeclared directory locations. The
-host first validates schema, request
-coverage and selection indices, then rechecks root stat, request absences/hashes,
-configuration, environment tree and source inventory. To detect added/deleted
-sources, it re-enumerates each recorded directory and compares its immediate
-`entries` exactly (name and kind); a new directory therefore also invalidates the
-result. This is a fixed filesystem freshness operation, not policy routing.
-The coverage-specific exclusion set below applies identically to recorded and
-rechecked directory entries. Every component has its own root directory record
-for `component.path` and one root record per declared source root, plus exactly one
-directory record for every reachable included child directory;
-duplicate paths, missing children, orphan records, duplicate entries and an
-inventory inconsistent with the directory records invalidate the certificate.
-Every included `.py`/`.pyi` entry has exactly one inventory record, including a
-`.py` shadowed by `.pyi` under normal mypy discovery. Any mismatch rejects the
-complete result. Evidence does not promise
-atomicity after the host's final check; subsequent edits require a new event.
+without component `analysis_ms`. There is no `source_roots` result key. The host
+obtains roots from the verified manifest by component name and path, validates
+schema, request coverage and selections, then rechecks root stat, input presence
+and hashes, configuration, environment and source inventory. It re-enumerates
+each recorded directory and compares immediate names and kinds using the same
+coverage exclusions. The records must be exactly the recursive closure of the
+component and declared roots, including empty directories and one record per
+included `.py` and `.pyi`, even shadowed `.py` files. Reject missing, extra,
+undeclared, duplicate or orphan paths and inconsistent membership. A change after
+the final check needs a new event; the evidence is not atomic thereafter.
 
 All results contain schema/check/engine/status/reason/action/write flag, `files`,
 `configuration`, `selections`, `components`, process count and elapsed milliseconds.
@@ -217,47 +153,34 @@ Python path routes by its lexical component membership. Unrecognized non-Python
 paths are inapplicable. Project mypy config does not override released policy;
 malformed or ambiguous dependency/project settings are unchecked.
 
-The host's `configuration_paths()` must use the same marker rule: include existing
-`py.typed` files in scanned directories and present or absent `py.typed` paths at
-component/source-root ancestors.
-
 `environment` has exactly absolute canonical directory `path`, `sha256`, integer
-`file_count`, integer `bytes`. `environment_sha256` equals its `sha256`. Compute
-the digest by recursively collecting these records, sorted by relative `path`:
+`file_count` and `bytes`; `environment_sha256` equals its `sha256`. Recursively
+collect records sorted by relative `path`, then hash their canonical JSON array:
 
-- Directory: `{path,kind:"directory"}`, including `path:"."`.
-- Regular file: `{path,kind:"file",sha256,size}`; hash raw bytes and sum `size`.
-- POSIX interpreter alias under `bin/`, basename matching `python`, `python3`, or
-  `python3.<digits>`: `{path,kind:"interpreter",target,sha256,size}`. Resolve the
-  complete link chain to an executable regular file, bind canonical absolute
-  `target` and its bytes, and revalidate both link resolution and bytes. Count the
-  record in `file_count`/`bytes`. The selected `python_sha256` is its final target
-  digest; on Windows it binds the regular venv redirector and the isolated runtime
-  probe additionally binds the actual base executable bytes in this tree's digest.
-- POSIX root `lib64` linking exactly to root `lib`:
-  `{path:"lib64",kind:"alias",target:"lib"}`; do not traverse twice.
+- Directory: `{path,kind:"directory"}`, including `.`.
+- Regular file: `{path,kind:"file",sha256,size}`; hash raw bytes and sum sizes.
+- POSIX `bin/` aliases named `python`, `python3`, or `python3.<digits>`:
+  `{path,kind:"interpreter",target,sha256,size}`. Resolve to an executable regular
+  file, bind and revalidate its canonical target and bytes, and count it in the
+  file/byte totals. `python_sha256` binds the final target; Windows binds the
+  regular redirector and the isolated probe also binds base executable bytes.
+- A root `lib64` link exactly to root `lib`: `{path:"lib64",kind:"alias",target:"lib"}`;
+  do not traverse it twice.
 
-Skip directory `__pycache__` and regular filenames ending `.pyc`/`.pyo` only.
-Other environment links/reparse points/hardlinks are unsupported. Include the
-isolated probe's actual base Python executable as
-`{path:"@base-python",kind:"interpreter",target,sha256,size}` when it is outside
-the environment. Hash the canonical JSON array of records with the identity
-serialization above. Cap at 20,000 records and 512 MiB total bytes; check the
-remaining deadline while walking and reading. An empty/missing `pyvenv.cfg`,
-`include-system-site-packages` other than false, unexpected site paths, unknown
-or changed `.pth` files, or editable dependency contexts are unchecked. Blank
-and `#` comment-only `.pth` lines remain allowed. The managed runtime also allows
-the exact known payloads for `a1_coverage.pth`, `pytest-cov.pth`, and
-`distutils-precedence.pth`; each payload is hashed after CRLF-to-LF
-normalization (the observed coverage file uses CRLF). Their contents are
-validated, never executed: the probe runs isolated with `-I -S -B`. Mypy gets
-explicit verified site directories without executing site startup or project
-plugins. Any other executable or path-bearing entry, malformed content, or
-changed payload remains unchecked; review and update the allowlist only when a
-managed dependency payload changes.
-The host performs the same tree operation for final delivery freshness; caps
-bound work, not a latency guarantee. Measure provider initial/final and host
-rehash together before activation.
+Skip only `__pycache__` directories and regular `.pyc`/`.pyo` files. Other links,
+reparse points and hardlinks are unsupported. Include a base executable outside
+the environment as `{path:"@base-python",kind:"interpreter",target,sha256,size}`.
+Cap at 20,000 records and 512 MiB, checking the deadline during traversal and reads.
+Missing or empty `pyvenv.cfg`, system site packages, unexpected site paths, editable
+dependencies, or unknown/changed `.pth` entries are unchecked. Blank and comment-only
+`.pth` lines are allowed. Managed runtimes also allow exact known `a1_coverage.pth`,
+`pytest-cov.pth` and `distutils-precedence.pth` payloads, hashed after CRLF-to-LF
+normalization. Validate, never execute, their contents. The isolated probe uses
+`-I -S -B`; mypy receives verified site directories without startup or project
+plugins. Other executable/path-bearing entries or malformed/changed payloads are
+unchecked. Update the allowlist only for a changed managed dependency payload.
+The host repeats this tree operation for delivery freshness; measure provider and
+host rehash costs before activation.
 
 ## Background execution, schema 2
 
@@ -266,56 +189,38 @@ deadline. Schema 2 is additive and exclusively requests a bounded background
 invocation. The provider still runs one ordinary supervised CLI process and emits
 one final response. It creates no daemon, watcher or persistent event state.
 
+A schema 2 request adds the required fields below to the schema 1 request:
+
 ```json
-{
-  "schema": 2,
-  "mode": "background",
-  "event_id": "13e5496e-56be-4a23-883a-26bbfa3f8291",
-  "cancel_path": "/absolute/external/quality-cache/edit-types-events/13e5496e-56be-4a23-883a-26bbfa3f8291.cancel",
-  "root": "/absolute/project",
-  "files": [{"path": "app/api.py", "sha256": "<64 lowercase hex digits>"}],
-  "deadline_unix_ms": 1792512030000,
-  "baseline": {"policy_release": "v2.4.2"},
-  "cache_dir": "/absolute/external/quality-cache"
-}
+{"schema":2,"mode":"background","event_id":"13e5496e-56be-4a23-883a-26bbfa3f8291","cancel_path":"/absolute/external/quality-cache/edit-types-events/13e5496e-56be-4a23-883a-26bbfa3f8291.cancel"}
 ```
 
-The three additional required keys are exactly `mode: "background"`, canonical
-lowercase UUID string `event_id`, and absolute canonical `cancel_path`. The path
-must equal `<canonical cache root>/edit-types-events/<event_id>.cancel`, with the
-same cache selection as the request. Cache and signal ancestors must be regular
-directories without links/reparse points; a present signal is a regular file with
-one hardlink. An absent signal is supported, including an absent events directory.
-The host creates the signal to cancel; the provider never creates or removes it.
-The provider checks it before launch, at most every 50 ms while waiting for its
-worker, and before delivery. Cancellation terminates/reaps the owned worker and
-descendant tree before returning `unchecked`, `reason: "cancelled"`, exit 2.
-Work has one absolute deadline at most 30 seconds ahead, including startup and
-freshness evidence; owned cleanup has the same separate maximum three seconds.
-Neither this allowance nor a later delivery event grants schema 1 more time.
+Schema 2 requires `mode: "background"`, a canonical lowercase UUID `event_id`,
+and absolute canonical `cancel_path` equal to
+`<canonical cache root>/edit-types-events/<event_id>.cancel`. Cache and signal
+ancestors must be ordinary directories without links or reparse points; a present
+signal is a regular single-link file, while an absent signal or events directory
+is valid. Only the host creates the signal. The provider checks before launch, at
+most every 50 ms during work, and before delivery. On cancellation it terminates
+and reaps the worker tree and returns exit 2, `unchecked / cancelled`. Work has
+one deadline at most 30 seconds ahead, including startup and freshness; cleanup
+gets at most three additional seconds. Schema 1 keeps its original deadline.
 
-Every valid schema 2 response has all schema 1 result fields, `schema: 2`, and
-exactly two additional fields, `mode: "background"` and matching `event_id`.
-This includes early unavailable/cancelled results after envelope validation.
-Unparseable/invalid envelopes use the schema 1 `invalid_request` failure shape;
-they carry no trusted event identity. Schema 2 `freshness_sha256` hashes the same
-schema 1 freshness object plus top-level `schema`, `mode` and `event_id`.
-All reason enums remain available, with `cancelled` added only for schema 2.
-Status/exit semantics, limits, source-free diagnostics, inventories, selection
-ownership and filesystem algorithms are unchanged. A provider result has no
-`pending` status and does not itself establish host delivery.
+A valid response has the schema 1 fields plus `schema: 2`, `mode` and matching
+`event_id`, including early unavailable or cancelled responses. Invalid envelopes
+use schema 1 `invalid_request` and carry no trusted event. Schema 2 hashes the
+schema 1 freshness object plus `schema`, `mode` and `event_id`. Its additional
+reason is `cancelled`; all other status, limit, privacy and freshness rules remain.
+The provider emits a final response, never `pending` or proof of host delivery.
 
-The host owns one bounded worker per root, event IDs and current-input ownership.
-A new event cancels and reaps the preceding worker before replacement. Pending
-work is explicit in internal state and silent after each edit. Complete clean
-results are silent. Findings enter model context at a later active-turn hook
-boundary after host validation, request/event matching and independent freshness
-checks within that delivery event's remaining common budget. A managed Stop/drain
-must await/reap remaining work and report required unavailable/incomplete checking
-before turn completion. Pending, cancelled, timed-out, stale or undelivered work
-never counts as an immediate successful edit check. Disablement, shutdown and
-rollback cancel/reap owned work and retire event state. Exact registration/trust,
-reload, actual active-turn delivery and Stop/drain acceptance belong to the host.
+The host owns one worker per root and current event identity. It cancels and reaps
+the previous worker before replacement. Pending and clean results stay silent;
+findings are delivered at a later active-turn boundary only after validation, event
+matching and independent freshness checks within that event's budget. Stop/drain
+waits for owned work and reports required incomplete checking. Pending, cancelled,
+stale, timed-out or undelivered work never counts as success. Disablement, shutdown
+and rollback reap work and retire event state. Registration, trust, reload and
+actual delivery acceptance remain host responsibilities.
 
 Exit 0 means `passed` or `not_applicable`; exit 1 means `failed`; exit 2 means
 `unchecked`. Any unavailable component makes the entire invocation unchecked;
@@ -325,122 +230,53 @@ supported; overflow is unchecked, never truncated success.
 
 ## Scope, prerequisites and compatibility
 
-The published v4.5.0 engine retains the released exact policy matrix through
-v4.5.0. This v4.6.0 candidate retains every historical supported pin and adds
-its own v4.6.0 policy for isolated candidate-only testing. A candidate wheel may
-use v4.6.0 only when its verified cache contains that exact immutable policy.
+The v4.5.0 engine supports the released matrix through v4.5.0. The v4.6.0
+candidate retains those pins and adds v4.6.0 for isolated testing only with
+the exact verified immutable policy in cache.
 
-Managed: use the working-tree manifest's exact release, each affected component's
-declared Python and already prepared Gate runtime/dependencies. Analyze the whole
-component, including unchanged consumers. Python paths route by component path
-and each managed component's declared `source_roots`; manifest and recognized
-configuration changes route every component, and declared dependency changes
-route their consumers. Deletions retain their old path for routing and must still
-be absent at completion. Files outside managed components are explicitly
-inapplicable; they do not override a component's opt-out.
+Managed coverage selects the manifest's exact release, affected components'
+declared Python and prepared dependencies. It analyzes each whole component,
+including unchanged consumers. Python paths route by component and declared
+`source_roots`; manifest/config changes route all components, dependency changes
+route their consumers, and deletions use lexical membership and must remain absent.
+Files outside components are inapplicable. `python[].typecheck` defaults true; false
+is an explicit opt-out. Policies through v3.0.0 reject even an explicit true;
+v3.1.0 adds the field. Older manifests retain their policy selection.
 
-Policy v3.1.0 added optional schema 2 `python[].typecheck: boolean` (default
-true). Full Gate and edits honor false. Policies through v3.0.0 do not support
-this field: explicitly using it with an older selected policy is unchecked,
-including explicit true. Existing manifests without it retain their exact
-v2.4.2/v2.5.0/v2.6.0/v2.6.1/v2.6.2/v3.0.0 policy selection. Host activation
-remains a separate operation.
+Managed discovery skips dot-prefixed names, `__pycache__`, `site-packages` and
+`node_modules`, but includes visible `build`, `dist` and `temp`. Capture both `.py`
+and same-stem `.pyi` even when mypy analyzes only the latter. Preserve ancestor
+package identity in the isolated snapshot. Unmanaged coverage analyzes the explicit
+root using only `root/.venv` without system site packages, requires a baseline, and
+rejects nested project boundaries or conflicting settings. It additionally excludes
+`.git`, `.venv`, `__pycache__`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`,
+`build`, `dist`, `node_modules`, `temp`, and `.quality-gate-edit-*` directories
+from discovery and directory evidence. Unsafe links and layouts are unchecked.
 
-Managed discovery matches the pinned mypy directory discovery: skip names starting
-`.` and names `__pycache__`, `site-packages`, `node_modules`; include `build`,
-`dist`, `temp` and every other visible directory. `.pyi` shadows same-stem `.py`
-for analysis, but both are captured for freshness. No unmanaged exclusion is
-silently added to this managed certificate. Ancestor package identity is preserved
-in an isolated source snapshot; mypy never analyzes mutable project files directly.
+The exact released `mypy.ini` applies, including `follow_imports=skip` and
+`ignore_missing_imports=True`, without typing waivers. Static preflight never runs
+project imports or plugins; it requires each import in captured source, stdlib,
+typeshed, installed typed packages or stubs, or a declared local stub root. Missing
+or ambiguous context returns `dependencies` despite `ignore_missing_imports`.
+Dynamic imports, untyped functions and skipped external bodies remain policy limits.
 
-Unmanaged/non-Git: the explicit root is the single supported project; analyze
-all its Python sources using only `root/.venv`, with system-site-packages disabled.
-The baseline must be explicit. Nested project boundaries or conflicting settings
-are unchecked. In addition to managed discovery skips, directory names `.git`, `.venv`, `__pycache__`, `.mypy_cache`,
-`.pytest_cache`, `.ruff_cache`, `build`, `dist`, `node_modules`, `temp`, and names
-starting `.quality-gate-edit-` are excluded from recursive discovery and directory
-evidence. Source links and unsupported layouts are unchecked.
+Managed `stub_roots` are unique existing POSIX-relative directories inside the
+component, passed from the snapshot via `MYPYPATH`; their `.pyi` inventory and
+membership govern freshness. Unmanaged projects cannot declare them. Policy v3.2.0
+or newer is required. `source_roots` require v4.6.0 or newer and are unique, existing
+repository-relative directories, without traversal, links, duplicates or overlap
+with one another or the component. A component at `.` cannot declare them; separate
+components may share them. Sort roots and capture them with the component under the
+same limits. Preflight uses repository-qualified and source-root-relative names;
+`MYPYPATH` includes only the captured tree and declared source/stub roots.
 
-The exact released `mypy.ini` is used, including `follow_imports=skip` and
-`ignore_missing_imports=True`; no typing waivers are added. An import prerequisite
-preflight statically checks available source/stub/dependency context without
-executing project imports or plugins. Missing/ambiguous context is unchecked.
-Before mypy runs, the import-context preflight requires imported modules to be
-available from captured component sources, the standard library, typeshed, an
-installed typed package, an installed `*-stubs` package, or a declared local stub
-root. Missing typing context returns `dependencies`, even when the selected mypy
-flags use `ignore_missing_imports = true`. The preflight does not change the flags
-passed to mypy. External implementation bodies skipped by the policy, untyped
-functions allowed by it, dynamic imports and runtime-dependent typing remain policy
-limits, not demonstrated correctness.
-
-Managed components may declare local stubs with `stub_roots` in their `python[]`
-manifest table. Each entry is a unique POSIX-relative directory path from the
-component root, such as `stub_roots = ["stubs"]`. The directory must exist and be
-inside the component tree captured by the provider. Absolute paths, traversal,
-missing directories, and paths outside the component make the result unchecked.
-The provider passes these roots from its captured component snapshot to isolated
-mypy through `MYPYPATH`, separated with the platform's path separator. Stub `.pyi`
-files are part of component inventory and directory evidence, so
-content or membership changes invalidate freshness. Unmanaged projects do not accept
-local stub roots. Installed typed dependencies and `*-stubs` packages continue to
-resolve from the selected environment. The setting requires policy v3.2.0 or newer.
-
-Managed components may declare `source_roots` as unique repository-root-relative
-POSIX directory trees, for example `source_roots = ["scripts", "apscheduler"]`. The
-roots are captured together with `component.path` using the same managed
-exclusions, source/byte/directory limits and read-only isolated snapshot. They
-must exist as ordinary directories inside the repository. Absolute paths,
-traversal, links, duplicate or overlapping roots, and overlap with the component
-path are unchecked. A component with `path = "."` cannot declare source roots.
-Source roots are sorted for deterministic evidence; separate
-components may declare the same shared tree.
-
-The provider preflights imports against repository-qualified module names and
-source-root-relative names, then adds only the isolated captured project tree,
-declared source roots and component-local stub roots to `MYPYPATH`. This supports
-layouts such as `bot` importing `scripts.rendering`, with a repository-root
-`apscheduler` stub package; it never searches arbitrary working-tree modules.
-Changes to shared files, additions/removals/renames, package initializers,
-`py.typed` contents and import-resolution configuration invalidate the result.
-`.pyi` and existing `py.typed` bytes are hashed; marker additions/removals inside
-included directories are covered by directory membership. Do not put raw
-`.pyi` or `py.typed` paths in `dependency_inputs`. Keep dependency metadata to the
-project's supported requirements files or its single `pyproject.toml`. This
-setting requires policy v4.6.0 or newer.
-
-An ARGUS-style managed component can declare its existing sibling trees directly:
-
-```toml
-[[python]]
-name = "bot"
-path = "bot"
-python_version = "3.12"
-dependency_inputs = ["bot/requirements.txt", "bot/requirements-dev.txt"]
-test_paths = ["bot/tests"]
-tests_applicable = true
-source_roots = ["scripts", "apscheduler"]
-```
-
-Use only the requirements files that the consumer maintains. If its dependency
-source is `pyproject.toml`, declare that file alone instead of mixing it with
-requirements inputs. Keep APScheduler in the real dependency metadata and place
-its local `.pyi` files and `py.typed` marker under the repository-root `apscheduler/`.
-In the current ARGUS layout, the root `pyproject.toml` describes the separate stub
-distribution; the bot still declares its dependencies through the two bot requirements
-files, so do not add that `pyproject.toml` to the bot's `dependency_inputs`. After
-publication and the consumer's explicit policy/workflow update, use the v4.6.0 Windows
-asset and prepare the consumer:
-
-```powershell
-quality-gate sync --url https://github.com/TheTraitor0FJesus/quality-gate/releases/download/v4.6.0/quality-gate-v4.6.0-Windows.zip --version v4.6.0
-quality-gate edit-setup --policy-release v4.6.0
-quality-gate setup
-quality-gate doctor
-```
-
-Do not add stub paths to
-`dependency_inputs` or select the candidate before publication.
+Changes to shared sources, membership, initializers, `py.typed` contents or import
+configuration invalidate results. Hash `.pyi` and existing markers; directory
+membership detects additions and removals. Do not list raw stub or marker paths in
+`dependency_inputs`: use the supported requirements files or a single
+`pyproject.toml`. After publication and explicit consumer pin updates, sync the
+exact platform asset and run `edit-setup`, `setup` and `doctor`. Do not select an
+unpublished candidate policy.
 
 Setup is explicit: sync the exact immutable policy, run managed `setup` and
 `doctor`; unmanaged users prepare `.venv` and its declared dependencies/stubs

@@ -64,39 +64,9 @@ on timeout; no result from a timed-out invocation is clean.
 `cache_dir` is optional (the normal Gate user cache is the default). Unknown keys and
 unsupported schema versions are unchecked. An empty file list is explicitly inapplicable.
 
-For a standalone non-Git baseline smoke, run this from the project using the installed
-engine's Python, after provisioning v2.4.2 with `edit-setup`:
-
-```python
-import hashlib
-import json
-import subprocess
-import sys
-import time
-from pathlib import Path
-
-root = Path.cwd().resolve()
-path = "example.py"
-request = {
-    "schema": 1,
-    "root": str(root),
-    "files": [{"path": path, "sha256": hashlib.sha256((root / path).read_bytes()).hexdigest()}],
-    "baseline": {
-        "policy_release": "v2.4.2",
-        "python": sys.executable,
-        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
-    },
-    "deadline_unix_ms": int(time.time() * 1000) + 5000,
-}
-completed = subprocess.run(
-    [sys.executable, "-I", "-B", "-m", "quality_gate.cli", "edit-check"],
-    input=json.dumps(request).encode(), capture_output=True, timeout=7, check=False,
-)
-print(completed.returncode, json.loads(completed.stdout))
-```
-
-The smoke uses a five-second example budget plus a two-second outer cleanup allowance;
-it does not establish the host's final event budget or deliver model-visible feedback.
+For a non-Git smoke, provision v2.4.2 with `edit-setup`, then invoke the
+installed engine with the baseline request above and a current deadline. Close stdin
+and allow bounded cleanup; this does not establish host event latency or delivery.
 
 `baseline` is optional only if every Python path is covered by a valid manifest component.
 It is mandatory for unmanaged files, including files outside declared Python components.
@@ -105,23 +75,12 @@ a fallback for an invalid manifest, incompatible managed pin, or missing managed
 
 ## Selection, preparation and compatibility
 
-| Selected policy | v3.0.0 engine | v3.1.0 engine | v3.2.0 engine | v4.0.0 engine | v4.1.0 engine | Coverage |
-| --- | --- | --- | --- | --- | --- | --- |
-| v2.4.2 | Supported | Supported | Supported | Supported | Supported | Exact old policy; initial skills consumer pin |
-| v2.5.0 | Supported | Supported | Supported | Supported | Supported | Exact old policy |
-| v2.6.0 | Supported | Supported | Supported | Supported | Supported | Exact published policy |
-| v2.6.1 | Supported | Supported | Supported | Supported | Supported | Exact published policy |
-| v2.6.2 | Supported | Supported | Supported | Supported | Supported | Exact published policy |
-| v3.0.0 | Supported | Supported | Supported | Supported | Supported | Exact published policy |
-| v3.1.0 | — | Supported | Supported | Supported | Supported | Published policy |
-| v3.2.0 | — | — | Supported | Supported | Supported | Published policy |
-| v4.0.0 | — | — | — | Supported | Supported | Published policy |
-| v4.1.0 | — | — | — | — | Supported | Published policy |
-| Any other version | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | `unchecked / unsupported_policy` | Explicit consumer update required |
-
-The published v4.1.0 engine retains the exact supported pins above and supports its
-own policy. Older engines do not support newer policy releases or the new `phase`
-request field.
+Supported policies are v2.4.2, v2.5.0, v2.6.0, v2.6.1, v2.6.2 and
+v3.0.0 for engines v3.0.0 and later; v3.1.0 requires engine v3.1.0 or later;
+v3.2.0 requires v3.2.0 or later; v4.0.0 requires v4.0.0 or later; v4.1.0
+requires v4.1.0 or later. This matrix covers the listed engines through v4.1.0.
+Other versions return `unchecked / unsupported_policy` and require an explicit
+consumer update. Older engines reject the `phase` field.
 
 The v4.2.1 engine retains these exact supported pins, including v4.2.0, and adds
 its own v4.2.1 policy after immutable publication. The v4.3.0 candidate retains
@@ -317,29 +276,20 @@ tokens and private release/runtime selection rules are not part of this contract
 Earlier schema 1 engines always run Ruff and expose no complete identity-only probe,
 so their response alone is insufficient for safe host-owned reuse.
 
-Every invocation freshly resolves the exact selected release and validates its full
-inventory, native Ruff bytes, interpreter bytes/version and prepared runtime metadata.
-The reuse identity includes the phase, so legacy, write and validate results never share a cache entry.
-It also binds engine version, canonical root, ordered complete file batch
-and final hashes, managed/baseline coverage, selection identities, configuration,
-waiver/dependency inputs and artifact paths/digests. It also observes filesystem facts
-under the explicit root and `src` for bounded source identifier/dotted-name candidates:
-adding/removing a local module can change Ruff's first-party import classification.
-The provider also captures the presence of parent `__init__.py` and `__init__.pyi`
-markers for explicit input files. Empty markers in the isolated tree preserve Ruff's
-package classification without reading unrelated initializer contents. Marker changes
-invalidate reuse, and unsafe marker paths remain unchecked.
-Unreadable, unlexable or over-bound import context disables reuse and runs ordinary Ruff.
-No imported source contents or repository-wide discovery are needed.
+Each invocation verifies the exact selected release inventory, native Ruff,
+interpreter and runtime. Reuse binds engine version, phase, canonical root, ordered
+file batch and hashes, coverage, selections, configuration, waiver/dependency
+inputs, artifact paths and digests. It also captures bounded import candidates
+under root and `src` and the presence of parent `__init__.py` and `__init__.pyi`
+markers. Empty isolated markers preserve package classification. Marker changes
+invalidate reuse; unsafe marker paths are unchecked. Unreadable, unlexable or
+over-bound import context disables reuse and runs Ruff normally.
 
-Only complete `passed` or `failed` batches are remembered after publication freshness
-checks. Incomplete worker results and wholly inapplicable batches are not saved.
-A hit retains residual findings, final coordinates/hashes, selections and inputs;
-`input_sha256` is the current request hash, `changed=false`, and
-`writes_may_have_occurred=false`. Process count and elapsed time describe the current
-invocation. Existing source/configuration/artifact freshness checks still run before
-returning. Failed delivery or an outer timeout remains unchecked at the caller even
-when the worker completed; receiving a complete current response remains mandatory.
+Only complete `passed` or `failed` batches are stored after freshness checks. A
+hit preserves findings, coordinates, final hashes, selections and inputs; the
+current request supplies `input_sha256`, with `changed=false` and
+`writes_may_have_occurred=false`. Process count and time describe this invocation.
+Freshness is rechecked before return; incomplete delivery or timeout is unchecked.
 
 The optional private cache is `edit-results-v1` under the normal user-local Gate cache,
 independent of request `cache_dir`. It retains at most 16 direct-mapped JSON records of
@@ -358,16 +308,11 @@ Session/event attribution and deduplicating delivered messages remain host respo
 
 ## Handoff and acceptance evidence
 
-The reuse feature shipped as PATCH v2.6.2. The separate secret interface shipped in
-v3.0.0. Published engine v4.1.0 retains the exact policy compatibility matrix above and
-adds explicit writer and read-only validation phases while retaining the schema 1 request.
-The v4.0.0 engine and older releases reject the new `phase` field. The v4.1.0 release is
-published; host installation and acceptance remain separate. The host must record the
-engine wheel and release identities, retain and provision `edit-setup` for its baseline
-and managed pins, validate its result reader, and complete real event and latency
-acceptance. No policy pin migration is required, but the host must select the v4.1.0
-engine before sending either phase. Provider publication does not activate host settings
-or change consumer pins.
-
-Follow the [interface verification requirements](release.md#working-tree-interface-verification)
-for real-wheel parity, host events, latency and cleanup.
+Reuse shipped in v2.6.2, the separate secret interface in v3.0.0, and writer/
+validation phases in v4.1.0. Older engines reject `phase`. The host must select the
+published v4.1.0 engine before sending either phase, record the wheel and release
+identities, provision `edit-setup` for managed and baseline pins, validate its
+result reader, and complete real event and latency acceptance. Publication does not
+activate host settings or change policy pins. Follow the [interface verification
+requirements](release.md#working-tree-interface-verification) for wheel parity,
+host events, latency and cleanup.
