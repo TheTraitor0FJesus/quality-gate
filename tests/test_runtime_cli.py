@@ -240,6 +240,37 @@ def test_runtimes_json_reports_missing_runtime_and_missing_policy_without_losing
 	assert "runtimes:" in result.stderr
 
 
+def test_runtimes_json_preserves_inventory_when_policy_release_is_unreadable(
+	tmp_path: Path,
+	short_runtime_cache: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+) -> None:
+	root = tmp_path / "project"
+	root.mkdir()
+	_manifest(root)
+	cache = short_runtime_cache
+	_policy_release(tmp_path / "source")
+	PolicyCache(cache).sync(tmp_path / "source")
+	_prepare_runtime(root, cache)
+
+	def unreadable(_path: Path) -> None:
+		raise PermissionError("release artifact cannot be read")
+
+	monkeypatch.setattr(runtime_cli, "verify_release", unreadable)
+
+	result = runtime_cli.runtimes(root, cache)
+
+	output = capsys.readouterr()
+	report = json.loads(output.out)
+	assert result == UNAVAILABLE_EXIT
+	assert report["policy"]["reason_code"] == "release_unavailable"
+	assert len(report["components"]) == 1
+	assert report["components"][0]["available"] is True
+	assert report["error"] is None
+	assert "runtimes:" in output.err
+
+
 def test_runtimes_json_reports_stale_runtime_metadata(
 	tmp_path: Path, short_runtime_cache: Path
 ) -> None:
@@ -363,6 +394,25 @@ def test_runtimes_json_reports_absolute_relative_root_when_unresolvable(
 	assert report["error"]["reason_code"] == "root_not_found"
 	assert report["root"] == os.path.abspath(root)
 	assert Path(report["root"]).is_absolute()
+	assert "runtimes:" in output.err
+
+
+def test_runtimes_json_reports_unresolvable_relative_root_when_cwd_is_unavailable(
+	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+	def unavailable() -> str:
+		raise OSError("current directory is unavailable")
+
+	monkeypatch.setattr(os, "getcwd", unavailable)
+
+	result = runtime_cli.runtimes(Path("missing/repository"), None)
+
+	output = capsys.readouterr()
+	report = json.loads(output.out)
+	assert result == UNAVAILABLE_EXIT
+	assert report["schema"] == 1
+	assert report["root"] is None
+	assert report["error"]["reason_code"] == "root_not_found"
 	assert "runtimes:" in output.err
 
 
