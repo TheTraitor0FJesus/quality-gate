@@ -8,7 +8,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from typing import BinaryIO
 
 sys.path.insert(0, str(Path.cwd()))
 from quality_gate.contracts import load_manifest
@@ -21,6 +25,39 @@ def _write_json(path: Path, value: object) -> None:
 	temporary = path.with_suffix(path.suffix + ".tmp")
 	temporary.write_text(json.dumps(value) + "\n", encoding="utf-8")
 	temporary.replace(path)
+
+
+@contextmanager
+def _stage(name: str) -> Iterator[None]:
+	started = time.perf_counter()
+	status = "failed"
+	try:
+		yield
+		status = "completed"
+	finally:
+		print(
+			"release-timing: "
+			+ json.dumps(
+				{
+					"stage": name,
+					"elapsed_seconds": round(time.perf_counter() - started, 6),
+					"status": status,
+				}
+			),
+			flush=True,
+		)
+
+
+def _run_stage(
+	name: str,
+	command: list[str],
+	*,
+	timeout: float,
+	stdout: BinaryIO | None = None,
+	env: dict[str, str] | None = None,
+) -> None:
+	with _stage(name):
+		subprocess.run(command, check=True, timeout=timeout, stdout=stdout, env=env)
 
 
 def _run_release_build() -> None:
@@ -38,12 +75,20 @@ def _run_release_build() -> None:
 		raise SystemExit("release: original candidate transfer or source mismatch")
 
 	root = Path.cwd()
+	with _stage("suite-contract"):
+		manifest = load_manifest(root)
+		if "python" not in manifest.repository.domains or not any(
+			component.tests_applicable and "tests" in component.test_paths
+			for component in manifest.python
+		):
+			raise SystemExit("release: installed-artifact Gate must cover the complete tests directory")
 	subprocess_timeout = load_release_timeout(root, "subprocess_seconds")
 	output = (
 		Path(os.environ["RUNNER_TEMP"]) / "quality-gate-release" / os.environ["RELEASE_PLATFORM"]
 	)
 	output.mkdir(parents=True, exist_ok=True)
-	subprocess.run(
+	_run_stage(
+		"build-backend",
 		[
 			sys.executable,
 			"-m",
@@ -54,10 +99,10 @@ def _run_release_build() -> None:
 			"-r",
 			".release/build-requirements.txt",
 		],
-		check=True,
 		timeout=subprocess_timeout,
 	)
-	subprocess.run(
+	_run_stage(
+		"release-tools",
 		[
 			sys.executable,
 			"-m",
@@ -68,16 +113,16 @@ def _run_release_build() -> None:
 			"-r",
 			".release/release-requirements.txt",
 		],
-		check=True,
 		timeout=subprocess_timeout,
 	)
-	subprocess.run(
+	_run_stage(
+		"source-install",
 		[sys.executable, "-m", "pip", "install", "--no-build-isolation", "--no-deps", "-e", "."],
-		check=True,
 		timeout=subprocess_timeout,
 	)
 	with tempfile.TemporaryFile() as build_output:
-		subprocess.run(
+		_run_stage(
+			"artifact-build",
 			[
 				sys.executable,
 				"scripts/release_adapter.py",
@@ -89,13 +134,13 @@ def _run_release_build() -> None:
 				"--output",
 				str(output),
 			],
-			check=True,
 			stdout=build_output,
 			timeout=subprocess_timeout,
 		)
 		build_output.seek(0)
 		identity = load_json_record(build_output)
-	subprocess.run(
+	_run_stage(
+		"artifact-verification",
 		[
 			sys.executable,
 			"scripts/release_adapter.py",
@@ -105,11 +150,11 @@ def _run_release_build() -> None:
 			"--artifact",
 			identity["path"],
 		],
-		check=True,
 		timeout=subprocess_timeout,
 	)
 	cache = Path(os.environ["RUNNER_TEMP"]) / "quality-gate-cache" / "quality-gate"
-	subprocess.run(
+	_run_stage(
+		"candidate-policy-sync",
 		[
 			sys.executable,
 			"-m",
@@ -124,10 +169,9 @@ def _run_release_build() -> None:
 			"--cache-dir",
 			str(cache),
 		],
-		check=True,
 		timeout=subprocess_timeout,
 	)
-	pinned_release = load_manifest(root).policy_release
+	pinned_release = manifest.policy_release
 	candidate_release = f"v{identity['version']}"
 	if pinned_release != candidate_release:
 		repository = os.environ["GITHUB_REPOSITORY"]
@@ -136,7 +180,8 @@ def _run_release_build() -> None:
 		asset_url = (
 			f"https://github.com/{repository}/releases/download/{pinned_release}/{asset_name}"
 		)
-		subprocess.run(
+		_run_stage(
+			"pinned-policy-sync",
 			[
 				sys.executable,
 				"-m",
@@ -151,10 +196,10 @@ def _run_release_build() -> None:
 				"--cache-dir",
 				str(cache),
 			],
-			check=True,
 			timeout=subprocess_timeout,
 		)
-	subprocess.run(
+	_run_stage(
+		"pinned-policy-setup",
 		[
 			sys.executable,
 			"-m",
@@ -165,11 +210,10 @@ def _run_release_build() -> None:
 			"--cache-dir",
 			str(cache),
 		],
-		check=True,
 		timeout=subprocess_timeout,
 	)
 	test_environment = os.environ.copy()
-	# Tests create disposable repositories whose history is unrelated to the release PR.
+	# Readiness uses the same isolated cache, without release-PR history metadata.
 	for variable in ("GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "GITHUB_SHA"):
 		test_environment.pop(variable, None)
 	cache_variable = "LOCALAPPDATA" if os.name == "nt" else "XDG_CACHE_HOME"
@@ -177,51 +221,57 @@ def _run_release_build() -> None:
 	test_environment["QUALITY_GATE_POLICY_ROOT"] = str(
 		cache / "releases" / f"v{identity['version']}"
 	)
-	subprocess.run(
+	_run_stage(
+		"pinned-policy-readiness",
 		[
 			sys.executable,
 			"-m",
-			"pytest",
-			"tests",
-			"-p",
-			"no:cacheprovider",
-			"-q",
-			"--tb=long",
-			"-ra",
+			"quality_gate",
+			"--root",
+			str(root),
+			"doctor",
+			"--cache-dir",
+			str(cache),
 		],
-		check=True,
 		env=test_environment,
 		timeout=subprocess_timeout,
 	)
-	package = Path(identity["path"])
-	published_package = output / package.name
-	if package.resolve() != published_package.resolve():
-		import shutil
+	with _stage("package-finalization"):
+		package = Path(identity["path"])
+		published_package = output / package.name
+		if package.resolve() != published_package.resolve():
+			import shutil
 
-		shutil.copy2(package, published_package)
-	identity["path"] = str(published_package)
-	_write_json(output / "artifact.json", identity)
+			shutil.copy2(package, published_package)
+		identity["path"] = str(published_package)
+		_write_json(output / "artifact.json", identity)
 
-	evidence = {
-		"schema": 1,
-		"repository": os.environ["GITHUB_REPOSITORY"],
-		"pr": candidate["pr"],
-		"source_sha": identity["source_sha"],
-		"version": identity["version"],
-		"provider_sha": os.environ["PUBLISHER_SHA"],
-		"run_id": int(os.environ["GITHUB_RUN_ID"]),
-		"attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
-		"candidate_sha256": hashlib.sha256(candidate_bytes).hexdigest(),
-		"deliverables": [
-			{"kind": "archive", "name": identity["name"], "sha256": identity["sha256"]}
-		],
-	}
-	_write_json(output / "evidence.json", evidence)
+		evidence = {
+			"schema": 1,
+			"repository": os.environ["GITHUB_REPOSITORY"],
+			"pr": candidate["pr"],
+			"source_sha": identity["source_sha"],
+			"version": identity["version"],
+			"provider_sha": os.environ["PUBLISHER_SHA"],
+			"run_id": int(os.environ["GITHUB_RUN_ID"]),
+			"attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+			"candidate_sha256": hashlib.sha256(candidate_bytes).hexdigest(),
+			"deliverables": [
+				{"kind": "archive", "name": identity["name"], "sha256": identity["sha256"]}
+			],
+		}
+		_write_json(output / "evidence.json", evidence)
 
 
 def main() -> None:
-	with temporary_workspace(Path.cwd()):
-		_run_release_build()
+	with ExitStack() as workspace:
+		with _stage("workspace-setup"):
+			workspace.enter_context(temporary_workspace(Path.cwd()))
+		try:
+			_run_release_build()
+		finally:
+			with _stage("workspace-cleanup"):
+				workspace.close()
 
 
 if __name__ == "__main__":
