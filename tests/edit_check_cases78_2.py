@@ -164,19 +164,19 @@ def test_corrupt_reuse_cannot_supply_a_clean_verdict(
 	path.write_bytes(b"value = missing_name\n")
 	exit_code, first = invoke(request(tmp_path, edit_cache, "example.py"))
 	assert exit_code == 1, first
-	cache = tmp_path.parent / f"{tmp_path.name}-user-cache" / "quality-gate/edit-results-v1"
+	cache = tmp_path.parent / f"{tmp_path.name}-user-cache" / "quality-gate/verification-evidence-v1"
 	record = next(cache.glob("*.json"))
 	if failure == "record":
 		forged = json.loads(record.read_bytes())
-		forged["payload"]["result"]["status"] = "passed"
-		forged["payload"]["result"]["files"][0].update(status="passed", findings=[])
+		forged["payload"]["outcome"]["status"] = "passed"
+		forged["payload"]["outcome"]["files"][0].update(status="passed", findings=[])
 		record.write_text(json.dumps(forged), encoding="utf-8")
 	elif failure == "missing":
 		record.unlink()
 	elif failure == "truncated":
 		record.write_bytes(b'{"payload":')
 	elif failure == "oversized":
-		record.write_bytes(b"x" * (300 * 1024))
+		record.write_bytes(b"x" * (320 * 1024 + 1))
 	elif failure == "key":
 		(cache / "key").write_bytes(b"changed key")
 	elif failure == "locked":

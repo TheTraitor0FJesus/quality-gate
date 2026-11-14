@@ -7,14 +7,16 @@
   `edit_process.py` owns bounded streams and the supervised process tree; `edit_worker.py`
   runs the source-free failure boundary. `edit_inputs.py` captures explicit files and
   configuration freshness; `edit_policy.py` verifies exact compatible releases and explicitly
-  provisions native Ruff through `edit-setup`; `edit_check.py` selects only relevant prepared
-  runtimes, preserves the legacy synchronous writer-and-diagnostics path, or separates the explicit
+  provisions native Ruff through `edit-setup`; `edit_invocation.py` selects relevant prepared
+  runtimes and owns the Ruff phases, while `edit_check.py` orchestrates their results. It preserves
+  the legacy synchronous writer-and-diagnostics path, or separates the explicit
   `phase: write` safe-fix/formatting path from the read-only `phase: validate` final checks. Only the
   writer phases publish current bytes.
   Isolated Ruff trees preserve captured parent package-marker presence using empty
   markers; `ImportContext` includes these facts in freshness and reuse identities.
-  `edit_reuse.py` stores bounded authenticated complete results; fresh provider selection,
-  artifact/configuration checks and `edit_inputs.py` import-layout facts govern reuse.
+  `edit_reuse.py` adapts complete edit outcomes to the shared `verification_evidence.py` store;
+  fresh provider selection, artifact/configuration checks and `edit_inputs.py` import-layout facts
+  govern reuse. See [reuse and handoff evidence](edit-check-evidence.md).
   This path uses schema validation through `contracts.parse_manifest` without expanding
   supplemental test targets. It creates no Git-index candidate and runs no full checks or setup.
   The supervisor imports the explicit engine directory or wheel and starts the writer in

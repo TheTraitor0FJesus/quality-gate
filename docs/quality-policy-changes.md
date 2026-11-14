@@ -1,11 +1,11 @@
 # Quality policy changes
 
 Change shared behavior at its source: `quality_gate/policy/ruff.toml` and
-`quality_gate/policy/mypy.ini` define tool policy, `quality_gate/runner.py` owns
-check orchestration, `quality_gate/contracts.py` owns the manifest contract,
-and `.github/workflows/quality.yml` owns reusable CI. Keep
-consumer policy pins and workflow pins on their existing immutable releases
-until an explicit consumer update.
+`quality_gate/policy/mypy.ini` define tool policy; `quality_gate/runner.py` and
+its `runner_*` modules own check orchestration and execution;
+`quality_gate/contracts.py` owns the manifest contract; and
+`.github/workflows/quality.yml` owns reusable CI. Keep consumer policy and
+workflow pins on their existing immutable releases until an explicit update.
 
 ## Change procedure
 

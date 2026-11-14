@@ -1,4 +1,4 @@
-from __future__ import annotations
+"""Collect the feature tests from their supporting modules."""
 
 import json
 import os

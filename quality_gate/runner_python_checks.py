@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from . import runner as _runner
 
+_RUFF_COMMAND_PAIR_SIZE = 2
+
 
 def _append_missing_component_check(
 	results: _runner._OperationResults, context: _runner._PythonCheckContext
@@ -86,6 +88,84 @@ def _append_unavailable_runtime_checks(
 	)
 
 
+def _record_evidence_lookup(
+	operation: _runner.GateOperation,
+	check_id: str,
+	lookup_ms: int,
+	*,
+	reused_only: bool,
+) -> None:
+	"""Attach shared lookup cost without claiming that a cached format process ran."""
+	timing = operation.check_timings.get(check_id)
+	if timing is None:
+		return
+	reason = "file-local results reused; no format process" if reused_only else timing.reason
+	operation.check_timings[check_id] = _runner.replace(timing, lookup_ms=lookup_ms, reason=reason)
+
+
+def _run_ruff_with_evidence(
+	results: _runner._OperationResults,
+	context: _runner._PythonCheckContext,
+	python: _runner.Path,
+	environment: dict[str, str],
+	commands: list[tuple[str, list[str], int]],
+) -> list[tuple[str, list[str], int]]:
+	"""Use per-file results only when the provider proves current eligibility."""
+	operation = _runner.current_operation()
+	if operation is None or len(commands) < _RUFF_COMMAND_PAIR_SIZE:
+		return commands
+	check_id = f"python.component_{context.component_index}.ruff"
+	format_id = f"python.component_{context.component_index}.format"
+	if commands[0][0] != check_id or commands[1][0] != format_id:
+		return commands
+	from .runner_ruff import prepare_ruff_evidence
+
+	scope = results.scope_for(check_id)
+	try:
+		with operation.stage(f"{check_id}.evidence-readiness", scope):
+			evidence = prepare_ruff_evidence(
+				context.root,
+				operation.root,
+				context.component,
+				context.prepared,
+				python,
+				context.component_index,
+				environment,
+				context.deadline,
+				min(
+					context.component.timeout_seconds,
+					context.manifest.repository.command_timeout_seconds,
+				),
+			)
+	except (OSError, ValueError, _runner.EditError, _runner.SnapshotError):
+		return commands
+	if evidence is None:
+		return commands
+	lint = _runner.observe_check(check_id, scope, evidence.lint_checked, process_required=True)
+	if evidence.cached:
+		_record_evidence_lookup(operation, check_id, evidence.lookup.lookup_ms, reused_only=False)
+		lint = operation.record_result(lint)
+	results.append(lint)
+	if not evidence.lint_complete:
+		return commands[1:]
+	format_result = _runner.observe_check(
+		format_id,
+		results.scope_for(format_id),
+		evidence.format_checked,
+		process_required=True,
+	)
+	if evidence.cached:
+		_record_evidence_lookup(
+			operation,
+			format_id,
+			evidence.lookup.lookup_ms,
+			reused_only=not evidence.targets,
+		)
+		format_result = operation.record_result(format_result)
+	results.append(format_result)
+	return commands[_RUFF_COMMAND_PAIR_SIZE:]
+
+
 def _run_ready_python_component_checks(
 	results: _runner._OperationResults,
 	context: _runner._PythonCheckContext,
@@ -107,17 +187,19 @@ def _run_ready_python_component_checks(
 		if _runner._has_pinned_coverage(context.prepared):
 			results.append_not_run(f"{prefix}.coverage", test_scope, reason)
 			results.append_not_run(f"{prefix}.coverage_report", test_scope, reason)
+	commands = _runner._component_commands(
+		context.root,
+		context.manifest,
+		component,
+		context.prepared,
+		context.component_index,
+		python_executable,
+	)
+	commands = _run_ruff_with_evidence(results, context, python_executable, environment, commands)
 	return _runner._execute_commands(
 		context.root,
 		environment,
-		_runner._component_commands(
-			context.root,
-			context.manifest,
-			component,
-			context.prepared,
-			context.component_index,
-			python_executable,
-		),
+		commands,
 		component.timeout_seconds,
 		context.deadline,
 		prepared=context.prepared,

@@ -1,4 +1,4 @@
-"""CLI-level tests for the schema, verdict, migration, and waiver contracts."""
+"""Collect the feature tests from their supporting modules."""
 
 from __future__ import annotations
 

@@ -270,49 +270,8 @@ checked before publishing writes.
 
 ## Unchanged-content reuse
 
-Starting with engine v2.6.2, send the same schema 1 request with freshly captured bytes
-and a fresh deadline after each edit. The provider alone decides reuse; host verdicts,
-tokens and private release/runtime selection rules are not part of this contract.
-Earlier schema 1 engines always run Ruff and expose no complete identity-only probe,
-so their response alone is insufficient for safe host-owned reuse.
-
-Each invocation verifies the exact selected release inventory, native Ruff,
-interpreter and runtime. Reuse binds engine version, phase, canonical root, ordered
-file batch and hashes, coverage, selections, configuration, waiver/dependency
-inputs, artifact paths and digests. It also captures bounded import candidates
-under root and `src` and the presence of parent `__init__.py` and `__init__.pyi`
-markers. Empty isolated markers preserve package classification. Marker changes
-invalidate reuse; unsafe marker paths are unchecked. Unreadable, unlexable or
-over-bound import context disables reuse and runs Ruff normally.
-
-Only complete `passed` or `failed` batches are stored after freshness checks. A
-hit preserves findings, coordinates, final hashes, selections and inputs; the
-current request supplies `input_sha256`, with `changed=false` and
-`writes_may_have_occurred=false`. Process count and time describe this invocation.
-Freshness is rechecked before return; incomplete delivery or timeout is unchecked.
-
-The optional private cache is `edit-results-v1` under the normal user-local Gate cache,
-independent of request `cache_dir`. It retains at most 16 direct-mapped JSON records of
-256 KiB plus a 512-byte envelope each, a random 32-byte HMAC key and a nonblocking lock.
-Records contain schema 1 diagnostics/identities, never source/configuration contents.
-The provider authenticates records with HMAC-SHA256; the key and records are written
-atomically with private permissions where supported. This detects corrupted/forged
-records without treating another process under the same OS account as a security boundary.
-Missing, corrupt, oversized, locked or unavailable storage runs ordinary Ruff. Slot
-collisions only lose reuse. An abandoned lock can disable reuse until this disposable
-directory is removed while checks are idle; required release/runtime caches remain separate.
-
-Host integration keeps its exact policy pin and normal result validation, including
-current `input_sha256`, actual final bytes, exact root/engine, and configuration identities.
-Session/event attribution and deduplicating delivered messages remain host responsibilities.
+Send a fresh schema 1 request with current bytes and deadline after every edit. The provider decides whether evidence is reusable; a host must still validate the complete current response and its identities. See [reuse evidence](edit-check-evidence.md#unchanged-content-reuse) for eligibility, cache and freshness rules.
 
 ## Handoff and acceptance evidence
 
-Reuse shipped in v2.6.2, the separate secret interface in v3.0.0, and writer/
-validation phases in v4.1.0. Older engines reject `phase`. The host must select the
-published v4.1.0 engine before sending either phase, record the wheel and release
-identities, provision `edit-setup` for managed and baseline pins, validate its
-result reader, and complete real event and latency acceptance. Publication does not
-activate host settings or change policy pins. Follow the [interface verification
-requirements](release.md#working-tree-interface-verification) for wheel parity,
-host events, latency and cleanup.
+Publication alone does not activate host settings or change policy pins. See [handoff and acceptance evidence](edit-check-evidence.md#handoff-and-acceptance-evidence) for engine versions and required host verification.

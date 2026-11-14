@@ -1,4 +1,4 @@
-"""Public CLI tests for the Python component contract."""
+"""Collect the existing feature tests from cohesive modules."""
 
 from __future__ import annotations
 

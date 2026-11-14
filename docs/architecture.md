@@ -14,6 +14,8 @@ Use this map to find subsystem owners and follow cross-component routes. Code an
 - **Read-only product verification** — `product_verification.py` validates content and transport separately; `scripts/release_build.py` and `scripts/release_adapter.py` produce candidate evidence. Read [the product contract](product-verification.md) before wiring PR checks.
 - **Product release** — `release.py` handles local candidate verification; `.release/` holds the version, notes, and publisher declarations. Read [the release contract](release.md) when changing release preparation or validation.
 
+- **Verification evidence** — `verification_evidence.py` stores authenticated outcomes; `evidence_identity.py` defines identities, and `evidence_candidate.py` binds staged modes and working bytes. `runner_ruff.py` and its helpers reuse eligible per-file results within the operation deadline. See [the evidence protocol](verification-evidence.md).
+
 ## Principal flows
 
 - **Local check or audit** — `cli.py` → `runner.py` → local admission (skipped in CI) → `temp_workspace.py` → `snapshot.py` → manifest, repository, lesson, policy, web, and Python checks → `reporting.py`. `audit` uses the same runner path and requests complete-history and lesson-readiness checks.

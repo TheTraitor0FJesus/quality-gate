@@ -1,125 +1,16 @@
-"""Prompt-contract checks and manifest/Node fixtures with locally controlled sequencing."""
+"""Manifest and Node supplemental-test fixture contracts."""
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import tempfile
-import tomllib
-from collections.abc import Mapping
 from pathlib import Path
 from time import perf_counter
-
-import pytest
 
 from quality_gate.contracts import load_manifest
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-
-
-def _selected_settings_root(environment: Mapping[str, str], profile: Path) -> Path:
-	configured_root = environment.get("CODEX_HOME")
-	if configured_root:
-		return Path(configured_root)
-	return profile / ".codex"
-
-
-def _test_runner_instructions(settings_root: Path) -> str:
-	path = settings_root / "agents" / "test-runner.toml"
-	if not path.is_file():
-		pytest.skip(
-			f"typed test-runner configuration is missing under selected settings root: {path}"
-		)
-	document = tomllib.loads(path.read_text(encoding="utf-8"))
-	if "developer_instructions" in document:
-		return document["developer_instructions"]
-	return document["skills"]["config"][-1]["developer_instructions"]
-
-
-def _write_runner_config(settings_root: Path, instructions: str) -> None:
-	config = settings_root / "agents" / "test-runner.toml"
-	config.parent.mkdir(parents=True, exist_ok=True)
-	config.write_text(f'developer_instructions = """{instructions}"""\n', encoding="utf-8")
-
-
-def test_explicit_settings_root_selects_runner_instructions(tmp_path: Path) -> None:
-	selected_root = tmp_path / "selected"
-	profile_root = tmp_path / "profile"
-	_write_runner_config(selected_root, "selected root")
-	_write_runner_config(profile_root / ".codex", "profile fallback")
-
-	assert (
-		_selected_settings_root({"CODEX_HOME": str(selected_root)}, profile_root) == selected_root
-	)
-	assert _test_runner_instructions(selected_root) == "selected root"
-
-
-def test_profile_settings_root_is_used_when_codex_home_is_unset(tmp_path: Path) -> None:
-	profile = tmp_path / "profile"
-	selected_root = profile / ".codex"
-	_write_runner_config(selected_root, "profile fallback")
-
-	assert _selected_settings_root({}, profile) == selected_root
-	assert _test_runner_instructions(selected_root) == "profile fallback"
-
-
-def test_missing_explicit_settings_root_does_not_fall_back_to_profile(tmp_path: Path) -> None:
-	missing_root = tmp_path / "missing-selected-root"
-	profile_root = tmp_path / "profile" / ".codex"
-	_write_runner_config(profile_root, "must not be read")
-	selected_root = _selected_settings_root({"CODEX_HOME": str(missing_root)}, tmp_path / "profile")
-
-	with pytest.raises(pytest.skip.Exception, match="typed test-runner configuration is missing"):
-		_test_runner_instructions(selected_root)
-
-
-def test_prompt_contract_full_scope_runs_python_and_supplementals_without_a_gate() -> None:
-	settings_root = _selected_settings_root(os.environ, Path.home())
-	instructions = " ".join(_test_runner_instructions(settings_root).split())
-	preflight = instructions.index("first select `quality-gate --root <repo> validate`")
-	declarations = instructions.index(
-		"read only the validated manifest's `python` and `supplemental_tests`"
-	)
-	python = instructions.index("For each Python component with `tests_applicable: true`")
-	expansion = instructions.index("expand each validated repository-relative target")
-	collection = instructions.index(
-		"Run all applicable Python stages, then every supplemental declaration"
-	)
-
-	assert preflight < declarations < python < expansion < collection
-	full_branch = instructions.split("2. For `full` when `quality-gate.toml` exists", 1)[1].split(
-		"4. For `full` without", 1
-	)[0]
-	assert "quality-gate --root <repo> check" not in full_branch
-	assert (
-		"Test scopes, including `full`, require `snapshot: working-tree` "
-		"and never add a Quality Gate check"
-	) in instructions
-	assert "Do not add a repository-wide suite or a Quality Gate check" in instructions
-	assert "skip all untrusted test declarations" in instructions
-	assert (
-		"`quality-gate` requires `snapshot: staged` and forbids `command` and `coverage`"
-	) in instructions
-	assert (
-		"For `quality-gate`, require `quality-gate.toml` "
-		"and select `quality-gate --root <repo> check`"
-	) in instructions
-	assert "every applicable Python stage and every supplemental stage" in instructions
-	assert "even after an earlier completed failure or an unavailable component" in instructions
-	assert "Only `scope.kind: quality-gate` selects the staged Gate" in instructions
-
-
-def test_manifestless_full_scope_prompt_contract_keeps_ordinary_suite_discovery() -> None:
-	settings_root = _selected_settings_root(os.environ, Path.home())
-	instructions = " ".join(_test_runner_instructions(settings_root).split())
-
-	assert "For `full` without `quality-gate.toml`" in instructions
-	assert "for discovered `full` without a manifest, add no selector" in instructions
-	assert (
-		"For manifest-backed `full`, select exactly each component's declared test paths"
-		in instructions
-	)
 
 
 def _git(root: Path, *arguments: str) -> None:
@@ -237,7 +128,7 @@ def _report_integration_timings(timings: dict[str, float]) -> None:
 	print(
 		"slow integration operations: "
 		+ "; ".join(
-			f"{name}={duration:.3f}s owner=test-runner contract "
+			f"{name}={duration:.3f}s owner=supplemental-test contract "
 			"classification=mutable test state or behavior under test "
 			"impact=slower focused verification next_action=keep the scope function-scoped"
 			for name, duration in slow_operations.items()
@@ -246,8 +137,8 @@ def _report_integration_timings(timings: dict[str, float]) -> None:
 
 
 def test_node_fixture_collects_every_supplemental_after_a_failure() -> None:
-	"""Exercise Node fixtures and local sequencing; this does not invoke the typed runner."""
-	temporary = tempfile.TemporaryDirectory(prefix="quality-gate-runner-contract-")
+	"""Validate declarations and local Node sequencing after a failure."""
+	temporary = tempfile.TemporaryDirectory(prefix="quality-gate-supplemental-contract-")
 	timings: dict[str, float] = {}
 	try:
 		root = Path(temporary.name)

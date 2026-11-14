@@ -1,4 +1,4 @@
-"""Public contract tests for the reusable GitHub CI workflow."""
+"""Collect the existing feature tests from cohesive modules."""
 
 from __future__ import annotations
 
@@ -34,17 +34,6 @@ RESULT_LINE = re.compile(
 )
 
 
-def _git(root: Path, *arguments: str) -> str:
-	result = subprocess.run(
-		["git", *arguments],
-		cwd=root,
-		env={**os.environ, "GIT_CONFIG_GLOBAL": str(root / "missing-global-config")},
-		capture_output=True,
-		text=True,
-		check=False,
-	)
-	assert result.returncode == 0, result.stderr
-	return result.stdout.strip()
 
 
 def _run_cli(
@@ -574,3 +563,16 @@ def test_ci_reports_an_unavailable_release_scanner_as_unchecked(
 	assert result.returncode == runner.EXIT_UNCHECKED
 	assert _result_surface(result.stdout)["secrets.candidate"] == "unchecked"
 	assert _result_surface(result.stdout)["secrets.history"] == "unchecked"
+
+
+def _git(root: Path, *arguments: str) -> str:
+	result = subprocess.run(
+		["git", *arguments],
+		cwd=root,
+		env={**os.environ, "GIT_CONFIG_GLOBAL": str(root / "missing-global-config")},
+		capture_output=True,
+		text=True,
+		check=False,
+	)
+	assert result.returncode == 0, result.stderr
+	return result.stdout.strip()

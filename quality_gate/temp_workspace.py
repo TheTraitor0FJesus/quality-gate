@@ -1,4 +1,4 @@
-"""Repository-local scratch space for Quality Gate executions."""
+"""Quality Gate scratch space."""
 
 from __future__ import annotations
 
@@ -9,9 +9,10 @@ import os
 import sys
 import tempfile
 import threading
-import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+import time as time
+from collections.abc import Callable
+from collections.abc import Iterator as Iterator
+from contextlib import contextmanager as contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import BinaryIO

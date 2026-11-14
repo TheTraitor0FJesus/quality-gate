@@ -6,10 +6,13 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
 import conftest
+import pytest
 
 
 def _config(basetemp: Path | None = None) -> tuple[SimpleNamespace, list]:
@@ -54,10 +57,18 @@ def test_explicit_basetemp_and_non_windows_are_untouched(tmp_path: Path) -> None
 	assert not cleanups
 
 
-def test_pytest_uses_and_cleans_automatic_base_on_windows(tmp_path: Path) -> None:
+@pytest.fixture
+def short_repository() -> Iterator[Path]:
+	root = Path(__file__).resolve().parents[1] / "temp"
+	root.mkdir(exist_ok=True)
+	with tempfile.TemporaryDirectory(prefix="p72-", dir=root) as directory:
+		yield Path(directory)
+
+
+def test_pytest_uses_and_cleans_automatic_base_on_windows(short_repository: Path) -> None:
 	if os.name != "nt":
 		return
-	repository = tmp_path / "repository"
+	repository = short_repository
 	tests = repository / "tests"
 	tests.mkdir(parents=True)
 	(repository / ".git").mkdir()
