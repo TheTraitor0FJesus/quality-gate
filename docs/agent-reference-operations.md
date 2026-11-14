@@ -57,11 +57,11 @@ a safe repository-relative path or glob that matches at least one path. Validati
 manifest to 32 declarations, 32 target patterns per declaration, 1,024 matches per target, 4,096
 matches total, and 256 KiB of matched path names. Arbitrary commands are not part of the manifest
 contract. Quality Gate validates these declarations during `validate`, `check`, `audit`, native
-hooks, and the reusable workflow, but does not execute them. The typed test-runner expands
-validated globs without shell expansion, passes concrete paths to Node, and owns their execution
-during `scope: full`, alongside separate pytest stages for each applicable Python component's
-declared `test_paths`. The runner validates the manifest first and checks working-tree tests;
-repository CI remains the enforcement owner.
+hooks, and the reusable workflow, but does not execute them. The installed test CLI's current
+`full` scope validates a manifest and runs pytest only for applicable Python components' declared
+`test_paths`. A supplemental runner it does not support makes full verification return an error;
+do not claim a partial run as complete or replace it with arbitrary commands. Repository CI remains
+the enforcement owner.
 
 After every `quality-gate.toml` edit, run `quality-gate validate`. Use
 [templates/quality-gate.toml](../templates/quality-gate.toml) as the canonical shape; do not create
@@ -86,6 +86,30 @@ preview. A missing release, runtime, tool, Python version, unreadable tree, exce
 timeout, or shallow history is `unchecked`; it blocks completion and requires the recovery
 action in the report.
 Never treat an `unchecked` result as a pass.
+
+## Test verification
+
+Resolve `CODEX_HOME` from the environment, or use `.codex` under the OS user profile when it is
+unset. From a checked Git root, run full verification with:
+
+```text
+python <CODEX_HOME>/tools/test_runner/cli.py run --repo <repo> --scope full --json
+```
+
+Use `--scope path --value <repository-relative-path>` or
+`--scope nodeid --value <repository-relative-nodeid>` for a focused pytest selection owned by one
+declared Python component. Use `--scope quality-gate` only when the task or user explicitly requests
+the staged Gate; it runs the installed engine and derives the staged snapshot automatically. Read
+top-level and command `--help` before use.
+
+Accept a result only when `schema_version`, canonical `repo`, normalized `scope`, and `snapshot`
+match the request; `capture_complete` is true; each required stage is `completed` with an exit code
+and repository-relative `log_path`; and `candidate.state` is `unchanged`. A run ID, launcher return,
+or empty output does not establish completion. Read retained results under the repository's ignored
+`temp/` directory and their referenced logs. If a run reports `run_in_progress`, wait for the
+existing run to finish before requesting another run for that working copy. If a manifest declares
+an unsupported supplemental runner, stop with that error and request an owner-approved CLI
+extension. Do not run only a supported subset and call it full verification.
 
 ## Consumer release update
 
@@ -127,12 +151,11 @@ Then change the policy pin and all active caller references in one feature-branc
    release record; do not use a tag or branch in a caller.
 
 Run `validate`, `setup`, and `doctor`, then stage the manifest and workflow together. If an
-authorized commit is next, rely on its hook for the staged Gate. Before pushing, run declared
-supplemental tests locally with test-runner `scope.kind = "full"`, `snapshot = "working-tree"`,
-or verify that a separate required CI status runs them. The `Quality Gate` status alone does not
-execute or verify supplemental tests. Push the feature branch, require the `Quality Gate`
-pull-request status and any separate required supplemental-test status, and leave approval and
-merge to a human. Use a narrower test scope for focused checks.
+authorized commit is next, rely on its hook for the staged Gate. Before pushing, run full tests with
+the command above, or verify that a separate required CI status runs declared supplemental tests.
+The `Quality Gate` status alone does not execute or verify supplemental tests. Push the feature
+branch, require the `Quality Gate` pull-request status and any separate required supplemental-test
+status, and leave approval and merge to a human. Use a narrower test scope for focused checks.
 
 For rollback, restore both pins to the last known-good pair in a new feature-branch candidate and
 run `doctor`; rely on the next commit hook for its staged Gate and run declared supplemental tests
@@ -186,9 +209,9 @@ and external rule changes remain human-reviewed decisions.
 
 ## Release and rollback route
 
-Run the complete declared test suite through test-runner with `scope.kind = "full"` and
-`snapshot = "working-tree"`, and run `quality-gate audit` before building the exact platform
-artifacts. The release audit remains a separate required command. Then follow
+Run the complete declared test suite with the `full` test CLI command above, and run
+`quality-gate audit` before building the exact platform artifacts. The release audit remains a
+separate required command. Then follow
 [Release procedure](release.md).
 Shared preparation preserves the original owner-merged candidate; product jobs validate its exact
 source, checks, self-host manifest, lessons, and every declared artifact in a temporary cache before

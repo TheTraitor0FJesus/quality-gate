@@ -51,20 +51,27 @@ read-only. Omitting `phase` preserves the earlier synchronous writer-and-diagnos
    standalone or current-source `quality-gate check` only when the user directly requests it.
    Generic verification, review, PR, release, or policy-change guidance does not trigger another
    Gate. After a failed staged Gate is fixed and commit is next, run focused checks outside hook
-   coverage and retry the commit; do not run a standalone Gate before the hook. Use test-runner
-   `scope.kind = "full"`, `snapshot = "working-tree"` for complete test-suite verification. For consumers
-   without a commit-hook Gate, rely on CI and report an unavailable Gate instead of starting one
-   locally. For a direct user request or the `$implement` pre-review Gate, dispatch a separate
-   test-runner request with `scope.kind = "quality-gate"`, `snapshot = "staged"`, a fresh
-   `run_id`, and no `command` or `coverage`. This scope runs `quality-gate --root <repo> check`.
-   It runs the installed engine selected by that entry point, not the current checkout source.
-   If current-source verification is explicitly requested, establish and report the engine identity;
-   do not present the installed-engine result as current-source evidence. Use a procedure that
-   explicitly supports the requested source check, or report that it is unavailable.
-   The default report preserves every observed failed and
-   unchecked check status while bounding finding details. Known and unknown upstream omissions are
-   identified explicitly. Use `--verbose` for every status and all safely collected redacted
-   findings.
+   coverage and retry the commit; do not run a standalone Gate before the hook. Resolve
+   `CODEX_HOME` from the environment, or use `.codex` under the OS user profile when it is unset.
+   Run complete test verification with
+   `python <CODEX_HOME>/tools/test_runner/cli.py run --repo <repo> --scope full --json`.
+   For a direct user request or the `$implement` pre-review Gate, run
+   `python <CODEX_HOME>/tools/test_runner/cli.py run --repo <repo> --scope quality-gate --json`.
+   This scope runs only the installed `quality-gate --root <repo> check` against the staged
+   candidate; it does not verify mutable checkout source. For consumers without a commit-hook Gate,
+   rely on CI and report an unavailable Gate instead of starting one locally.
+   Accept evidence only when `schema_version`, canonical `repo`, `scope`, and `snapshot` match
+   the request; `capture_complete` is true; every required stage has `state: "completed"`, an
+   exit code, and a repository-relative `log_path`; and `candidate.state` is `unchanged`.
+   A `run_id` alone, launcher return, or empty output does not prove completion. If the CLI
+   reports `run_in_progress`, wait for that run to finish before requesting a new one. Unsupported
+   manifest declarations require an owner-approved CLI extension; do not substitute arbitrary
+   commands or run an incomplete subset as full verification. Read retained stage logs for complete
+   test evidence. If current-source verification is explicitly requested, establish and report the
+   engine identity and use a procedure that supports that source check, or report it unavailable.
+   The Gate's default report preserves every observed failed and unchecked status while bounding
+   finding details. Known and unknown upstream omissions are identified explicitly. Use `--verbose`
+   for every status and all safely collected redacted findings.
 4. Use `quality-gate format <explicit-path>...` and stage the result. The next authorized commit
    runs the staged Gate. Do not repeat it before the hook solely because formatting or a correction
    changed the candidate; use focused checks outside hook coverage.
@@ -89,8 +96,8 @@ when supported. This permits directory removal while a delete-sharing reader sti
 handle. Unsupported systems retain legacy disposition; access errors remain blocking. Immutable
 WinAPI bindings and structure classes are initialized once, while ownership records, file identities
 and attributes are checked afresh. The cleanup allowance covers the entire operation and is never
-renewed per root. Enclosing hook deadlines include this allowance. The test runner's separate
-15-second emergency process-termination reserve remains unchanged.
+renewed per root. Enclosing hook deadlines include this allowance. The installed test CLI owns its
+separate execution and process-cleanup budget.
 
 Reports keep existing check IDs, outcome/status lines and exit precedence. Appended operation and
 check telemetry records monotonic elapsed time, actual scope, stage and execution disposition
@@ -105,8 +112,8 @@ change whether a check is eligible or which exit code wins.
 For this provider, the Python test stage has a 30-minute limit, Gate work has a 40-minute
 limit plus the shared cleanup allowance, and the reusable CI job has a 50-minute outer limit.
 The job limit includes bootstrap and cleanup. Local full-suite and Quality Gate requests use the
-test runner's current 35-minute aggregate
-budget, including all command stages and process-tree cleanup. This aggregate budget is the
+installed test CLI's 35-minute aggregate budget, including all command stages and process-tree
+cleanup. This aggregate budget is the
 effective local limit when an inner stage has a longer timeout.
 
 The native pre-commit wrapper reads the staged manifest, resolves `quality.policy_release`, verifies

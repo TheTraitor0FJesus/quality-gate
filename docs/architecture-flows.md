@@ -103,11 +103,14 @@
   a registered cleanup owner. The work deadline does not bound teardown.
 - **Release and runtime preparation** — `quality-gate sync` → verified immutable release cache → `quality-gate setup` → repository-keyed runtime fingerprint → isolated Python environment; `quality-gate doctor` reports missing prerequisites as unchecked.
 - **Project bootstrap** — `$setup-repo` → `quality-gate.toml` and a CI caller → reusable `quality.yml`.
-- **Agent verification**: typed test-runner `scope: full` validates the manifest, runs pytest
-  for each applicable Python component's declared test paths, and runs declared supplemental
-  tests against the working tree. The separate `scope: quality-gate` runs the staged Gate only
-  when explicitly requested by the task procedure or user. Without a manifest, ordinary
-  complete-suite discovery remains in use.
+- **Agent verification**: `python <CODEX_HOME>/tools/test_runner/cli.py run --repo <repo> --scope full --json`
+  routes to the installed test CLI. For a manifest-backed full scope, the CLI validates the
+  manifest and runs pytest for applicable Python components' declared paths. Unsupported
+  supplemental runners return an error; the CLI does not execute arbitrary manifest commands.
+  Without a manifest, it uses ordinary complete-suite discovery. The separate `--scope quality-gate`
+  runs the staged Gate only when explicitly requested by the task procedure or user. See the
+  [agent verification procedure](agent-reference-operations.md#test-verification) for invocation
+  and result handling.
 - **Provider policy activation** — verified publication → `quality-gate-release-published` repository event → serialized provider activation PR → human review and merge. Consumers use the same event through their separate rollout workflow.
 - **Owner-merged publication** — `release-validation.yml` validates open default-target PRs through
   `release-prepare.yml`; after owner merge, `release.yml` calls shared preparation to resolve the

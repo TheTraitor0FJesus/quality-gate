@@ -52,9 +52,11 @@ release. The regression routes are `tests/test_edit_check.py`, `tests/test_edit_
 
 Full Gate sanitizes the user environment, so `tests/test_edit_integrity_host.py` can skip
 when the installed host adapter is unavailable. For affected host-boundary changes, run
-that module separately through the configured test-runner with the real host available.
-Bind the result to the host source and provider candidate; a substituted wheel launcher
-does not prove installed-release activation, and a targeted run does not replace full Gate.
+`python <CODEX_HOME>/tools/test_runner/cli.py run --repo <repo> --scope path --value tests/test_edit_integrity_host.py --json`
+with the real host available. Resolve `CODEX_HOME` from the environment, or use `.codex` under the
+OS user profile when it is unset. Bind the completed result to the host source and provider
+candidate; a substituted wheel launcher does not prove installed-release activation, and a targeted
+run does not replace full Gate.
 
 Before enabling a host mechanism, select the published compatible engine separately from
 the policy pin and finish its explicit setup. Verify real clean/finding/fix events, exact
