@@ -60,6 +60,7 @@ RELEASED_EDIT_POLICIES = frozenset(
 		"v4.5.0",
 		"v4.6.0",
 		"v4.7.0",
+		"v4.8.0",
 	}
 )
 

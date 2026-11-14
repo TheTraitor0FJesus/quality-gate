@@ -12,6 +12,10 @@ declaration and evidence formats.
 2. Update `.release/version.toml` and the product projections declared in `.release/publisher.toml`
    together. Keep the provider's `quality-gate.toml` on the latest published policy while preparing
    the candidate. The canonical consumer template projects the product release.
+   Register the candidate in `quality_gate/release_contract.py` and in the explicit supported-policy
+   set in `quality_gate/edit_protocol.py`. Retain the previous published release in
+   `RELEASED_EDIT_POLICIES` in `tests/test_edit_check.py`. The policy matrix and candidate wheel tests
+   verify old pins and the new release before activation.
 3. Replace `.release/notes.md` with Russian user-visible changes and any required adaptation for this
    candidate. Include only accumulated changes selected for the candidate; published release pages
    remain the history.
