@@ -65,9 +65,8 @@ def short_repository() -> Iterator[Path]:
 		yield Path(directory)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific pytest base")
 def test_pytest_uses_and_cleans_automatic_base_on_windows(short_repository: Path) -> None:
-	if os.name != "nt":
-		return
 	repository = short_repository
 	tests = repository / "tests"
 	tests.mkdir(parents=True)
