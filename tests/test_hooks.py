@@ -10,6 +10,7 @@ import pytest
 
 from quality_gate.contracts import ValidationError
 from quality_gate.hook_setup import HookIntegrationError, install_hooks
+from quality_gate.operation import OPERATION_CLEANUP_SECONDS
 from quality_gate.hooks import (
 	HookInputError,
 	PushRef,
@@ -70,8 +71,8 @@ def test_read_push_refs_accepts_multiple_push_lines() -> None:
 		"refs/heads/topic 3333333333333333333333333333333333333333 "
 		"refs/heads/topic 4444444444444444444444444444444444444444\n"
 	) == (
-		PushRef("refs/heads/feature", "refs/heads/feature"),
-		PushRef("refs/heads/topic", "refs/heads/topic"),
+		PushRef("refs/heads/feature", "refs/heads/feature", "1" * 40, "2" * 40),
+		PushRef("refs/heads/topic", "refs/heads/topic", "3" * 40, "4" * 40),
 	)
 
 
@@ -181,8 +182,8 @@ def test_read_push_refs_accepts_record_count_at_limit() -> None:
 
 def test_read_push_refs_keeps_deletion_as_a_push_ref() -> None:
 	deleted = "0" * 40
-	assert read_push_refs(f"refs/heads/main {'1' * 40} refs/heads/main {deleted}\n") == (
-		PushRef("refs/heads/main", "refs/heads/main"),
+	assert read_push_refs(f"(delete) {deleted} refs/heads/main {'1' * 40}\n") == (
+		PushRef("(delete)", "refs/heads/main", deleted, "1" * 40),
 	)
 
 
@@ -244,7 +245,7 @@ def test_run_commit_gate_adds_queue_budget_to_its_outer_timeout(
 ) -> None:
 	gate_timeout_seconds = 5
 	queue_timeout_seconds = 2
-	outer_timeout_seconds = gate_timeout_seconds + queue_timeout_seconds
+	outer_timeout_seconds = gate_timeout_seconds + queue_timeout_seconds + OPERATION_CLEANUP_SECONDS
 	runtime_root = tmp_path / "runtime"
 	python = runtime_root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 	python.parent.mkdir(parents=True)
@@ -296,14 +297,14 @@ gate_timeout_seconds = {gate_timeout_seconds}
 			staged_manifest,
 			environment={"QUALITY_GATE_QUEUE_TIMEOUT_SECONDS": str(queue_timeout_seconds)},
 		)
-		== gate_timeout_seconds + queue_timeout_seconds
+		== gate_timeout_seconds + queue_timeout_seconds + OPERATION_CLEANUP_SECONDS
 	)
 	assert (
 		commit_gate_timeout_seconds(
 			staged_manifest,
 			environment={"CI": "true", "QUALITY_GATE_QUEUE_TIMEOUT_SECONDS": "invalid"},
 		)
-		== gate_timeout_seconds
+		== gate_timeout_seconds + OPERATION_CLEANUP_SECONDS
 	)
 	assert (
 		commit_gate_timeout_seconds(
@@ -313,7 +314,7 @@ gate_timeout_seconds = {gate_timeout_seconds}
 				"QUALITY_GATE_QUEUE_TIMEOUT_SECONDS": "invalid",
 			},
 		)
-		== gate_timeout_seconds
+		== gate_timeout_seconds + OPERATION_CLEANUP_SECONDS
 	)
 
 
@@ -350,6 +351,74 @@ def test_pre_push_reports_unknown_remote_head_as_unchecked(tmp_path: Path) -> No
 			f"refs/heads/feature {'1' * 40} refs/heads/feature {'2' * 40}\n",
 		)
 		== UNCHECKED_EXIT
+	)
+
+
+def test_pre_push_rejects_unavailable_outgoing_history(
+	tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+	subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+	subprocess.run(
+		["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+		cwd=tmp_path,
+		check=True,
+		capture_output=True,
+	)
+	result = pre_push(tmp_path, "origin", _push_record() + "\n")
+	assert result == UNCHECKED_EXIT
+	assert "unchecked" in capsys.readouterr().err.lower()
+
+
+def test_pre_push_allows_nondefault_deletion_without_outgoing_history(tmp_path: Path) -> None:
+	subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+	subprocess.run(
+		["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+		cwd=tmp_path,
+		check=True,
+		capture_output=True,
+	)
+	assert pre_push(tmp_path, "origin", _push_record(local_ref="(delete)", local_sha="0" * 40)) == 0
+
+
+@pytest.mark.parametrize(
+	"record",
+	[
+		_push_record(local_sha="0" * 40),
+		_push_record(local_ref="(delete)", local_sha="0" * 40, remote_sha="0" * 40),
+		_push_record(local_ref="(delete)"),
+	],
+)
+def test_pre_push_rejects_inconsistent_zero_refs(tmp_path: Path, record: str) -> None:
+	subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+	subprocess.run(
+		["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+		cwd=tmp_path,
+		check=True,
+		capture_output=True,
+	)
+	assert pre_push(tmp_path, "origin", record) == UNCHECKED_EXIT
+
+
+@pytest.mark.parametrize(
+	"local_ref,local_oid", [("refs/heads/main", "1" * 40), ("(delete)", "0" * 40)]
+)
+def test_pre_push_blocks_default_branch_update_and_deletion(
+	tmp_path: Path, local_ref: str, local_oid: str
+) -> None:
+	subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+	subprocess.run(
+		["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+		cwd=tmp_path,
+		check=True,
+		capture_output=True,
+	)
+	assert (
+		pre_push(
+			tmp_path,
+			"origin",
+			_push_record(local_ref=local_ref, local_sha=local_oid, remote_ref="refs/heads/main"),
+		)
+		== 1
 	)
 
 

@@ -12,6 +12,10 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from runner_operation_fixtures import (
+	isolate_runner_unit_tests_from_host_gate_slots as isolate_runner_unit_tests_from_host_gate_slots,
+	use_long_windows_staging_limit_for_gate_temp_workspace as use_long_windows_staging_limit_for_gate_temp_workspace,
+)
 from test_runner import (
 	EXPECTED_TIMEOUT_WAIT_CALLS,
 	FIXTURES,
@@ -102,17 +106,19 @@ def test_run_returns_decoded_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_bounded_output_marks_truncated_external_output() -> None:
-	result = runner_subprocess._bounded_output(
-		"x" * (runner_subprocess.MAX_COMMAND_OUTPUT_CHARS + 1)
+	pytest_summary = "2 passed, 1 skipped in 0.02s"
+	result = runner._bounded_output(
+		"x" * (runner.MAX_COMMAND_OUTPUT_CHARS + 1) + "\n" + pytest_summary
 	)
 
-	assert result.endswith("[output truncated]")
-	assert len(result) < runner_subprocess.MAX_COMMAND_OUTPUT_CHARS + 32
+	assert "[output truncated]" in result
+	assert result.endswith(pytest_summary)
+	assert len(result) < runner.MAX_COMMAND_OUTPUT_CHARS + 32
 
 
 def test_run_bounds_subprocess_output(monkeypatch: pytest.MonkeyPatch) -> None:
 	class LargeProcess:
-		stdout = io.BytesIO(b"x" * (runner_subprocess.MAX_COMMAND_OUTPUT_BYTES + 100))
+		stdout = io.BytesIO(b"x" * (runner.MAX_COMMAND_OUTPUT_BYTES + 100))
 
 		def wait(self, timeout: float | None = None) -> int:
 			return 0
@@ -120,14 +126,12 @@ def test_run_bounds_subprocess_output(monkeypatch: pytest.MonkeyPatch) -> None:
 		def kill(self) -> None:
 			return None
 
-	monkeypatch.setattr(
-		runner_subprocess.subprocess, "Popen", lambda *args, **kwargs: LargeProcess()
-	)
+	monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: LargeProcess())
 
 	result = runner.run(["large-output"], Path("."), {})
 
-	assert result.endswith("[output truncated]")
-	assert len(result) < runner_subprocess.MAX_COMMAND_OUTPUT_CHARS + 32
+	assert "[output truncated]" in result
+	assert len(result) < runner.MAX_COMMAND_OUTPUT_CHARS + 32
 
 
 def test_bounded_subprocess_kills_and_joins_after_timeout(
@@ -281,6 +285,7 @@ exclude = []
 
 
 def test_check_sets_a_writable_temporary_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+	monkeypatch.setattr(runner, "gate_admission", lambda: nullcontext())
 	root = FIXTURES / "valid"
 	calls: list[tuple[list[str], dict[str, str]]] = []
 	expected_call_count = 3

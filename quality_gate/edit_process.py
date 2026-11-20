@@ -76,10 +76,17 @@ def _windows_job(process: subprocess.Popen[bytes]) -> tuple[Any, int]:
 
 
 class _Streams:
-	def __init__(self, process: subprocess.Popen[bytes], payload: bytes | None, limit: int) -> None:
+	def __init__(
+		self,
+		process: subprocess.Popen[bytes],
+		payload: bytes | None,
+		limit: int,
+		truncate: bool = False,
+	) -> None:
 		self.process = process
 		self.payload = payload
 		self.limit = limit
+		self.truncate = truncate
 		self.outputs = [bytearray(), bytearray()]
 		self.failures: list[str] = []
 		self.readers = [
@@ -96,6 +103,15 @@ class _Streams:
 		try:
 			with stream:
 				while chunk := stream.read(4096):
+					if self.truncate:
+						self.outputs[index].extend(chunk)
+						if len(self.outputs[index]) > self.limit:
+							prefix = self.limit // 2
+							self.outputs[index][:] = (
+								self.outputs[index][:prefix]
+								+ self.outputs[index][-(self.limit - prefix) :]
+							)
+						continue
 					remaining = self.limit - len(self.outputs[index])
 					self.outputs[index].extend(chunk[: max(0, remaining)])
 					if len(chunk) > remaining and not self.failures:
@@ -128,7 +144,12 @@ class _Streams:
 		return self.process.returncode, bytes(self.outputs[0]), bytes(self.outputs[1])
 
 
-def _stop(process: subprocess.Popen[bytes], job: tuple[Any, int] | None, own_tree: bool) -> None:
+def _stop(
+	process: subprocess.Popen[bytes],
+	job: tuple[Any, int] | None,
+	own_tree: bool,
+	deadline: float | None = None,
+) -> None:
 	if job is not None:
 		kernel, handle = job
 		kernel.CloseHandle(handle)
@@ -140,7 +161,7 @@ def _stop(process: subprocess.Popen[bytes], job: tuple[Any, int] | None, own_tre
 	elif process.poll() is None:
 		process.kill()
 	try:
-		process.wait(timeout=1)
+		process.wait(timeout=1 if deadline is None else max(0, deadline - time.monotonic()))
 	except subprocess.TimeoutExpired as error:
 		raise EditError("deadline") from error
 
@@ -176,9 +197,14 @@ def run_process(
 	payload: bytes | None = None,
 	limit: int = MAX_TOOL_BYTES,
 	own_tree: bool = False,
+	on_started: Callable[[], None] | None = None,
 	cancelled: Callable[[], bool] | None = None,
+	cleanup_deadline: float | Callable[[], float] | None = None,
+	truncate: bool = False,
 ) -> tuple[int, bytes, bytes]:
 	"""Drain bounded streams; the supervisor owns and reaps its whole child tree."""
+	if limit <= 0:
+		raise EditError("limits")
 	if time.monotonic() >= deadline:
 		raise EditError("deadline")
 	if cancelled is not None and cancelled():
@@ -194,19 +220,30 @@ def run_process(
 		creationflags=0x00000004 if own_tree and os.name == "nt" else 0,
 	)
 	job = None
-	streams = _Streams(process, payload, limit)
+	streams = _Streams(process, payload, limit, truncate)
 	try:
 		# Suspended creation also protects native scanners without a stdin handshake.
 		if own_tree and os.name == "nt":
 			job = _windows_job(process)
 			_resume_windows(process)
+		if on_started is not None:
+			on_started()
 		for reader in streams.readers:
 			reader.start()
 		_wait_process(process, deadline, cancelled)
 		return streams.result(deadline)
 	finally:
-		_stop(process, job, own_tree)
-		streams.join(time.monotonic() + 1)
+		if cleanup_deadline is None:
+			_stop(process, job, own_tree)
+			streams.join(time.monotonic() + 1)
+		else:
+			cleanup_end = cleanup_deadline() if callable(cleanup_deadline) else cleanup_deadline
+			try:
+				_stop(process, job, own_tree, cleanup_end)
+			finally:
+				streams.join(cleanup_end)
+			if any(reader.is_alive() for reader in streams.readers):
+				raise EditError("deadline")
 
 
 def _wait_process(

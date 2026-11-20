@@ -38,10 +38,19 @@ from .contract_models import (
 	WebComponent,
 )
 from .contract_models import (
+	MAX_TELEMETRY_TEXT as MAX_TELEMETRY_TEXT,
+)
+from .contract_models import (
 	CheckResult as CheckResult,
 )
 from .contract_models import (
 	Finding as Finding,
+)
+from .contract_models import (
+	OperationTelemetry as OperationTelemetry,
+)
+from .contract_models import (
+	StageTiming as StageTiming,
 )
 from .contract_models import (
 	Status as Status,

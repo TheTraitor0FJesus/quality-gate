@@ -9,6 +9,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from runner_operation_fixtures import (
+	isolate_runner_unit_tests_from_host_gate_slots as isolate_runner_unit_tests_from_host_gate_slots,
+	use_long_windows_staging_limit_for_gate_temp_workspace as use_long_windows_staging_limit_for_gate_temp_workspace,
+)
 from test_runner import (
 	FIXTURES,
 	_fake_candidate_snapshot,
@@ -25,14 +29,14 @@ def test_check_skips_local_admission_in_ci(tmp_path: Path, monkeypatch: pytest.M
 		"gate_admission",
 		lambda: pytest.fail("CI must not wait on the local queue"),
 	)
-	monkeypatch.setattr(runner, "temporary_workspace", lambda _root: nullcontext())
+	monkeypatch.setattr(runner, "temporary_workspace", lambda _root, **_kwargs: nullcontext())
 	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
 	passed = runner.Verdict(
 		(runner.CheckResult("ci.fixture", runner.Status.PASSED, "CI check completed"),)
 	)
 	monkeypatch.setattr(runner, "_check_snapshot", lambda *_args, **_kwargs: passed)
 
-	assert runner._run_snapshot(tmp_path) is passed
+	assert runner._run_snapshot(tmp_path) == passed
 
 
 def test_ruff_children_receive_a_bounded_worker_environment(
@@ -178,7 +182,15 @@ def test_policy_access_error_is_unchecked(monkeypatch: pytest.MonkeyPatch) -> No
 		result for result in verdict.results if result.check_id == "manifest.documents"
 	)
 	assert documents.status is runner.Status.PASSED
-	assert not any(result.check_id.startswith("python.component_") for result in verdict.results)
+	python_checks = [
+		result for result in verdict.results if result.check_id.startswith("python.component_")
+	]
+	assert python_checks
+	assert all(result.status is runner.Status.UNCHECKED for result in python_checks)
+	assert all(
+		result.telemetry is not None and result.telemetry.disposition == "not-run"
+		for result in python_checks
+	)
 	assert verdict.exit_code == runner.EXIT_UNCHECKED
 
 
@@ -187,7 +199,7 @@ def test_workspace_failure_reports_only_the_unavailable_workspace(
 ) -> None:
 	root = FIXTURES / "valid"
 
-	def fail_workspace(_root: Path) -> object:
+	def fail_workspace(_root: Path, **_kwargs: object) -> object:
 		raise runner.TemporaryWorkspaceError("repository temp directory is unavailable")
 
 	monkeypatch.setattr(runner, "temporary_workspace", fail_workspace)
@@ -278,6 +290,7 @@ def test_missing_test_path_is_unchecked_without_hiding_other_checks(
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 	root = FIXTURES / "missing-test-path"
+	monkeypatch.setattr(runner, "gate_admission", lambda: nullcontext())
 	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
 	monkeypatch.setattr(
 		runner,
@@ -298,6 +311,9 @@ def test_missing_test_path_is_unchecked_without_hiding_other_checks(
 		result for result in verdict.results if result.check_id == "python.component_1.test_path_1"
 	)
 	assert missing.status is runner.Status.UNCHECKED
+	assert missing.telemetry is not None
+	assert missing.telemetry.scope == "missing-tests"
+	assert missing.telemetry.disposition == "executed"
 	assert any(result.check_id == "python.component_1.ruff" for result in verdict.results)
 
 

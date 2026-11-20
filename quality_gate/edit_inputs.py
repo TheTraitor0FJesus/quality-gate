@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import stat
 import tokenize
 import tomllib
 import unicodedata
@@ -73,6 +74,7 @@ class SourceFile:
 	path: str
 	content: bytes
 	sha256: str
+	mode: int | None = None
 
 
 def _module_names(files: list[SourceFile]) -> set[tuple[str, ...]] | None:
@@ -180,7 +182,12 @@ def sources(root: Path, entries: list[Any]) -> list[SourceFile]:
 		total += len(content)
 		if total > MAX_TOTAL_BYTES:
 			raise EditError("limits")
-		selected[relative] = SourceFile(relative, content, expected)
+		current_path = regular_path(root, relative)
+		if current_path != path:
+			raise EditError("stale_input")
+		selected[relative] = SourceFile(
+			relative, content, expected, stat.S_IMODE(current_path.stat().st_mode)
+		)
 	return list(selected.values())
 
 

@@ -23,7 +23,9 @@ EXPECTED_BIOME_INVOCATIONS = 2
 UNCHECKED_EXIT = 2
 
 
-def _fake_candidate_snapshot(root: Path) -> AbstractContextManager[SimpleNamespace]:
+def _fake_candidate_snapshot(
+	root: Path, **_kwargs: object
+) -> AbstractContextManager[SimpleNamespace]:
 	return nullcontext(SimpleNamespace(root=root))
 
 

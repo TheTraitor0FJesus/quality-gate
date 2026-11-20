@@ -30,6 +30,10 @@ candidate, or exhausted resources. Do not replace unavailable verification with 
 `check` operates on the staged candidate. If that candidate changes, the old result does not cover
 the new candidate. Agent execution and authorization follow the global instructions.
 
+Snapshot preparation limits staged blob data to 1 GiB across the candidate and its temporary
+object copies. Exceeding this limit produces an unchecked result. The Gate removes the object
+copies with the snapshot during its cleanup phase.
+
 ## Local Gate wait settings
 
 Local full `check` and `audit` runs share a machine-wide queue. To change how long a run waits for an

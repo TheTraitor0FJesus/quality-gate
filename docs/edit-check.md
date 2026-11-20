@@ -1,59 +1,70 @@
-# Check working-tree changes with `edit-check`
+# Ruff для изменённых файлов: `edit-check`
 
-`quality-gate edit-check` checks explicitly supplied files with the selected Ruff policy. It reads
-one UTF-8 JSON object from stdin through EOF and writes one JSON result. It checks only the supplied
-files; it does not replace the full Gate or scan Git history.
+`quality-gate edit-check` проверяет только явно переданные файлы и применяет выбранную версию
+Ruff и её опубликованную конфигурацию. Команда не заменяет полный Quality Gate и не просматривает
+историю Git. Хост отвечает за запуск в общем временном бюджете, доставку результата и повторную
+проверку его свежести.
 
-## Request
+## Запрос
 
-Send an absolute `root`, each file's current byte hash, and the shared deadline:
+Передайте один UTF-8 JSON-объект в stdin и закройте поток. `root` должен быть абсолютным путём,
+`files` перечисляет пути относительно него, а SHA-256 каждого файла считается по исходным байтам.
 
 ```json
 {
   "schema": 1,
   "root": "/absolute/project",
-  "files": [{"path": "src/example.py", "sha256": "<64 lowercase hex digits>"}],
-  "deadline_unix_ms": "<current Unix time in milliseconds plus the budget>"
+  "files": [{"path": "src/example.py", "sha256": "<sha256 текущих байтов>"}],
+  "deadline_unix_ms": 1792065605000,
+  "cache_dir": "/absolute/cache",
+  "baseline": {"policy_release": "v2.4.2", "python": "/absolute/python", "python_version": "3.12"}
 }
 ```
 
-The deadline value is explanatory; send it as an integer. File paths are explicit paths relative
-to `root`, not globs. SHA-256 covers the file's raw bytes. `cache_dir` may be supplied as an
-absolute path.
+`deadline_unix_ms` — целое Unix-время в миллисекундах; вычисляйте его непосредственно перед запуском.
+`cache_dir` необязателен. `baseline` нужен только для Python-файлов вне компонентов манифеста и
+задаёт точную опубликованную политику и уже установленный интерпретатор. Ошибка манифеста,
+неподдерживаемый pin или отсутствующая управляемая среда не переключают команду на baseline.
+Пути должны указывать обычные файлы внутри `root`; отсутствующие, устаревшие, небезопасные или
+частично прочитанные входы возвращают `unchecked`.
 
-For Python files outside components managed by `quality-gate.toml`, supply `baseline` with
-`policy_release`, `python`, and `python_version`. No baseline is needed when all checked Python
-files belong to managed components. An invalid manifest or unsupported selected release never
-falls back to the baseline.
+Без `phase` команда выполняет разрешённые безопасные исправления, форматирование и затем проверки.
+`"phase": "write"` выполняет только исправления и форматирование; после них хост должен снять новые
+хеши. `"phase": "validate"` проверяет текущие байты без записи. Эти фазы доступны только в версиях
+движка, которые их поддерживают. Если версия закреплённого движка их не знает, результат не считается
+успешным.
 
-By default the command applies approved fixes and formatting, then runs diagnostics. A two-phase
-integration can use:
+Проверяются только явные `.py` и `.pyi`. Файлы вне применимой Python-политики получают статус
+`not_applicable`. Проверка не запускает pytest или mypy, не сканирует секреты и историю, не меняет
+манифест и не устанавливает зависимости.
 
-- `"phase": "write"` to apply fixes and formatting without final diagnostics;
-- `"phase": "validate"` to run final checks without writing files.
+## Результат
 
-The `validate` phase requires an engine version that supports it. After the write phase, pass fresh
-file hashes to validate the resulting content.
+Команда выводит один JSON-объект с `engine_version`, `root`, `status`, `reason`, `files`,
+`selections`, `inputs`, `process_count`, `elapsed_ms` и `writes_may_have_occurred`; для двухфазного
+режима также возвращается `phase`. Результат связывает начальные и итоговые хеши файлов, выбранные
+политику, Ruff и Python, а также хеши конфигурации. Текст исходников, диагностика инструмента и
+исключения не передаются. Для `validate` записи не меняются, а начальный и итоговый хеши совпадают.
 
-## Result
-
-The result includes `status`, `reason`, `files`, `selections`, `inputs`, `process_count`, and
-`writes_may_have_occurred`; `engine_version` and `root` identify the run. Each file record reports
-its path, status, input and final hashes, whether it changed, findings, and the `format` status.
-Requests using `write` or `validate` also return `phase`.
-
-| Status | Exit code | Meaning |
+| Статус | Код выхода | Значение |
 | --- | ---: | --- |
-| `passed`, `not_applicable` | 0 | Checks passed, or no applicable Python files were supplied |
-| `failed` | 1 | Ruff or formatting findings remain |
-| `unchecked` | 2 | Complete coverage could not be confirmed; do not treat it as a pass |
+| `passed` | 0 | Проверки завершены успешно; в режиме `write` завершены исправления и форматирование |
+| `not_applicable` | 0 | Нет применимых файлов |
+| `failed` | 1 | Остались замечания Ruff, синтаксиса или форматирования |
+| `unchecked` | 2 | Полноту проверки подтвердить нельзя; результат не означает успех |
 
-Send current hashes immediately before launch. When the result is `unchecked`, refresh the inputs
-or resolve its reported cause and retry the full batch.
+Хост принимает только полный ответ с согласованным кодом выхода, точным покрытием запроса и актуальными
+хешами файлов, настроек, среды и выбранного выпуска. При устаревании входов надо снять свежие хеши и
+повторить всю пачку. После записи нельзя использовать прежнее доказательство для новых байтов.
 
-## Limits
+## Ограничения
 
-Requests are limited to 64 KiB and 10 files; each file is limited to 128 KiB and the batch to 1 MiB.
-The deadline is at most 10 seconds for the default and `write` phases, and 30 seconds for
-`validate`. Results are limited to 256 KiB. Exceeding a limit returns `unchecked`, not a partial
-pass.
+Запрос ограничен 64 KiB и 10 файлами; файл — 128 KiB, суммарный исходный код — 1 MiB,
+конфигурация — 256 KiB на файл и 1 MiB всего. Потоки инструмента ограничены 512 KiB каждый,
+число замечаний — 200, результат — 256 KiB. Обычный режим и `write` имеют предел 10 секунд,
+`validate` — 30 секунд. Превышение ограничений, неполный вывод или тайм-аут дают `unchecked`,
+без усечения результата до ложного успеха.
+
+Повторное использование доказательств и требования передачи хоста описаны в
+[правилах переиспользования](edit-check-evidence.md#unchanged-content-reuse) и
+[проверках интерфейса](release.md#working-tree-interface-verification).

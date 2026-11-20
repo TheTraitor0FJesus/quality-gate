@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import BinaryIO, cast
 
 import pytest
+
 from quality_gate.contracts import load_manifest
 from scripts import release_build
 
@@ -182,6 +183,114 @@ def test_release_build_checks_pin_readiness_without_repeating_artifact_suite(
 		assert (output / package.name).read_bytes() == package.read_bytes()
 
 
+@pytest.mark.parametrize("switch_during_verification", [False, True])
+def test_pr_build_does_not_require_publication_candidate(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, switch_during_verification: bool
+) -> None:
+	source_sha = "a" * 40
+	platform = "windows" if os.name == "nt" else "linux"
+	for key, value in {
+		"SOURCE_SHA": source_sha,
+		"BASE_SHA": "b" * 40,
+		"RELEASE_PLATFORM": platform,
+		"GITHUB_REPOSITORY": "owner/quality-gate",
+		"GITHUB_RUN_ID": "123",
+		"GITHUB_RUN_ATTEMPT": "1",
+		"RUNNER_TEMP": str(tmp_path),
+	}.items():
+		monkeypatch.setenv(key, value)
+	monkeypatch.delenv("CANDIDATE_PATH", raising=False)
+	monkeypatch.delenv("CANDIDATE_DIGEST", raising=False)
+	package = tmp_path / "quality-gate-v2.3.0.zip"
+	package.write_bytes(b"verified artifact")
+	identity = {
+		"path": str(package),
+		"name": package.name,
+		"version": "2.3.0",
+		"source_sha": source_sha,
+		"platform": platform,
+		"sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
+	}
+	commands: list[list[str]] = []
+	head = source_sha
+
+	def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+		nonlocal head
+		commands.append(command)
+		if command == ["git", "rev-parse", "HEAD"]:
+			return subprocess.CompletedProcess(command, 0, stdout=head)
+		if "build" in command:
+			cast(BinaryIO, options["stdout"]).write(json.dumps(identity).encode())
+		if "verify-pr" in command and switch_during_verification:
+			head = "c" * 40
+		return subprocess.CompletedProcess(command, 0, stdout="")
+
+	monkeypatch.setattr(subprocess, "run", run)
+	evidence_path = tmp_path / "quality-gate-release" / platform / "verification.json"
+	if switch_during_verification:
+		with pytest.raises(SystemExit, match="clean exact-head checkout"):
+			release_build.main(pull_request=True)
+		assert not evidence_path.exists()
+		return
+	release_build.main(pull_request=True)
+	evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+	assert evidence["base_sha"] == "b" * 40
+	assert evidence["head_sha"] == source_sha
+	assert evidence["artifact"]["sha256"] == identity["sha256"]
+	assert any("verify-pr" in command for command in commands)
+	assert not (evidence_path.parent / "evidence.json").exists()
+
+
+@pytest.mark.parametrize("dirty", [True, False])
+def test_pr_build_rejects_checkout_changed_during_build(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dirty: bool
+) -> None:
+	platform = "windows" if os.name == "nt" else "linux"
+	for key, value in {
+		"SOURCE_SHA": "a" * 40,
+		"BASE_SHA": "b" * 40,
+		"RELEASE_PLATFORM": platform,
+		"GITHUB_REPOSITORY": "owner/quality-gate",
+		"GITHUB_RUN_ID": "123",
+		"GITHUB_RUN_ATTEMPT": "1",
+		"RUNNER_TEMP": str(tmp_path),
+	}.items():
+		monkeypatch.setenv(key, value)
+	source_sha = "a" * 40
+	current_head = source_sha
+	working_tree_dirty = False
+	package = tmp_path / "quality-gate-v2.3.0.zip"
+	package.write_bytes(b"verified artifact")
+	identity = {
+		"path": str(package),
+		"name": package.name,
+		"version": "2.3.0",
+		"source_sha": source_sha,
+		"platform": platform,
+		"sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
+	}
+
+	def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+		nonlocal current_head, working_tree_dirty
+		if command[:2] == ["git", "status"]:
+			return subprocess.CompletedProcess(
+				command, 0, stdout=" M source.py\n" if working_tree_dirty else ""
+			)
+		if command == ["git", "rev-parse", "HEAD"]:
+			return subprocess.CompletedProcess(command, 0, stdout=current_head)
+		if "build" in command:
+			cast(BinaryIO, options["stdout"]).write(json.dumps(identity).encode())
+			if dirty:
+				working_tree_dirty = True
+			else:
+				current_head = "c" * 40
+		return subprocess.CompletedProcess(command, 0, stdout="")
+
+	monkeypatch.setattr(subprocess, "run", run)
+	with pytest.raises(SystemExit, match="clean exact-head checkout"):
+		release_build.main(pull_request=True)
+	assert not (tmp_path / "quality-gate-release" / platform / "verification.json").exists()
+
 def test_release_build_reports_and_propagates_cleanup_failure(
 	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -191,7 +300,7 @@ def test_release_build_reports_and_propagates_cleanup_failure(
 		raise OSError("cleanup unavailable")
 
 	monkeypatch.setattr(release_build, "temporary_workspace", workspace)
-	monkeypatch.setattr(release_build, "_run_release_build", lambda: None)
+	monkeypatch.setattr(release_build, "_run_release_build", lambda **_kwargs: None)
 	with pytest.raises(OSError, match="cleanup unavailable"):
 		release_build.main()
 	timings = [

@@ -1,14 +1,18 @@
-"""Repository-local scratch space for Quality Gate executions."""
+"""Quality Gate scratch space."""
 
 from __future__ import annotations
 
 import errno
 import hashlib
+import math
 import os
+import sys
 import tempfile
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
+import time as time
+from collections.abc import Callable
+from collections.abc import Iterator as Iterator
+from contextlib import contextmanager as contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import BinaryIO
@@ -83,7 +87,7 @@ from .workspace_keys import (
 from .workspace_keys import (
 	_valid_signed_record as _valid_signed_record,
 )
-from .workspace_locks import _open_locked_file
+from .workspace_locks import _check_workspace_deadline, _open_locked_file
 from .workspace_locks import _unlock as _unlock
 from .workspace_quarantine import (
 	_check_ordinary_directory,
@@ -138,6 +142,8 @@ from .workspace_tree import _remove_entry as _remove_entry
 _SYSTEM_TEMP_ENVIRONMENT = "QUALITY_GATE_SYSTEM_TEMP"
 SYSTEM_TEMP_DIRECTORY = Path(os.environ.get(_SYSTEM_TEMP_ENVIRONMENT) or tempfile.gettempdir())
 _ROOT_LOCK_NAME = ".quality-gate.lock"
+_WORKSPACE_WRITE_ERRORS = {errno.EACCES, errno.EPERM, errno.EROFS}
+_STALE_CLEANUP_READ_ONLY = 3
 _TEMP_ENVIRONMENT = ("TMP", "TEMP", "TMPDIR")
 _active_workspace: ContextVar[tuple[Path, Path] | None] = ContextVar(
 	"quality_gate_active_workspace", default=None
@@ -152,8 +158,15 @@ class TemporaryWorkspaceError(OSError):
 
 
 @contextmanager
-def _locked_file(path: Path) -> Iterator[None]:
-	handle = _open_locked_file(path, blocking=True)
+def _locked_file(path: Path, *, deadline: float | None = None) -> Iterator[None]:
+	try:
+		handle = _open_locked_file(path, blocking=True, deadline=deadline)
+	except TimeoutError:
+		raise
+	except OSError as error:
+		if "symbolic link" in str(error):
+			raise
+		raise OSError(error.errno, "could not acquire temporary workspace lock", path) from error
 	if handle is None:
 		raise OSError(f"could not acquire temporary workspace lock: {path}")
 	try:
@@ -164,19 +177,26 @@ def _locked_file(path: Path) -> Iterator[None]:
 
 def _create_run_directory(
 	temp_root: Path,
+	*,
+	deadline: float | None = None,
 ) -> tuple[Path, Path, BinaryIO, os.stat_result, os.stat_result]:
 	if _ownership_key(create=True) is None:
 		raise OSError(f"temporary workspace ownership key is unavailable: {temp_root}")
 	root_lock_path = temp_root / _ROOT_LOCK_NAME
-	with _locked_file(root_lock_path):
-		_clean_stale_entries(temp_root)
+	stale_entries_reclaimed = _bounded_stale_workspace_cleanup(temp_root, deadline)
+	with _locked_file(root_lock_path, deadline=deadline):
+		if not stale_entries_reclaimed:
+			_clean_stale_entries(temp_root, deadline=deadline)
+		_check_workspace_deadline(deadline)
 		run_directory = Path(tempfile.mkdtemp(prefix="qg-", dir=temp_root))
 		run_identity: os.stat_result | None = None
 		owner_identity: os.stat_result | None = None
 		active_lock: BinaryIO | None = None
 		try:
 			run_identity = run_directory.lstat()
-			active_lock = _open_locked_file(run_directory / _ACTIVE_LOCK_NAME, blocking=True)
+			active_lock = _open_locked_file(
+				run_directory / _ACTIVE_LOCK_NAME, blocking=True, deadline=deadline
+			)
 			if active_lock is None:
 				raise OSError("could not acquire active repository temp lock")
 			with (run_directory / _OWNERSHIP_MARKER_NAME).open("xb") as marker:
@@ -203,20 +223,26 @@ def _create_run_directory(
 
 def _prepare_workspace(
 	root: Path,
+	*,
+	deadline: float | None = None,
 ) -> tuple[Path, Path, BinaryIO, os.stat_result, os.stat_result]:
+	_check_workspace_deadline(deadline)
 	temp_root = root / TEMP_DIRECTORY_NAME
 	try:
 		_check_ordinary_directory(temp_root, allow_missing=True)
+		_check_workspace_deadline(deadline)
 		temp_root.mkdir(parents=True, exist_ok=True)
 		_check_ordinary_directory(temp_root)
-		return _create_run_directory(temp_root)
+		return _create_run_directory(temp_root, deadline=deadline)
 	except (OSError, RuntimeError) as error:
+		_raise_operation_timeout_if_expired(deadline, error)
 		raise TemporaryWorkspaceError(
 			f"could not prepare repository-local temporary workspace under {root}: {error}"
 		) from error
 
 
-def _fallback_workspace_root(root: Path) -> Path:
+def _fallback_workspace_root(root: Path, *, deadline: float | None = None) -> Path:
+	_check_workspace_deadline(deadline)
 	user_identity = (
 		os.environ.get("USER")
 		or os.environ.get("USERNAME")
@@ -228,33 +254,37 @@ def _fallback_workspace_root(root: Path) -> Path:
 	user_key = hashlib.sha256(os.path.normcase(user_identity).encode("utf-8")).hexdigest()[:16]
 	root_key = os.path.normcase(str(root)).encode("utf-8")
 	root_hash = hashlib.sha256(root_key).hexdigest()[:20]
-	user_root = SYSTEM_TEMP_DIRECTORY / f"quality-gate-workspaces-{user_key}"
+	system_temp = SYSTEM_TEMP_DIRECTORY
+	if not system_temp.is_absolute():
+		system_temp = Path.cwd() / system_temp
+	user_root = system_temp / f"quality-gate-workspaces-{user_key}"
 	_check_ordinary_directory(user_root, allow_missing=True)
+	_check_workspace_deadline(deadline)
 	user_root.mkdir(mode=0o700, parents=True, exist_ok=True)
 	_check_ordinary_directory(user_root)
+	_check_workspace_deadline(deadline)
 	fallback_root = user_root / root_hash
 	_check_ordinary_directory(fallback_root, allow_missing=True)
 	fallback_root.mkdir(mode=0o700, exist_ok=True)
 	_check_ordinary_directory(fallback_root)
+	_check_workspace_deadline(deadline)
 	return fallback_root
 
 
 def _prepare_workspace_with_fallback(
 	root: Path,
+	*,
+	deadline: float | None = None,
 ) -> tuple[Path, Path, BinaryIO, os.stat_result, os.stat_result]:
 	try:
-		return _prepare_workspace(root)
+		return _prepare_workspace(root, deadline=deadline)
 	except TemporaryWorkspaceError as error:
 		cause = error.__cause__
-		if not isinstance(cause, OSError) or cause.errno not in {
-			errno.EACCES,
-			errno.EPERM,
-			errno.EROFS,
-		}:
+		if not isinstance(cause, OSError) or cause.errno not in _WORKSPACE_WRITE_ERRORS:
 			raise
 	try:
-		fallback_root = _fallback_workspace_root(root)
-		return _prepare_workspace(fallback_root)
+		fallback_root = _fallback_workspace_root(root, deadline=deadline)
+		return _prepare_workspace(fallback_root, deadline=deadline)
 	except OSError as fallback_error:
 		raise TemporaryWorkspaceError(
 			f"repository temp under {root} is not writable and its per-repository "
@@ -352,9 +382,23 @@ def _remove_workspace(
 
 
 @contextmanager
-def temporary_workspace(root: Path) -> Iterator[Path]:
-	"""Use repository-local temp, with a system-temp fallback for read-only roots."""
+def temporary_workspace(
+	root: Path,
+	*,
+	cleanup_owner: Callable[[Path, Path], None] | None = None,
+	workspace_registered: Callable[[Path, Path], None] | None = None,
+	deadline: float | None = None,
+) -> Iterator[Path]:
+	"""Use repository-local temp, registering operation ownership before yielding."""
 	try:
+		if deadline is not None and (
+			isinstance(deadline, bool)
+			or not isinstance(deadline, (int, float))
+			or not math.isfinite(deadline)
+		):
+			raise ValueError("temporary workspace deadline must be a finite monotonic timestamp")
+		deadline = None if deadline is None else float(deadline)
+		_check_workspace_deadline(deadline)
 		actual_root = root.expanduser().resolve()
 	except (OSError, RuntimeError) as error:
 		raise TemporaryWorkspaceError(
@@ -365,10 +409,30 @@ def temporary_workspace(root: Path) -> Iterator[Path]:
 		yield current[1]
 		return
 
-	with _process_lock:
+	with _locked_process_scope(deadline):
 		run_directory, root_lock_path, active_lock, run_identity, owner_identity = (
-			_prepare_workspace_with_fallback(actual_root)
+			_prepare_workspace_with_fallback(actual_root, deadline=deadline)
 		)
+		if workspace_registered is not None:
+			try:
+				workspace_registered(root_lock_path.parent, run_directory)
+			except Exception as error:
+				try:
+					_remove_workspace(
+						root_lock_path,
+						run_directory,
+						active_lock,
+						run_identity,
+						owner_identity,
+					)
+				except TemporaryWorkspaceError as cleanup_error:
+					raise TemporaryWorkspaceError(
+						"temporary workspace registration and local cleanup failed: "
+						f"{run_directory}"
+					) from cleanup_error
+				raise TemporaryWorkspaceError(
+					f"temporary workspace ownership could not be registered: {run_directory}"
+				) from error
 		previous_tempdir, previous_environment = _set_process_workspace(run_directory)
 		token = _active_workspace.set((actual_root, run_directory))
 		try:
@@ -376,6 +440,137 @@ def temporary_workspace(root: Path) -> Iterator[Path]:
 		finally:
 			_restore_process_workspace(previous_tempdir, previous_environment)
 			_active_workspace.reset(token)
-			_remove_workspace(
-				root_lock_path, run_directory, active_lock, run_identity, owner_identity
-			)
+			if cleanup_owner is None:
+				_remove_workspace(
+					root_lock_path, run_directory, active_lock, run_identity, owner_identity
+				)
+			else:
+				try:
+					cleanup_owner(root_lock_path.parent, run_directory)
+				except Exception as error:
+					raise TemporaryWorkspaceError(
+						f"temporary workspace cleanup ownership could not be transferred: "
+						f"{run_directory}"
+					) from error
+				finally:
+					_unlock(active_lock)
+
+
+def _raise_operation_timeout_if_expired(deadline: float | None, error: BaseException) -> None:
+	if deadline is None or time.monotonic() < deadline:
+		return
+	from .operation import OperationTimeoutError, current_operation
+
+	operation = current_operation()
+	if operation is None:
+		return
+	try:
+		operation.remaining()
+	except OperationTimeoutError as timeout:
+		raise timeout from error
+
+
+@contextmanager
+def _locked_process_scope(deadline: float | None) -> Iterator[None]:
+	acquired = False
+	try:
+		if deadline is None:
+			_process_lock.acquire()
+			acquired = True
+		else:
+			while not acquired:
+				_check_workspace_deadline(deadline)
+				remaining = deadline - time.monotonic()
+				if remaining <= 0:
+					continue
+				acquired = _process_lock.acquire(timeout=min(0.05, remaining))
+			_check_workspace_deadline(deadline)
+	except TimeoutError as error:
+		if acquired:
+			_process_lock.release()
+		_raise_operation_timeout_if_expired(deadline, error)
+		raise TemporaryWorkspaceError(
+			"temporary workspace process lock wait exceeded its deadline"
+		) from error
+	try:
+		yield
+	finally:
+		_process_lock.release()
+
+
+def _clean_stale_workspace_entries(temp_root: Path) -> int:
+	try:
+		_check_ordinary_directory(temp_root)
+		with _locked_file(temp_root / _ROOT_LOCK_NAME):
+			_clean_stale_entries(temp_root)
+	except OSError as error:
+		if error.errno in _WORKSPACE_WRITE_ERRORS:
+			return _STALE_CLEANUP_READ_ONLY
+		raise
+	return 0
+
+
+def _bounded_stale_workspace_cleanup(temp_root: Path, deadline: float | None) -> bool:
+	if deadline is None:
+		return False
+	from .operation import current_operation
+
+	operation = current_operation()
+	if operation is None:
+		return False
+	_check_workspace_deadline(deadline)
+	source_root = Path(__file__).resolve().parent.parent
+	body = (
+		"import sys\n"
+		"from pathlib import Path\n"
+		"sys.path.insert(0, sys.argv[1])\n"
+		"from quality_gate.temp_workspace import _clean_stale_workspace_entries\n"
+		"sys.exit(_clean_stale_workspace_entries(Path(sys.argv[2])))\n"
+	)
+	try:
+		returncode, _output, _diagnostics = operation.run_process(
+			[
+				sys.executable,
+				"-I",
+				"-S",
+				"-B",
+				"-c",
+				body,
+				str(source_root),
+				str(temp_root),
+			],
+			root=operation.root,
+			environment=dict(os.environ),
+			timeout_seconds=operation.remaining(),
+			limit=4096,
+		)
+	except Exception as error:
+		raise TemporaryWorkspaceError(
+			"stale temporary workspace cleanup did not complete within the operation budget"
+		) from error
+	if returncode == _STALE_CLEANUP_READ_ONLY:
+		raise OSError(errno.EACCES, "temporary workspace is not writable", temp_root)
+	if returncode != 0:
+		raise OSError("stale temporary workspace cleanup failed")
+	_check_workspace_deadline(deadline)
+	return True
+
+
+def cleanup_handed_off_workspace(temp_root: Path, run_directory: Path) -> None:
+	"""Reclaim one workspace transferred by ``temporary_workspace``."""
+	if temp_root.is_symlink() or run_directory.is_symlink():
+		raise OSError("temporary workspace cleanup path became a symbolic link")
+	try:
+		actual_temp_root = temp_root.expanduser().resolve()
+		actual_run_directory = run_directory.expanduser().resolve()
+	except (OSError, RuntimeError) as error:
+		raise OSError("temporary workspace path could not be resolved") from error
+	if actual_run_directory.parent != actual_temp_root or not actual_run_directory.name.startswith(
+		"qg-"
+	):
+		raise OSError("temporary workspace cleanup handoff is invalid")
+	_check_ordinary_directory(actual_temp_root)
+	with _locked_file(actual_temp_root / _ROOT_LOCK_NAME):
+		_reclaim_stale_workspace(actual_temp_root, actual_run_directory)
+	if os.path.lexists(actual_run_directory):
+		raise OSError("handed-off temporary workspace was not safely removed")

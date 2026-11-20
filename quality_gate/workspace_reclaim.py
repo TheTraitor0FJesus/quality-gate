@@ -19,7 +19,7 @@ from .workspace_constants import (
 	_OWNERSHIP_RECORD_SCHEMA,
 )
 from .workspace_keys import _plain_lock_file, _same_file_identity, _valid_signed_record
-from .workspace_locks import _open_locked_file, _unlock
+from .workspace_locks import _check_workspace_deadline, _open_locked_file, _unlock
 from .workspace_quarantine import _remove_file
 from .workspace_records import (
 	_cleanup_record_path,
@@ -35,13 +35,14 @@ from .workspace_records import (
 from .workspace_tree import _remove_entry
 
 
-def _clean_stale_entries(temp_root: Path) -> None:
+def _clean_stale_entries(temp_root: Path, *, deadline: float | None = None) -> None:
 	seen: set[str] = set()
-	for owner_record in tuple(temp_root.iterdir()):
+	for owner_record in temp_root.iterdir():
+		_check_workspace_deadline(deadline)
 		entry = _run_directory_from_owner_record(temp_root, owner_record)
 		if entry is not None and entry.name not in seen:
 			seen.add(entry.name)
-			_reclaim_stale_workspace(temp_root, entry)
+			_reclaim_stale_workspace(temp_root, entry, deadline=deadline)
 
 
 def _run_directory_from_owner_record(temp_root: Path, owner_record: Path) -> Path | None:
@@ -65,17 +66,22 @@ def _run_directory_from_owner_record(temp_root: Path, owner_record: Path) -> Pat
 	return temp_root / run_name
 
 
-def _reclaim_stale_workspace(temp_root: Path, entry: Path) -> None:
+def _reclaim_stale_workspace(
+	temp_root: Path, entry: Path, *, deadline: float | None = None
+) -> None:
+	_check_workspace_deadline(deadline)
 	try:
 		metadata = entry.lstat()
 	except FileNotFoundError:
-		_remove_orphan_ownership_record(temp_root, entry)
+		_remove_orphan_ownership_record(temp_root, entry, deadline=deadline)
 		return
 	if is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
 		return
+	_check_workspace_deadline(deadline)
 	owner_valid, owner_identity = _has_valid_ownership_record(temp_root, entry, metadata)
 	if not owner_valid or owner_identity is None:
 		return
+	_check_workspace_deadline(deadline)
 	cleanup_valid, cleanup_identity, active_identity, marker_identity = _has_valid_cleanup_record(
 		temp_root, entry, metadata
 	)
@@ -97,14 +103,19 @@ def _reclaim_stale_workspace(temp_root: Path, entry: Path) -> None:
 	if not can_reclaim or cleanup_identity is None or cleanup_controls is None:
 		return
 	try:
-		_remove_entry(entry, expected_identity=metadata)
+		_remove_entry(entry, expected_identity=metadata, deadline=deadline)
+	except TimeoutError:
+		raise
 	except OSError:
 		return
+	_check_workspace_deadline(deadline)
 	_remove_cleanup_record(temp_root, entry, metadata, expected_record=cleanup_identity)
 	_remove_ownership_record(temp_root, entry, metadata, expected_record=owner_identity)
 
 
-def _remove_orphan_ownership_record(temp_root: Path, run_directory: Path) -> None:
+def _remove_orphan_ownership_record(
+	temp_root: Path, run_directory: Path, *, deadline: float | None = None
+) -> None:
 	for path, expected_format, expected_schema in (
 		(
 			_ownership_record_path(temp_root, run_directory),
@@ -122,6 +133,7 @@ def _remove_orphan_ownership_record(temp_root: Path, run_directory: Path) -> Non
 			_CLEANUP_RECORD_SCHEMA,
 		),
 	):
+		_check_workspace_deadline(deadline)
 		try:
 			metadata = path.lstat()
 			if (
@@ -180,6 +192,7 @@ def _remove_orphan_ownership_record(temp_root: Path, run_directory: Path) -> Non
 			continue
 		try:
 			_remove_file(path, metadata)
+			_check_workspace_deadline(deadline)
 		except OSError:
 			continue
 

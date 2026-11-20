@@ -24,7 +24,11 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 
 from quality_gate.distribution import DistributionError
 from quality_gate.launcher import prepare_bootstrap
-from quality_gate.release import ReleaseControllerError, verify_release_candidate
+from quality_gate.release import (
+	ReleaseControllerError,
+	verify_product_candidate,
+	verify_release_candidate,
+)
 from quality_gate.release_contract import (
 	UNIFIED_RELEASE_PLATFORM_TOOL_PATHS,
 	UNIFIED_RELEASE_POLICY_FILES,
@@ -73,7 +77,9 @@ def _platform(value: str | None = None) -> str:
 	return selected
 
 
-def _run(command: Sequence[str], *, cwd: Path, timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+def _run(
+	command: Sequence[str], *, cwd: Path, timeout_seconds: float
+) -> subprocess.CompletedProcess[str]:
 	try:
 		result = subprocess.run(
 			list(command),
@@ -85,7 +91,9 @@ def _run(command: Sequence[str], *, cwd: Path, timeout_seconds: float) -> subpro
 			timeout=timeout_seconds,
 		)
 	except subprocess.TimeoutExpired as error:
-		raise ReleaseError(f"release adapter command timed out after {timeout_seconds:g} seconds: {command[0]}") from error
+		raise ReleaseError(
+			f"release adapter command timed out after {timeout_seconds:g} seconds: {command[0]}"
+		) from error
 	except (OSError, UnicodeError) as error:
 		raise ReleaseError(f"release adapter command is unavailable: {command[0]}") from error
 	if result.returncode:
@@ -113,13 +121,16 @@ def _assert_source(root: Path, source_sha: str) -> None:
 		timeout_seconds=load_release_timeout(root, "subprocess_seconds"),
 	)
 	if result.stdout.strip() != source_sha:
-		raise ReleaseError("release adapter is not running against the exact merged source")
+		raise ReleaseError("release adapter is not running against the exact source")
 
 
 def _download(url: str, destination: Path, *, timeout_seconds: float) -> None:
 	temporary = destination.with_name(f".{destination.name}.tmp")
 	try:
-		request = Request(url, headers={"Accept": "application/octet-stream", "User-Agent": "quality-gate-release"})
+		request = Request(
+			url,
+			headers={"Accept": "application/octet-stream", "User-Agent": "quality-gate-release"},
+		)
 		with urlopen(request, timeout=timeout_seconds) as response, temporary.open("wb") as stream:
 			stream.write(read_bounded(response, MAX_DOWNLOAD_BYTES, f"download {url}"))
 		os.replace(temporary, destination)
@@ -182,28 +193,52 @@ def _download_gitleaks(root: Path, output: Path, platform: str) -> None:
 	version = gitleaks.get("version") if isinstance(gitleaks, dict) else None
 	url = entry.get("url") if isinstance(entry, dict) else None
 	digest = entry.get("sha256") if isinstance(entry, dict) else None
-	if version != UNIFIED_RELEASE_TOOLS["gitleaks"] or not isinstance(url, str) or not isinstance(digest, str):
+	if (
+		version != UNIFIED_RELEASE_TOOLS["gitleaks"]
+		or not isinstance(url, str)
+		or not isinstance(digest, str)
+	):
 		raise ReleaseError("gitleaks release policy is incomplete or mismatched")
 	if SHA256.fullmatch(digest) is None:
 		raise ReleaseError("gitleaks release policy digest is invalid")
 	with tempfile.TemporaryDirectory(prefix="quality-gate-gitleaks-") as temporary:
 		archive = Path(temporary) / f"gitleaks-{version}-{platform}.archive"
-		_download(url, archive, timeout_seconds=load_release_timeout(root, "external_download_seconds"))
+		_download(
+			url, archive, timeout_seconds=load_release_timeout(root, "external_download_seconds")
+		)
 		if _sha256(archive) != digest:
-			raise ReleaseError(f"downloaded gitleaks {platform} archive does not match its policy digest")
+			raise ReleaseError(
+				f"downloaded gitleaks {platform} archive does not match its policy digest"
+			)
 		try:
 			if platform == "windows":
 				with zipfile.ZipFile(archive) as zipped:
-					member = next((item for item in zipped.infolist() if item.filename.casefold().endswith("gitleaks.exe")), None)
+					member = next(
+						(
+							item
+							for item in zipped.infolist()
+							if item.filename.casefold().endswith("gitleaks.exe")
+						),
+						None,
+					)
 					if member is None or member.file_size > MAX_DOWNLOAD_BYTES:
 						raise ReleaseError("gitleaks archive has no Windows executable")
 					source = _safe_extraction_path(Path(temporary), member.filename)
 					source.parent.mkdir(parents=True, exist_ok=True)
 					with zipped.open(member) as stream, source.open("wb") as destination:
-						destination.write(read_bounded(stream, MAX_DOWNLOAD_BYTES, "gitleaks Windows executable"))
+						destination.write(
+							read_bounded(stream, MAX_DOWNLOAD_BYTES, "gitleaks Windows executable")
+						)
 			else:
 				with tarfile.open(archive) as tar:
-					member = next((item for item in tar.getmembers() if item.name.casefold().endswith("gitleaks")), None)
+					member = next(
+						(
+							item
+							for item in tar.getmembers()
+							if item.name.casefold().endswith("gitleaks")
+						),
+						None,
+					)
 					if member is None or not member.isfile() or member.size > MAX_DOWNLOAD_BYTES:
 						raise ReleaseError("gitleaks archive has no Linux executable")
 					source = _safe_extraction_path(Path(temporary), member.name)
@@ -212,7 +247,9 @@ def _download_gitleaks(root: Path, output: Path, platform: str) -> None:
 					if stream is None:
 						raise ReleaseError("gitleaks Linux executable cannot be read")
 					with stream, source.open("wb") as destination:
-						destination.write(read_bounded(stream, MAX_DOWNLOAD_BYTES, "gitleaks Linux executable"))
+						destination.write(
+							read_bounded(stream, MAX_DOWNLOAD_BYTES, "gitleaks Linux executable")
+						)
 		except (zipfile.BadZipFile, tarfile.TarError) as error:
 			raise ReleaseError(f"downloaded gitleaks {platform} archive is malformed") from error
 		target = output / UNIFIED_RELEASE_PLATFORM_TOOL_PATHS[platform]["gitleaks"]
@@ -279,22 +316,27 @@ def _write_manifest(output: Path, version: str, platform: str) -> None:
 				"",
 			]
 		)
-	validate_release_inventory(tag, files, tool_entries, platform=platform, actual_paths=["release.toml", *all_paths])
+	validate_release_inventory(
+		tag, files, tool_entries, platform=platform, actual_paths=["release.toml", *all_paths]
+	)
 	temporary = output / ".release.toml.tmp"
 	temporary.write_text("\n".join(manifest_lines), encoding="utf-8", newline="\n")
 	os.replace(temporary, output / "release.toml")
 
 
-def _archive(output: Path, version: str, platform: str) -> Path:
+def _archive(output: Path, version: str, platform: str, source_sha: str) -> Path:
 	label = "Windows" if platform == "windows" else "Linux"
 	archive = output.parent / f"quality-gate-v{version}-{label}.zip"
 	with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+		zipped.comment = source_sha.encode("ascii")
 		for path in sorted(item for item in output.rglob("*") if item.is_file()):
 			zipped.write(path, path.relative_to(output).as_posix())
 	return archive
 
 
-def build(source_sha: str, output_dir: Path | str, *, platform: str | None = None) -> ArtifactIdentity:
+def build(
+	source_sha: str, output_dir: Path | str, *, platform: str | None = None
+) -> ArtifactIdentity:
 	"""Build one existing Quality Gate platform archive from the exact source SHA."""
 	root = _root()
 	_assert_source(root, source_sha)
@@ -345,7 +387,8 @@ def build(source_sha: str, output_dir: Path | str, *, platform: str | None = Non
 	_download_biome(root, output, selected)
 	_download_gitleaks(root, output, selected)
 	_write_manifest(output, projection.version, selected)
-	archive = _archive(output, projection.version, selected)
+	_assert_source(root, source_sha)
+	archive = _archive(output, projection.version, selected, source_sha)
 	return ArtifactIdentity(
 		projection.version,
 		source_sha,
@@ -366,7 +409,9 @@ def runtime_check(source_sha: str, artifact: Path | str) -> ArtifactIdentity:
 		verify_release_candidate(root, path, version=f"v{projection.version}")
 	except ReleaseControllerError as error:
 		raise ReleaseError(f"release controller rejected the artifact: {error}") from error
-	return ArtifactIdentity(projection.version, source_sha, _platform(), path.name, _sha256(path), str(path))
+	return ArtifactIdentity(
+		projection.version, source_sha, _platform(), path.name, _sha256(path), str(path)
+	)
 
 
 def verify(source_sha: str, artifact: Path | str) -> ArtifactIdentity:
@@ -374,11 +419,47 @@ def verify(source_sha: str, artifact: Path | str) -> ArtifactIdentity:
 	return runtime_check(source_sha, artifact)
 
 
+def verify_pr(source_sha: str, artifact: Path | str, expected_sha256: str) -> ArtifactIdentity:
+	"""Verify a PR artifact without release readiness or publication authority."""
+	root = _root()
+	_assert_source(root, source_sha)
+	if SHA256.fullmatch(expected_sha256) is None:
+		raise ReleaseError("invalid expected artifact digest")
+	path = Path(artifact).resolve()
+	if not path.is_file() or _sha256(path) != expected_sha256:
+		raise ReleaseError("artifact is missing or its digest does not match")
+	try:
+		with zipfile.ZipFile(path) as archive:
+			if archive.comment != source_sha.encode("ascii"):
+				raise ReleaseError("artifact does not match the requested source commit")
+	except (OSError, zipfile.BadZipFile) as error:
+		raise ReleaseError("artifact is not a readable ZIP archive") from error
+	projection = validate_version_projections(root)
+	try:
+		verify_product_candidate(root, path, version=f"v{projection.version}")
+	except ReleaseControllerError as error:
+		raise ReleaseError(f"product verification rejected the artifact: {error}") from error
+	if _sha256(path) != expected_sha256:
+		raise ReleaseError("artifact changed during verification")
+	_assert_source(root, source_sha)
+	return ArtifactIdentity(
+		projection.version, source_sha, _platform(), path.name, expected_sha256, str(path)
+	)
+
+
 def bootstrap_setup(policy_release: str) -> None:
 	"""Prepare the previous immutable policy release for this repository's CI bootstrap."""
 	try:
-		environment = prepare_bootstrap(_root(), policy_release=policy_release, create_runtimes=True)
-	except (DistributionError, OSError, ReleaseControllerError, ReleaseError, RuntimeUnavailable) as error:
+		environment = prepare_bootstrap(
+			_root(), policy_release=policy_release, create_runtimes=True
+		)
+	except (
+		DistributionError,
+		OSError,
+		ReleaseControllerError,
+		ReleaseError,
+		RuntimeUnavailable,
+	) as error:
 		raise ReleaseError(f"self-hosting bootstrap setup is unavailable: {error}") from error
 	print(f"bootstrap setup: ready - {environment.release_manifest.version}")
 
@@ -389,18 +470,21 @@ def bootstrap_check(
 	base: str | None = None,
 	head: str | None = None,
 ) -> int:
-	return run_bootstrap_check(_root(), policy_release=policy_release, base=base, head=head).exit_code
+	return run_bootstrap_check(
+		_root(), policy_release=policy_release, base=base, head=head
+	).exit_code
 
 
 def _parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(description=__doc__)
 	subcommands = parser.add_subparsers(dest="command", required=True)
-	for name in ("build", "verify", "runtime-check"):
+	for name in ("build", "verify", "runtime-check", "verify-pr"):
 		command = subcommands.add_parser(name)
 		command.add_argument("--source-sha", required=True)
 		command.add_argument("--output", type=Path)
 		command.add_argument("--artifact", type=Path)
 		command.add_argument("--platform", choices=("linux", "windows"))
+		command.add_argument("--sha256")
 	bootstrap_setup_parser = subcommands.add_parser("bootstrap-setup")
 	bootstrap_setup_parser.add_argument("--policy-release", required=True)
 	bootstrap_check_parser = subcommands.add_parser("bootstrap-check")
@@ -426,11 +510,14 @@ def main(arguments: Sequence[str] | None = None) -> int:
 			else:
 				if options.artifact is None:
 					raise ReleaseError(f"{options.command} requires --artifact")
-				result = (
-					runtime_check(options.source_sha, options.artifact)
-					if options.command == "runtime-check"
-					else verify(options.source_sha, options.artifact)
-				)
+				if options.command == "verify-pr":
+					if options.sha256 is None:
+						raise ReleaseError("verify-pr requires --sha256")
+					result = verify_pr(options.source_sha, options.artifact, options.sha256)
+				elif options.command == "runtime-check":
+					result = runtime_check(options.source_sha, options.artifact)
+				else:
+					result = verify(options.source_sha, options.artifact)
 	except (OSError, ReleaseError) as error:
 		print(f"release adapter: unchecked - {error}")
 		return 2

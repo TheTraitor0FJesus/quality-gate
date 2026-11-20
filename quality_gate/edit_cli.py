@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .admission import child_ci_environment
 from .edit_process import run_process
 from .edit_protocol import (
 	BACKGROUND_SCHEMA,
@@ -292,7 +293,8 @@ def _run_worker(
 					"HOME",
 					"USERPROFILE",
 				}
-			},
+			}
+			| child_ci_environment(),
 			deadline=deadline,
 			payload=payload,
 			limit=MAX_RESULT_BYTES,

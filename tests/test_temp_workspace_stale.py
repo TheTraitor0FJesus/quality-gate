@@ -102,7 +102,10 @@ def test_reclamation_preserves_a_directory_replaced_after_ownership_check(
 	replaced = False
 
 	def replace_before_remove(
-		path: Path, *, expected_identity: os.stat_result | None = None
+		path: Path,
+		*,
+		expected_identity: os.stat_result | None = None,
+		deadline: float | None = None,
 	) -> None:
 		nonlocal replaced
 		if path == stale and expected_identity is not None and not replaced:
@@ -110,7 +113,7 @@ def test_reclamation_preserves_a_directory_replaced_after_ownership_check(
 			path.mkdir()
 			(path / "foreign-content").write_text("preserve", encoding="utf-8")
 			replaced = True
-		original_remove(path, expected_identity=expected_identity)
+		original_remove(path, expected_identity=expected_identity, deadline=deadline)
 
 	monkeypatch.setattr(workspace_reclaim, "_remove_entry", replace_before_remove)
 	with temporary_workspace(repository) as current:
@@ -144,9 +147,12 @@ def test_stale_reclamation_keeps_root_controls_when_child_removal_fails(
 	original_remove_file = workspace_tree._remove_file
 
 	def put_root_controls_first(
-		directory: Path, expected: os.stat_result
+		directory: Path,
+		expected: os.stat_result,
+		*,
+		deadline: float | None = None,
 	) -> list[tuple[Path, os.stat_result]] | None:
-		entries = original_entries(directory, expected)
+		entries = original_entries(directory, expected, deadline=deadline)
 		if directory != stale or entries is None:
 			return entries
 		controls = [
@@ -202,9 +208,12 @@ def test_stale_reclamation_resumes_after_control_file_removal_fails(
 	original_remove_file = workspace_tree._remove_file
 
 	def put_root_controls_first(
-		directory: Path, expected: os.stat_result
+		directory: Path,
+		expected: os.stat_result,
+		*,
+		deadline: float | None = None,
 	) -> list[tuple[Path, os.stat_result]] | None:
-		entries = original_entries(directory, expected)
+		entries = original_entries(directory, expected, deadline=deadline)
 		if directory != stale or entries is None:
 			return entries
 		controls = [

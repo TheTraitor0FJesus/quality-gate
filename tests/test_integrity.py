@@ -1,4 +1,5 @@
-from __future__ import annotations
+"""Collect the feature tests from their supporting modules."""
+
 
 import os
 import shutil
@@ -6,6 +7,7 @@ import stat
 import subprocess
 import sys
 from datetime import date
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 

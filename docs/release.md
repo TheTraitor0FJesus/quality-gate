@@ -33,6 +33,9 @@ product metadata and release timeouts. The adapter calls `quality_gate.release` 
 release lessons, and built artifact. Both platform jobs run the complete repository test suite against
 the candidate release.
 
+Read [read-only product verification](product-verification.md) before wiring PR product checks.
+Content and transport verification have separate evidence requirements.
+
 The installed-artifact Gate owns the full test run. It uses the candidate policy and its bundled
 tools, a prepared component runtime, and the source snapshot whose Python component declares
 `test_paths = ["tests"]`. Pytest's `pythonpath = ["."]` selects that snapshot's source. A successful
@@ -69,6 +72,39 @@ verification from depending on the candidate's unpublished policy asset.
 On Windows, `quality_gate.release` checks the resolved final release workspace path before syncing
 artifacts or auditing. If it exceeds 180 characters, shorten or move the worktree, or pass an existing
 shorter directory with `--workspace-parent`. This limit applies only to release workspaces.
+
+## Working-tree interface verification
+
+When changing an edit implementation or its host wiring, retain real-tool checks through
+the public CLI and the verified wheel on `PYTHONPATH`, without extraction. Compare findings
+and final bytes against the same selected release's ordinary checks; source imports or an
+extracted installation do not establish native-wheel parity. Keep selected-wheel comparisons
+valid with only the supplied candidate in the isolated cache, without a sibling historical
+release. The regression routes are `tests/test_edit_check.py`, `tests/test_edit_secrets.py`,
+`tests/test_edit_types.py`, `tests/test_edit_reuse.py` and `tests/test_edit_integrity.py`.
+
+Full Gate sanitizes the user environment, so `tests/test_edit_integrity_host.py` can skip
+when the installed host adapter is unavailable. For affected host-boundary changes, run
+`python <CODEX_HOME>/tools/test_runner/cli.py run --repo <repo> --scope path --value tests/test_edit_integrity_host.py --json`
+with the real host available. Resolve `CODEX_HOME` from the environment, or use `.codex` under the
+OS user profile when it is unset. Bind the completed result to the host source and provider
+candidate; a substituted wheel launcher does not prove installed-release activation, and a targeted
+run does not replace full Gate.
+
+Before enabling a host mechanism, select the published compatible engine separately from
+the policy pin and finish its explicit setup. Verify real clean/finding/fix events, exact
+request and final-byte identities, feedback delivery, disablement, rollback, reactivation
+and owned-process cleanup. Typing also requires cancellation/replacement, active-turn
+delivery and Stop/drain. Keep the owning host ticket open and the mechanism disabled
+until its installed acceptance criteria pass; provider publication alone completes none
+of these host steps.
+
+Measure complete host event-to-feedback latency for managed and unmanaged one-file and
+ten-file profiles, including a first call and 30 warm calls per profile. Report p50/p95/max,
+engine/policy identities, workload, completed outcomes, skips and cache conditions against
+the host ticket's targets. Include host hashing, launch, all enabled checks and delivery;
+provider-only timings cannot establish the aggregate budget. Retain incomplete work as
+incomplete and obtain the owner's decision before relaxing a target or deadline.
 
 ## Retry and provider handoff
 

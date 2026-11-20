@@ -2,686 +2,619 @@
 
 from __future__ import annotations
 
-import time
-from contextlib import nullcontext
-from pathlib import Path
-from typing import Literal
+import hashlib as hashlib
+import io as io
+import json as json
+import locale as locale
+import logging as logging
+import os as os
+import platform as platform
+import re as re
+import subprocess as subprocess
+import sys as sys
+import tempfile as tempfile
+import threading as threading
+import time as time
+import tokenize as tokenize
+import tomllib as tomllib
+from collections.abc import Callable as Callable
+from collections.abc import Iterable as Iterable
+from collections.abc import Iterator as Iterator
+from contextlib import (
+	AbstractContextManager as AbstractContextManager,
+)
+from contextlib import (
+	ExitStack as ExitStack,
+)
+from contextlib import (
+	contextmanager as contextmanager,
+)
+from contextlib import (
+	nullcontext as nullcontext,
+)
+from dataclasses import dataclass as dataclass
+from dataclasses import replace as replace
+from pathlib import Path as Path
+from pathlib import PurePosixPath as PurePosixPath
+from typing import Literal as Literal
 
+from . import __version__ as __version__
 from .admission import (
-	AdmissionError,
-	gate_admission,
-	running_in_ci,
+	AdmissionError as AdmissionError,
+)
+from .admission import (
+	child_admission_environment as child_admission_environment,
+)
+from .admission import (
+	gate_admission as gate_admission,
+)
+from .admission import (
+	running_in_ci as running_in_ci,
 )
 from .contracts import (
-	CheckResult,
-	Finding,
-	Manifest,
-	Status,
-	ValidationError,
-	Verdict,
-	load_manifest,
-	redact,
+	DEFAULT_COMMAND_TIMEOUT_SECONDS as DEFAULT_COMMAND_TIMEOUT_SECONDS,
 )
-from .distribution import DistributionError
+from .contracts import (
+	DEFAULT_GATE_TIMEOUT_SECONDS as DEFAULT_GATE_TIMEOUT_SECONDS,
+)
+from .contracts import (
+	CheckResult as CheckResult,
+)
+from .contracts import (
+	Finding as Finding,
+)
+from .contracts import (
+	Manifest as Manifest,
+)
+from .contracts import PythonComponent as _ManifestPythonComponent
+from .contracts import (
+	Status as Status,
+)
+from .contracts import (
+	ValidationError as ValidationError,
+)
+from .contracts import (
+	Verdict as Verdict,
+)
+from .contracts import (
+	WebComponent as WebComponent,
+)
+from .contracts import (
+	load_manifest as load_manifest,
+)
+from .contracts import (
+	redact as redact,
+)
+from .distribution import DistributionError as DistributionError
+from .edit_protocol import EditError as EditError
 from .integrity import (
-	documentation_results,
-	git_integrity_results,
-	required_documents_result,
-	workflow_result,
+	documentation_results as documentation_results,
 )
-from .launcher import PreparedEnvironment, prepare, prepare_bootstrap
-from .lessons import lessons_result
-from .reporting import render
-from .runner_context import (
-	RUFF_THREADS_ENV as RUFF_THREADS_ENV,
+from .integrity import (
+	git_integrity_results as git_integrity_results,
 )
-from .runner_context import (
-	PythonComponent as PythonComponent,
+from .integrity import (
+	workflow_result as workflow_result,
 )
-from .runner_context import (
-	_ci_history_refs,
-	_manifest_error,
-	_remaining,
-	_ruff_environment,
-	_runtime_python,
-	_safe_environment,
+from .launcher import (
+	PreparedEnvironment as PreparedEnvironment,
 )
-from .runner_context import (
+from .launcher import (
+	prepare as prepare,
+)
+from .launcher import (
+	prepare_bootstrap as prepare_bootstrap,
+)
+from .lessons import lessons_result as lessons_result
+from .native_cache import (
+	NativeToolCache as NativeToolCache,
+)
+from .native_cache import (
+	NativeToolCacheError as NativeToolCacheError,
+)
+from .native_cache import (
+	NativeToolCacheIdentity as NativeToolCacheIdentity,
+)
+from .native_cache import (
+	NativeToolCacheSelection as NativeToolCacheSelection,
+)
+from .native_cache import (
+	native_tool_source_workspace as native_tool_source_workspace,
+)
+from .operation import (
+	GateOperation as GateOperation,
+)
+from .operation import (
+	OperationTimeoutError as OperationTimeoutError,
+)
+from .operation import (
+	current_operation as current_operation,
+)
+from .operation import (
+	observe_check as observe_check,
+)
+from .operation import (
+	run_probe as run_probe,
+)
+from .reporting import render as render
+from .runner_dependencies import (
+	_dependency_command as _dependency_command,
+)
+from .runner_dependencies import (
+	_dependency_configuration as _dependency_configuration,
+)
+from .runner_dependencies import (
+	_dependency_hygiene_result as _dependency_hygiene_result,
+)
+from .runner_dependencies import (
+	_dependency_hygiene_result_impl as _dependency_hygiene_result_impl,
+)
+from .runner_dependencies import (
+	_dependency_inline_suppressions as _dependency_inline_suppressions,
+)
+from .runner_dependencies import (
+	_dependency_issue as _dependency_issue,
+)
+from .runner_dependencies import (
+	_dependency_requirement_groups as _dependency_requirement_groups,
+)
+from .runner_dependencies import (
+	_read_dependency_report as _read_dependency_report,
+)
+from .runner_domain import (
+	_component_check_index as _component_check_index,
+)
+from .runner_domain import (
+	_manifest_error as _manifest_error,
+)
+from .runner_domain import (
+	_planned_check_scopes as _planned_check_scopes,
+)
+from .runner_domain import (
+	_planned_python_check_scopes as _planned_python_check_scopes,
+)
+from .runner_domain import (
+	_progress as _progress,
+)
+from .runner_domain import (
+	_python_component_check_scope as _python_component_check_scope,
+)
+from .runner_domain import (
+	decode_subprocess_output as decode_subprocess_output,
+)
+from .runner_domain import (
+	emit as emit,
+)
+from .runner_domain import (
 	load_components as load_components,
 )
-from .runner_context import (
+from .runner_domain import (
 	relative_path as relative_path,
 )
-from .runner_context import (
+from .runner_domain import (
 	repository_root as repository_root,
 )
-from .runner_dependency import (
-	_dependency_hygiene_result,
-	_tool_command,
+from .runner_process import (
+	_bounded_output as _bounded_output,
 )
-from .runner_errors import QualityGateError as QualityGateError
-from .runner_helpers import _error_result, _progress
-from .runner_helpers import emit as emit
-from .runner_helpers import temporary_directory as temporary_directory
-from .runner_helpers import validate as validate
-from .runner_python import _command_results, _component_commands, _has_pinned_coverage
-from .runner_subprocess import (
-	_run_bounded_subprocess,
+from .runner_process import (
+	_ci_history_refs as _ci_history_refs,
 )
-from .runner_subprocess import (
+from .runner_process import (
+	_configure_operation_budget as _configure_operation_budget,
+)
+from .runner_process import (
+	_error_result as _error_result,
+)
+from .runner_process import (
+	_has_pinned_coverage as _has_pinned_coverage,
+)
+from .runner_process import (
+	_pytest_outcome_summary as _pytest_outcome_summary,
+)
+from .runner_process import (
+	_remaining as _remaining,
+)
+from .runner_process import (
+	_ruff_environment as _ruff_environment,
+)
+from .runner_process import (
+	_run_bounded_subprocess as _run_bounded_subprocess,
+)
+from .runner_process import (
+	_run_legacy_subprocess as _run_legacy_subprocess,
+)
+from .runner_process import (
+	_run_python_snapshot_checks as _run_python_snapshot_checks,
+)
+from .runner_process import (
+	_runtime_python as _runtime_python,
+)
+from .runner_process import (
+	_safe_environment as _safe_environment,
+)
+from .runner_process import (
+	_snapshot_candidate_identity as _snapshot_candidate_identity,
+)
+from .runner_process import (
+	_tool_command as _tool_command,
+)
+from .runner_process import (
+	required_documents_result as required_documents_result,
+)
+from .runner_process import (
 	run as run,
 )
+from .runner_process import (
+	temporary_directory as temporary_directory,
+)
+from .runner_process import (
+	validate as validate,
+)
+from .runner_python_checks import (
+	_append_missing_component_check as _append_missing_component_check,
+)
+from .runner_python_checks import (
+	_append_missing_test_path_checks as _append_missing_test_path_checks,
+)
+from .runner_python_checks import (
+	_append_not_applicable_python_checks as _append_not_applicable_python_checks,
+)
+from .runner_python_checks import (
+	_append_unavailable_runtime_checks as _append_unavailable_runtime_checks,
+)
+from .runner_python_checks import (
+	_run_python_checks as _run_python_checks,
+)
+from .runner_python_checks import (
+	_run_python_component_checks as _run_python_component_checks,
+)
+from .runner_python_checks import (
+	_run_ready_python_component_checks as _run_ready_python_component_checks,
+)
+from .runner_python_checks import (
+	format_paths as format_paths,
+)
+from .runner_python_tools import (
+	_command_error as _command_error,
+)
+from .runner_python_tools import (
+	_command_results as _command_results,
+)
+from .runner_python_tools import (
+	_component_commands as _component_commands,
+)
+from .runner_python_tools import (
+	_execute_commands as _execute_commands,
+)
+from .runner_python_tools import (
+	_mark_component_checks_not_run as _mark_component_checks_not_run,
+)
+from .runner_python_tools import (
+	_native_cache_identity as _native_cache_identity,
+)
+from .runner_python_tools import (
+	_native_cache_repository_identity as _native_cache_repository_identity,
+)
+from .runner_python_tools import (
+	_native_tool_configuration as _native_tool_configuration,
+)
+from .runner_python_tools import (
+	_normalized_native_tool_options as _normalized_native_tool_options,
+)
+from .runner_python_tools import (
+	_record_command_result as _record_command_result,
+)
+from .runner_snapshot import (
+	_append_python_snapshot_checks as _append_python_snapshot_checks,
+)
+from .runner_snapshot import (
+	_append_snapshot_baseline_checks as _append_snapshot_baseline_checks,
+)
+from .runner_snapshot import (
+	_append_snapshot_secret_checks as _append_snapshot_secret_checks,
+)
+from .runner_snapshot import (
+	_check_snapshot as _check_snapshot,
+)
+from .runner_snapshot import (
+	_execute_snapshot_operation as _execute_snapshot_operation,
+)
+from .runner_snapshot import (
+	_load_snapshot_manifest as _load_snapshot_manifest,
+)
+from .runner_snapshot import (
+	_prepare_snapshot_environment as _prepare_snapshot_environment,
+)
+from .runner_snapshot import (
+	_record_admission_failure as _record_admission_failure,
+)
+from .runner_snapshot import (
+	_record_snapshot_failure as _record_snapshot_failure,
+)
+from .runner_snapshot import (
+	_record_workspace_failure as _record_workspace_failure,
+)
+from .runner_snapshot import (
+	_run_candidate_checks as _run_candidate_checks,
+)
+from .runner_snapshot import (
+	_run_snapshot as _run_snapshot,
+)
+from .runner_snapshot import (
+	_run_snapshot_operation as _run_snapshot_operation,
+)
+from .runner_snapshot import (
+	_snapshot_failure_stage as _snapshot_failure_stage,
+)
+from .runner_snapshot import (
+	audit as audit,
+)
+from .runner_snapshot import (
+	bootstrap_audit as bootstrap_audit,
+)
+from .runner_snapshot import (
+	bootstrap_check as bootstrap_check,
+)
+from .runner_snapshot import (
+	bootstrap_product_audit as bootstrap_product_audit,
+)
+from .runner_snapshot import (
+	check as check,
+)
 from .runner_web import (
-	_biome_asset_paths,
-	_biome_command,
-	_biome_component_commands,
-	_biome_unchecked_results,
+	_biome_asset_paths as _biome_asset_paths,
+)
+from .runner_web import (
+	_biome_command as _biome_command,
+)
+from .runner_web import (
+	_biome_component_commands as _biome_component_commands,
+)
+from .runner_web import (
+	_biome_inventory as _biome_inventory,
+)
+from .runner_web import (
+	_biome_unchecked_results as _biome_unchecked_results,
+)
+from .runner_web import (
+	_fixed_check_result as _fixed_check_result,
+)
+from .runner_web import (
+	_is_excluded as _is_excluded,
+)
+from .runner_web import (
+	_is_link as _is_link,
+)
+from .runner_web import (
+	_run_web_checks as _run_web_checks,
+)
+from .runner_web import (
+	_unsafe_web_path as _unsafe_web_path,
+)
+from .runner_web import (
+	_web_assets as _web_assets,
+)
+from .runner_web import (
+	_web_budget_check as _web_budget_check,
+)
+from .runner_web import (
+	_web_budget_result as _web_budget_result,
+)
+from .runner_web import (
+	_web_check_results as _web_check_results,
 )
 from .runner_web import (
 	web_budget_results as web_budget_results,
 )
-from .runtime import RuntimeUnavailable
-from .secrets import secret_audit_result, secret_candidate_result, secret_history_result
-from .snapshot import SnapshotError, candidate_snapshot
-from .temp_workspace import TemporaryWorkspaceError, temporary_workspace
+from .runtime import (
+	RuntimeIdentity as RuntimeIdentity,
+)
+from .runtime import (
+	RuntimeUnavailable as RuntimeUnavailable,
+)
+from .runtime import (
+	runtime_fingerprint as runtime_fingerprint,
+)
+from .secrets import (
+	secret_audit_result as secret_audit_result,
+)
+from .secrets import (
+	secret_candidate_result as secret_candidate_result,
+)
+from .secrets import (
+	secret_history_result as secret_history_result,
+)
+from .snapshot import (
+	CandidateSnapshot as CandidateSnapshot,
+)
+from .snapshot import (
+	SnapshotError as SnapshotError,
+)
+from .snapshot import (
+	candidate_snapshot as candidate_snapshot,
+)
+from .snapshot import (
+	remove_snapshot as remove_snapshot,
+)
+from .temp_workspace import TemporaryWorkspaceError as _TemporaryWorkspaceError
+from .temp_workspace import temporary_workspace as _temporary_workspace
 
+ManifestPythonComponent = _ManifestPythonComponent
+TemporaryWorkspaceError = _TemporaryWorkspaceError
+temporary_workspace = _temporary_workspace
+
+_LOGGER = logging.getLogger(__name__)
+MANIFEST_NAME = "quality-gate.toml"
 POLICY_DIR = Path(__file__).resolve().parent / "policy"
 EXIT_UNCHECKED = 2
+MAX_COMMAND_OUTPUT_CHARS = 16_384
+MAX_COMMAND_OUTPUT_BYTES = MAX_COMMAND_OUTPUT_CHARS * 4 + 1
+RUFF_THREADS_ENV = "QUALITY_GATE_RUFF_THREADS"
+DEFAULT_RUFF_THREADS = 4
+MAX_RUFF_THREADS = 64
+MAX_DEPTRY_REPORT_BYTES = 1024 * 1024
+MAX_DEPTRY_SOURCE_BYTES = 8 * 1024 * 1024
+MAX_DEPTRY_TEXT_CHARS = 1000
+PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
+CHECK_ID_COMPONENT_PARTS = 3
+_PYTEST_SUMMARY_COUNT = re.compile(
+	(
+		r"\b(?P<count>\d+)\s+"
+		r"(?P<outcome>passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?)\b"
+	),
+	re.IGNORECASE,
+)
+_PYTEST_SUMMARY_DURATION = re.compile(r"\bin\s+\d+(?:\.\d+)?s\b", re.IGNORECASE)
+_PYTEST_NO_TESTS = re.compile(r"\bno tests ran\b", re.IGNORECASE)
+BIOME_POLICY = "biome.toml"
+BIOME_CONFIG = "biome.json"
+BIOME_MAX_FILE_BYTES = 5 * 1024 * 1024
+_DEPTRY_MODULE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$")
+_DEPTRY_INLINE_IGNORE = re.compile(r"#\s*deptry:\s*ignore(?:\s*\[[A-Z0-9,\s]+\])?(?=\s|$)")
+_DEPTRY_SUPPRESSION_KEYS = {
+	"exclude",
+	"extend_exclude",
+	"ignore",
+	"ignore_notebooks",
+	"per_rule_ignores",
+}
 
 
-def _run_web_checks(
-	actual_root: Path,
-	manifest: Manifest,
-	prepared: PreparedEnvironment,
-	*,
-	deadline: float,
-) -> list[CheckResult]:
-	if not manifest.web:
-		return []
-	commands: list[tuple[str, list[str], int]] = []
-	pre_results: list[CheckResult] = []
-	for component_index, component in enumerate(manifest.web, start=1):
-		try:
-			paths = _biome_asset_paths(actual_root, component, component_index)
-			command = _biome_command(prepared)
-		except (OSError, QualityGateError) as error:
-			quality_error = (
-				error
-				if isinstance(error, QualityGateError)
-				else QualityGateError(
-					str(error),
-					check_id="runtime.policy",
-					exit_code=EXIT_UNCHECKED,
-					recovery_action=(
-						"restore the pinned Biome policy and web assets, "
-						"then retry the quality gate"
-					),
-				)
-			)
-			pre_results.extend(
-				_biome_unchecked_results(
-					component_index,
-					str(quality_error),
-					recovery_action=quality_error.recovery_action,
-				)
-			)
-			continue
-		commands.extend(
-			_biome_component_commands(
-				component_index, command, paths, manifest.repository.command_timeout_seconds
-			)
-		)
-	with temporary_directory(actual_root) as temporary_path:
-		executed, errors, _ = _execute_commands(
-			actual_root,
-			_safe_environment(temporary_path),
-			commands,
-			manifest.repository.command_timeout_seconds,
-			deadline,
-		)
-	return [*pre_results, *_command_results(executed, errors, {})]
+class OutputReadError(RuntimeError):
+	"""A subprocess output reader could not finish safely."""
 
 
-def _web_check_results(
-	actual_root: Path,
-	manifest: Manifest,
-	prepared: PreparedEnvironment,
-	results: list[CheckResult],
-	*,
-	deadline: float,
-) -> list[CheckResult]:
-	try:
-		return _run_web_checks(actual_root, manifest, prepared, deadline=deadline)
-	except (QualityGateError, DistributionError, RuntimeUnavailable, OSError) as error:
-		existing_biome_ids = {result.check_id for result in results if ".biome_" in result.check_id}
-		fallback: list[CheckResult] = []
-		for component_index in range(1, len(manifest.web) + 1):
-			for result in _biome_unchecked_results(
-				component_index,
-				redact(str(error)),
-				recovery_action="restore the pinned Biome policy and retry the quality gate",
-			):
-				if result.check_id not in existing_biome_ids:
-					fallback.append(result)
-					existing_biome_ids.add(result.check_id)
-		return fallback
+class QualityGateError(RuntimeError):
+	"""A configuration or quality check prevents completion."""
+
+	exit_code = 1
+
+	def __init__(
+		self,
+		message: str,
+		*,
+		check_id: str = "runtime.command",
+		exit_code: int = 1,
+		recovery_action: str = "restore verification and retry the quality gate",
+	) -> None:
+		super().__init__(redact(message))
+		self.check_id = check_id
+		self.exit_code = exit_code
+		self.recovery_action = recovery_action
 
 
-def _run_python_snapshot_checks(
-	actual_root: Path,
-	manifest: Manifest,
-	components: list[PythonComponent],
-	prepared: PreparedEnvironment,
-	*,
-	deadline: float,
-) -> list[CheckResult]:
-	policy_path = prepared.policy_root / "quality_gate" / "policy"
-	if not policy_path.is_dir():
-		raise QualityGateError(
-			"cached policy release has no policy directory",
-			check_id="runtime.policy",
-			exit_code=EXIT_UNCHECKED,
-			recovery_action="sync a complete policy release and retry the quality gate",
-		)
-	return _run_python_checks(actual_root, manifest, components, prepared, deadline=deadline)
+_FIXED_CHECK_SCOPES = {
+	"manifest.documents": "staged required documents",
+	"secrets.candidate": "staged candidate tree",
+	"secrets.history": "requested base-to-head Git range",
+	"secrets.audit": "all reachable Git history",
+}
 
 
-def _execute_commands(
-	actual_root: Path,
-	environment: dict[str, str],
-	commands: list[tuple[str, list[str], int]],
-	component_timeout: int,
-	deadline: float,
-) -> tuple[list[str], list[QualityGateError], dict[str, str]]:
-	executed: list[str] = []
-	run_errors: list[QualityGateError] = []
-	run_outputs: dict[str, str] = {}
-	for check_id, command, timeout in commands:
-		executed.append(check_id)
-		try:
-			command_environment = (
-				_ruff_environment(environment)
-				if check_id.endswith((".ruff", ".format"))
-				else environment
-			)
-			output = run(
-				command,
-				actual_root,
-				command_environment,
-				timeout=_remaining(deadline, max(timeout, component_timeout)),
-			)
-			if output and check_id.endswith(".coverage_report"):
-				run_outputs[check_id] = output
-		except QualityGateError as error:
-			error.check_id = check_id
-			run_errors.append(error)
-	return executed, run_errors, run_outputs
+class _OperationResults(list[CheckResult]):
+	"""Retain each observed check immediately so a later timeout cannot erase it."""
 
+	def __init__(self, root: Path) -> None:
+		super().__init__()
+		self.root = root
+		self.manifest: Manifest | None = None
 
-def _run_python_checks(
-	actual_root: Path,
-	manifest: Manifest,
-	components: list[PythonComponent],
-	prepared: PreparedEnvironment,
-	*,
-	deadline: float,
-) -> list[CheckResult]:
-	results: list[CheckResult] = []
-	with temporary_directory(actual_root) as temporary_path:
-		environment = _safe_environment(temporary_path)
-		temporary_root = Path(temporary_path)
-		environment["QUALITY_GATE_POLICY_ROOT"] = str(prepared.policy_root)
-		run_errors: list[QualityGateError] = []
-		executed: list[str] = []
-		run_outputs: dict[str, str] = {}
-		for component_index, component in enumerate(components, start=1):
-			if not component.path_exists:
-				results.append(
-					CheckResult(
-						check_id=f"python.component_{component_index}.path",
-						status=Status.UNCHECKED,
-						summary="Python component path is unavailable",
-						findings=(
-							Finding(
-								path=str(component.path.relative_to(actual_root)),
-								message="declared component path does not exist",
-								action="restore the declared component path",
-							),
-						),
-						recovery_action=(
-							"restore the declared component path and retry the quality gate"
-						),
-					)
-				)
-				results.append(
-					_dependency_hygiene_result(
-						actual_root,
-						manifest,
-						component,
-						prepared,
-						component_index,
-						None,
-						temporary_root / f"deptry-{component_index}.json",
-						deadline,
-						_run_bounded_subprocess,
-					)
-				)
-				continue
-			for missing_path_index, missing_path in enumerate(
-				component.missing_test_paths, start=1
-			):
-				results.append(
-					CheckResult(
-						check_id=f"python.component_{component_index}.test_path_{missing_path_index}",
-						status=Status.UNCHECKED,
-						summary="declared test path is unavailable",
-						findings=(
-							Finding(
-								path=str(missing_path.relative_to(actual_root)),
-								message="declared test path does not exist",
-								action="restore the declared test path",
-							),
-						),
-						recovery_action="restore the declared test path and retry the quality gate",
-					)
-				)
-			try:
-				python_executable = _runtime_python(prepared, component_index)
-			except QualityGateError as error:
-				results.append(_error_result(error))
-				results.append(
-					_dependency_hygiene_result(
-						actual_root,
-						manifest,
-						component,
-						prepared,
-						component_index,
-						None,
-						temporary_root / f"deptry-{component_index}.json",
-						deadline,
-						_run_bounded_subprocess,
-					)
-				)
-				continue
-			results.append(
-				_dependency_hygiene_result(
-					actual_root,
-					manifest,
-					component,
-					prepared,
-					component_index,
-					python_executable,
-					temporary_root / f"deptry-{component_index}.json",
-					deadline,
-					_run_bounded_subprocess,
-				)
-			)
-			component_executed, component_errors, component_outputs = _execute_commands(
-				actual_root,
-				environment,
-				_component_commands(
-					actual_root, manifest, component, prepared, component_index, python_executable
-				),
-				component.timeout_seconds,
-				deadline,
-			)
-			executed.extend(component_executed)
-			run_errors.extend(component_errors)
-			run_outputs.update(component_outputs)
-	results.extend(_command_results(executed, run_errors, run_outputs))
-	for component_index, component in enumerate(components, start=1):
-		tests_not_applicable = component.tests is None
-		if not component.typecheck:
-			results.append(
-				CheckResult(
-					check_id=f"python.component_{component_index}.mypy",
-					status=Status.NOT_APPLICABLE,
-					summary="typing is explicitly disabled by the component contract",
-					recovery_action="enable typecheck when component typing is required",
-				)
-			)
-		has_coverage = _has_pinned_coverage(prepared)
-		if tests_not_applicable:
-			results.append(
-				CheckResult(
-					check_id=f"python.component_{component_index}.pytest",
-					status=Status.NOT_APPLICABLE,
-					summary="tests are explicitly not applicable",
-					recovery_action="declare test paths if tests apply",
-				)
-			)
-		if tests_not_applicable or not has_coverage:
-			results.append(
-				CheckResult(
-					check_id=f"python.component_{component_index}.coverage",
-					status=Status.NOT_APPLICABLE,
-					summary=(
-						"coverage is not applicable without tests"
-						if tests_not_applicable and has_coverage
-						else "coverage provider is not in the pinned policy inventory"
-					),
-					recovery_action=(
-						"declare test paths before collecting report-only coverage"
-						if tests_not_applicable and has_coverage
-						else (
-							"add a pinned coverage provider only when report-only coverage is "
-							"required"
-						)
-					),
-				)
-			)
-	return results
+	def append(self, result: CheckResult) -> None:
+		operation = current_operation()
+		if operation is not None:
+			operation.record_unmeasured_result(result, scope=self.scope_for(result.check_id))
+		super().append(result)
 
+	def extend(self, results: Iterable[CheckResult]) -> None:
+		for result in results:
+			self.append(result)
 
-def format_paths(root: Path | None, paths: tuple[str, ...]) -> None:
-	"""Format only the explicit Python paths with the pinned Ruff release."""
-	actual_root = repository_root(root)
-	try:
-		manifest = load_manifest(actual_root)
-		components = load_components(actual_root)
-	except ValidationError as error:
-		raise _manifest_error(error) from error
-	if not components:
-		raise QualityGateError(
-			"no Python component is declared",
-			check_id="python.components",
-			exit_code=EXIT_UNCHECKED,
-			recovery_action="declare a Python component before formatting Python files",
-		)
-	prepared = prepare(actual_root)
-	deadline = time.monotonic() + manifest.repository.gate_timeout_seconds
-	selected: dict[int, list[str]] = {}
-	for raw_path in paths:
-		candidate = relative_path(actual_root, raw_path, "format path")
-		if not candidate.exists():
-			raise QualityGateError(
-				f"format path does not exist: {raw_path}",
-				check_id="python.format",
-				exit_code=EXIT_UNCHECKED,
-				recovery_action=f"restore {raw_path} and retry format",
-			)
-		for index, component in enumerate(components):
-			if candidate == component.path or component.path in candidate.parents:
-				selected.setdefault(index, []).append(str(candidate.relative_to(actual_root)))
-				break
-		else:
-			raise QualityGateError(
-				f"format path is outside every Python component: {raw_path}",
-				check_id="python.format",
-				exit_code=EXIT_UNCHECKED,
-				recovery_action="format only paths declared by a Python component",
-			)
-	with temporary_directory(actual_root) as temporary_path:
-		environment = _safe_environment(temporary_path)
-		format_errors: list[QualityGateError] = []
-		for index, explicit_paths in selected.items():
-			python_executable = _runtime_python(prepared, index + 1)
-			try:
-				run(
-					[
-						*_tool_command(prepared, python_executable, "ruff"),
-						"format",
-						"--config",
-						str(prepared.policy_root / "quality_gate" / "policy" / "ruff.toml"),
-						*explicit_paths,
-					],
-					actual_root,
-					environment,
-					timeout=_remaining(deadline, manifest.repository.command_timeout_seconds),
-				)
-			except QualityGateError as error:
-				format_errors.append(error)
-		if format_errors:
-			raise QualityGateError(
-				"\n".join(str(error) for error in format_errors),
-				check_id="python.format",
-				exit_code=(
-					EXIT_UNCHECKED
-					if any(error.exit_code == EXIT_UNCHECKED for error in format_errors)
-					else 1
-				),
-				recovery_action="restore formatting verification and retry format",
-			)
-
-	emit("format: complete - stage the changes, then run check")
-
-
-def _check_snapshot(
-	actual_root: Path,
-	*,
-	verbose: bool = False,
-	repository_root: Path | None = None,
-	index_file: Path | None = None,
-	base: str | None = None,
-	head: str | None = None,
-	mode: Literal["check", "audit"] = "check",
-	policy_release: str | None = None,
-) -> Verdict:
-	actual_root = actual_root.resolve()
-	try:
-		manifest = load_manifest(actual_root)
-	except ValidationError as error:
-		verdict = Verdict((_error_result(_manifest_error(error)),))
-		return verdict
-	contract_result = required_documents_result(actual_root, manifest)
-	repository_results = [
-		*git_integrity_results(
-			actual_root,
-			manifest,
-			repository=repository_root or actual_root,
-			index_file=index_file,
-		),
-		workflow_result(
-			actual_root,
-			manifest,
-			repository_root=repository_root or actual_root,
-		),
-		*documentation_results(actual_root, manifest),
-	]
-	results = [contract_result, *repository_results]
-	results.append(lessons_result(actual_root, is_complete_required=mode == "audit"))
-	results.extend(web_budget_results(actual_root, manifest))
-	try:
-		components = load_components(actual_root)
-		prepared = (
-			prepare_bootstrap(
-				actual_root,
-				policy_release=policy_release,
-				repository_root=repository_root or actual_root,
-			)
-			if policy_release is not None
-			else prepare(actual_root, repository_root=repository_root or actual_root)
-		)
-	except QualityGateError as error:
-		return Verdict((*results, _error_result(error)))
-	except (DistributionError, RuntimeUnavailable, OSError) as error:
-		quality_error = QualityGateError(
-			str(error),
-			check_id="runtime.policy",
-			exit_code=EXIT_UNCHECKED,
-			recovery_action="run sync and setup, then retry the quality gate",
-		)
-		return Verdict((*results, _error_result(quality_error)))
-	history_base, history_head = _ci_history_refs(base, head)
-	results.append(secret_candidate_result(actual_root, manifest, prepared))
-	if mode == "audit":
-		results.append(secret_audit_result(repository_root or actual_root, manifest, prepared))
-	else:
-		results.append(
-			secret_history_result(
-				repository_root or actual_root,
-				manifest,
-				prepared,
-				base=history_base,
-				head=history_head,
-			)
-		)
-	_progress("repository checks completed; 1 stage remaining.")
-	gate_deadline = time.monotonic() + manifest.repository.gate_timeout_seconds
-	results.extend(
-		_web_check_results(
-			actual_root,
-			manifest,
-			prepared,
-			results,
-			deadline=gate_deadline,
-		)
-	)
-	if not components:
-		results.append(
+	def append_not_run(self, check_id: str, scope: str, reason: str) -> None:
+		"""Retain an expected check that a completed prerequisite prevented."""
+		operation = current_operation()
+		if operation is not None:
+			operation.note_not_run(check_id, scope, reason)
+		self.append(
 			CheckResult(
-				check_id="python.components",
-				status=Status.NOT_APPLICABLE,
-				summary="no Python component is declared",
-				recovery_action="declare a Python component if Python checks apply",
+				check_id,
+				Status.UNCHECKED,
+				reason,
+				recovery_action="complete the prerequisite and rerun the affected checks",
 			)
 		)
-	else:
-		try:
-			run_results = _run_python_snapshot_checks(
-				actual_root,
-				manifest,
-				components,
-				prepared,
-				deadline=gate_deadline,
-			)
-		except QualityGateError as error:
-			return Verdict((*results, _error_result(error)))
-		except (DistributionError, RuntimeUnavailable, OSError) as error:
-			quality_error = QualityGateError(
-				str(error),
-				check_id="runtime.policy",
-				exit_code=EXIT_UNCHECKED,
-				recovery_action="run sync and setup, then retry the quality gate",
-			)
-			return Verdict((*results, _error_result(quality_error)))
-		results.extend(run_results)
-	_progress("component checks completed; preparing report.")
-	verdict = Verdict(tuple(results))
-	return verdict
+
+	def scope_for(self, check_id: str) -> str:
+		manifest = self.manifest
+		parts = check_id.split(".")
+		python_index = _component_check_index(parts, "python")
+		if (
+			manifest is not None
+			and python_index is not None
+			and python_index < len(manifest.python)
+		):
+			return _python_component_check_scope(self.root, manifest.python[python_index], parts[2])
+		web_index = _component_check_index(parts, "web")
+		if manifest is not None and web_index is not None and web_index < len(manifest.web):
+			return manifest.web[web_index].root
+		if check_id in _FIXED_CHECK_SCOPES:
+			return _FIXED_CHECK_SCOPES[check_id]
+		if check_id.startswith("repository.git."):
+			return "staged repository tree and Git index"
+		if check_id.startswith("repository.documentation."):
+			return "staged repository documentation"
+		if check_id.startswith("web."):
+			return "declared web component assets"
+		if check_id.startswith("python."):
+			return "declared Python components"
+		if check_id.startswith("runtime."):
+			return "selected policy and verification runtimes"
+		return "staged candidate"
 
 
-def check(
-	root: Path | None = None,
-	*,
-	verbose: bool = False,
-	base: str | None = None,
-	head: str | None = None,
-) -> Verdict:
-	"""Run the complete quality contract against the exact staged candidate."""
-
-	actual_root = repository_root(root)
-	verdict = _run_snapshot(
-		actual_root,
-		verbose=verbose,
-		base=base,
-		head=head,
-		mode="check",
-	)
-	emit(render(verdict, verbose=verbose))
-	return verdict
+@dataclass(frozen=True)
+class PythonComponent:
+	path: Path
+	tests: Path | None
+	requirements: Path | None
+	typecheck: bool
+	test_paths: tuple[Path, ...] = ()
+	timeout_seconds: int = 300
+	missing_test_paths: tuple[Path, ...] = ()
+	path_exists: bool = True
+	dependency_inputs: tuple[Path, ...] = ()
 
 
-def _run_snapshot(
-	actual_root: Path,
-	*,
-	verbose: bool = False,
-	base: str | None = None,
-	head: str | None = None,
-	mode: Literal["check", "audit"] = "check",
-	policy_release: str | None = None,
-) -> Verdict:
-	"""Run one candidate snapshot and convert snapshot failures to a verdict."""
-	_progress("this check may take a long time; wait for completion without polling.")
-	try:
-		admission = nullcontext() if running_in_ci() else gate_admission()
-		with admission:
-			with temporary_workspace(actual_root):
-				with candidate_snapshot(actual_root) as snapshot:
-					_progress("preparation completed; 2 stages remaining.")
-					verdict = _check_snapshot(
-						snapshot.root,
-						verbose=verbose,
-						repository_root=actual_root,
-						index_file=getattr(snapshot, "repository_index", None),
-						base=base,
-						head=head,
-						mode=mode,
-						policy_release=policy_release,
-					)
-	except AdmissionError as error:
-		quality_error = QualityGateError(
-			str(error),
-			check_id="runtime.admission",
-			exit_code=EXIT_UNCHECKED,
-			recovery_action=error.recovery_action,
+@dataclass(frozen=True, slots=True)
+class BiomeBinary:
+	version: str
+	path: str
+	sha256: str
+
+
+_PYTHON_MODULE_COMMAND_LENGTH = 3
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonCheckContext:
+	"""Inputs shared by every outcome of one candidate component's checks."""
+
+	root: Path
+	manifest: Manifest
+	component: PythonComponent
+	prepared: PreparedEnvironment
+	component_index: int
+	report_path: Path
+	deadline: float
+
+	def dependency_result(self, python_executable: Path | None = None) -> CheckResult:
+		return _dependency_hygiene_result(
+			self.root,
+			self.manifest,
+			self.component,
+			self.prepared,
+			self.component_index,
+			python_executable,
+			self.report_path,
+			self.deadline,
 		)
-		verdict = Verdict((_error_result(quality_error),))
-	except SnapshotError as error:
-		quality_error = QualityGateError(
-			error.message,
-			check_id="candidate.snapshot",
-			exit_code=EXIT_UNCHECKED,
-			recovery_action=f"restore a stable supported Git index and run {mode} again",
-		)
-		verdict = Verdict((_error_result(quality_error),))
-	except TemporaryWorkspaceError as error:
-		quality_error = QualityGateError(
-			str(error),
-			check_id="temporary.workspace",
-			exit_code=EXIT_UNCHECKED,
-			recovery_action=(
-				"restore a writable repository temp directory and retry the quality gate"
-			),
-		)
-		verdict = Verdict((_error_result(quality_error),))
-	return verdict
-
-
-def bootstrap_check(
-	root: Path,
-	*,
-	policy_release: str,
-	base: str | None = None,
-	head: str | None = None,
-) -> Verdict:
-	"""Run the current checkout against a previous immutable policy release."""
-	actual_root = repository_root(root)
-	verdict = _run_snapshot(
-		actual_root,
-		base=base,
-		head=head,
-		policy_release=policy_release,
-	)
-	emit(render(verdict))
-	return verdict
-
-
-def audit(root: Path | None = None, *, verbose: bool = False) -> Verdict:
-	"""Run every implemented domain and an explicit full-history secret audit."""
-	actual_root = repository_root(root)
-	verdict = _run_snapshot(
-		actual_root,
-		verbose=verbose,
-		mode="audit",
-	)
-	emit(render(verdict, verbose=verbose))
-	return verdict
-
-
-def bootstrap_audit(
-	root: Path,
-	*,
-	policy_release: str,
-	verbose: bool = False,
-) -> Verdict:
-	"""Audit one candidate using an explicitly selected immutable policy release."""
-	actual_root = repository_root(root)
-	verdict = _run_snapshot(
-		actual_root,
-		verbose=verbose,
-		mode="audit",
-		policy_release=policy_release,
-	)
-	emit(render(verdict, verbose=verbose))
-	return verdict

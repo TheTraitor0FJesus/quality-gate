@@ -24,6 +24,7 @@ import pytest
 from quality_gate import admission
 from quality_gate.contracts import DEFAULT_GATE_TIMEOUT_SECONDS
 from quality_gate.hooks import commit_gate_timeout_seconds
+from quality_gate.operation import OPERATION_CLEANUP_SECONDS
 
 _GATE_TIMEOUT_SECONDS = 3
 _QUEUE_TIMEOUT_SECONDS = 3
@@ -274,7 +275,10 @@ gate_timeout_seconds = {_GATE_TIMEOUT_SECONDS}
 	monkeypatch.delenv("GIT_INDEX_FILE", raising=False)
 	assert bridge._release_wheel(release_version) == candidate_wheel
 	outer_timeout = commit_gate_timeout_seconds(actual_staged_manifest)
-	assert outer_timeout == _GATE_TIMEOUT_SECONDS + _QUEUE_TIMEOUT_SECONDS
+	assert (
+		outer_timeout
+		== _GATE_TIMEOUT_SECONDS + _QUEUE_TIMEOUT_SECONDS + OPERATION_CLEANUP_SECONDS
+	)
 	return repository, staged_manifest_path, queue_root, outer_timeout
 
 
@@ -308,7 +312,7 @@ def _start_native_launch(
 		"        for name in ('CI', 'GITHUB_ACTIONS', 'QUALITY_GATE_ADMISSION_CI')\n"
 		"    )\n"
 		"    if ci:\n"
-		"        return gate\n"
+		f"        return gate + {OPERATION_CLEANUP_SECONDS}\n"
 		"    raw = os.environ.get('QUALITY_GATE_QUEUE_TIMEOUT_SECONDS')\n"
 		"    if raw is None:\n"
 		f"        queue = {_NATIVE_DEFAULT_QUEUE_TIMEOUT_SECONDS}\n"
@@ -318,7 +322,7 @@ def _start_native_launch(
 		"            raise ValueError('invalid local Quality Gate queue timeout')\n"
 		"    else:\n"
 		"        raise ValueError('invalid local Quality Gate queue timeout')\n"
-		"    return gate + queue\n"
+		f"    return gate + queue + {OPERATION_CLEANUP_SECONDS}\n"
 		"spec = importlib.util.spec_from_file_location(\n"
 		"    'native_quality_gate_adapter', sys.argv[1])\n"
 		"bridge = importlib.util.module_from_spec(spec)\n"
@@ -478,7 +482,12 @@ def test_proposed_native_wrapper_preserves_nested_ci_context(
 	with _occupied_slots(queue_root, project_root, holder_environment):
 		monkeypatch.setenv("QUALITY_GATE_ADMISSION_CI", "1")
 		monkeypatch.setenv(admission.QUEUE_TIMEOUT_ENV, "invalid")
-		launch = _start_native_launch(project_root, repository, staged_path, _GATE_TIMEOUT_SECONDS)
+		launch = _start_native_launch(
+			project_root,
+			repository,
+			staged_path,
+			_GATE_TIMEOUT_SECONDS + OPERATION_CLEANUP_SECONDS,
+		)
 		try:
 			return_code, stdout, stderr = _finish_native_launch(launch, _GATE_TIMEOUT_SECONDS + 2)
 			assert return_code == _UNCHECKED_EXIT, stdout + stderr

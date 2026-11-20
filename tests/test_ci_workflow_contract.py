@@ -132,15 +132,23 @@ def test_reusable_workflow_has_one_stable_job_and_detects_private_push_bypass() 
 	assert "private GitHub Free repositories" in workflow
 
 
-def test_provider_verification_budgets_fit_the_50_minute_ci_job() -> None:
-	"""Keep nested Python and Gate deadlines below the workflow's outer timeout."""
+def test_provider_verification_budgets_fit_the_ci_job() -> None:
+	"""Keep component and Gate deadlines nested below the CI job deadline."""
 	manifest = tomllib.loads((REPOSITORY / "quality-gate.toml").read_text(encoding="utf-8"))
 	defaults = manifest["repository"]["defaults"]
+	workflow = WORKFLOW.read_text(encoding="utf-8")
+	job_timeout_minutes = int(
+		next(
+			line.strip().split(":", maxsplit=1)[1]
+			for line in workflow.splitlines()
+			if line.strip().startswith("timeout-minutes:")
+		)
+	)
+	test_timeout = defaults["test_timeout_seconds"]
+	component_timeout = manifest["python"][0]["timeout_seconds"]
+	gate_timeout = defaults["gate_timeout_seconds"]
 
-	assert defaults["test_timeout_seconds"] == 30 * 60
-	assert defaults["gate_timeout_seconds"] == 40 * 60
-	assert defaults["test_timeout_seconds"] < defaults["gate_timeout_seconds"] < 50 * 60
-	assert "timeout-minutes: 50" in WORKFLOW.read_text(encoding="utf-8")
+	assert 0 < test_timeout <= component_timeout < gate_timeout < job_timeout_minutes * 60
 
 
 def test_dependabot_groups_monthly_version_updates_separately_from_security() -> None:

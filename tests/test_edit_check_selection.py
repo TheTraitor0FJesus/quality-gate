@@ -26,6 +26,7 @@ from test_edit_check import (
 )
 
 from quality_gate import __version__
+from quality_gate.admission import running_in_ci
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import ExternalTool, ReleaseManifest
 from quality_gate.distribution import verify_release as verify_release_cache
@@ -239,7 +240,8 @@ def test_wheel_on_pythonpath_checks_working_files_without_extraction(
 	payload = request(project, wheel_cache, "example.py")
 	payload["baseline"]["policy_release"] = policy
 	wheel_hash = digest(engine_wheel.read_bytes())
-	for expected_processes in (FRESH_PROCESSES, REUSED_PROCESSES):
+	second_processes = FRESH_PROCESSES if running_in_ci() else REUSED_PROCESSES
+	for expected_processes in (FRESH_PROCESSES, second_processes):
 		payload["files"][0]["sha256"] = digest(path.read_bytes())
 		payload["deadline_unix_ms"] = int(time.time() * 1000) + 10_000
 		completed = subprocess.run(

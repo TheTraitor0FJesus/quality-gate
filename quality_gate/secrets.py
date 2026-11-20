@@ -15,6 +15,7 @@ from .contracts import CheckResult, Finding, Manifest, Status, fingerprint_secre
 from .distribution import ReleaseManifest
 from .edit_process import run_process
 from .edit_protocol import FIRST_PRINTABLE_CHARACTER, MAX_TOOL_BYTES, EditError
+from .operation import current_operation, run_probe
 
 _SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _GITLEAKS = "gitleaks"
@@ -65,13 +66,23 @@ def _scanner_path(prepared: PreparedScanner) -> Path | None:
 def _run_scanner(command: list[str], root: Path, *, timeout: float) -> tuple[int, bytes]:
 	"""Keep the unredacted fingerprint source only in bounded process memory."""
 	try:
-		code, report, diagnostics = run_process(
-			command,
-			root=root,
-			environment=_scanner_environment(),
-			deadline=time.monotonic() + timeout,
-			own_tree=True,
-		)
+		operation = current_operation()
+		if operation is None:
+			code, report, diagnostics = run_process(
+				command,
+				root=root,
+				environment=_scanner_environment(),
+				deadline=time.monotonic() + timeout,
+				own_tree=True,
+			)
+		else:
+			code, report, diagnostics = operation.run_process(
+				command,
+				root=root,
+				environment=_scanner_environment(),
+				timeout_seconds=timeout,
+				limit=MAX_TOOL_BYTES,
+			)
 		return (-1, b"") if diagnostics else (code, report)
 	except (OSError, EditError):
 		return -1, b""
@@ -79,7 +90,9 @@ def _run_scanner(command: list[str], root: Path, *, timeout: float) -> tuple[int
 
 def _scanner_environment() -> dict[str, str]:
 	allowed = {"LANG", "LC_ALL", "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR"}
-	return {key: value for key, value in os.environ.items() if key in allowed}
+	environment = {key: value for key, value in os.environ.items() if key in allowed}
+	environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"})
+	return environment
 
 
 def _safe_location(value: object, root: Path) -> str:
@@ -209,6 +222,7 @@ def _scan(
 	mode: str,
 	log_opts: str | None = None,
 	include_commit: bool = False,
+	timeout: float | None = None,
 ) -> CheckResult:
 	scanner = _scanner_path(prepared)
 	if scanner is None:
@@ -217,7 +231,7 @@ def _scan(
 	if log_opts is not None:
 		command.extend(["--log-opts", log_opts])
 	returncode, report = _run_scanner(
-		command, root, timeout=manifest.repository.command_timeout_seconds
+		command, root, timeout=timeout or manifest.repository.command_timeout_seconds
 	)
 	try:
 		findings = parse_secret_report(report, root, include_commit=include_commit)
@@ -234,6 +248,24 @@ def _scan(
 		"no credentials detected" if not findings else "credentials detected",
 		findings,
 		manifest,
+	)
+
+
+def secret_push_commit_result(
+	repository: Path, manifest: Manifest, prepared: PreparedScanner, commit: str, *, timeout: float
+) -> CheckResult:
+	"""Scan every parent patch of one validated outgoing commit, including roots."""
+	if not re.fullmatch(r"[0-9a-f]{40}", commit) or timeout <= 0:
+		return _unchecked("secrets.history", "outgoing history is unavailable")
+	return _scan(
+		repository,
+		manifest,
+		prepared,
+		check_id="secrets.history",
+		mode="git",
+		log_opts=f"--root -m --no-ext-diff --no-textconv --no-walk=unsorted {commit}",
+		include_commit=True,
+		timeout=timeout,
 	)
 
 
@@ -273,7 +305,7 @@ def _resolve_commit(repository: Path, reference: str, timeout: int) -> str | Non
 	resolved: set[str] = set()
 	for candidate in dict.fromkeys(refs):
 		try:
-			result = subprocess.run(
+			result = run_probe(
 				[
 					"git",
 					"-C",
@@ -283,8 +315,7 @@ def _resolve_commit(repository: Path, reference: str, timeout: int) -> str | Non
 					"--end-of-options",
 					f"{candidate}^{{commit}}",
 				],
-				capture_output=True,
-				check=False,
+				cwd=repository,
 				timeout=timeout,
 			)
 		except (OSError, subprocess.TimeoutExpired):
@@ -307,10 +338,9 @@ def _resolve_commit(repository: Path, reference: str, timeout: int) -> str | Non
 
 def _is_shallow(repository: Path, timeout: int) -> bool:
 	try:
-		result = subprocess.run(
+		result = run_probe(
 			["git", "-C", str(repository), "rev-parse", "--is-shallow-repository"],
-			capture_output=True,
-			check=False,
+			cwd=repository,
 			timeout=timeout,
 		)
 	except (OSError, subprocess.TimeoutExpired):

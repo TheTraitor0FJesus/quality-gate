@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -20,6 +19,7 @@ from .distribution import (
 	ReleaseManifest,
 	locked,
 )
+from .operation import run_probe
 
 
 class RuntimeErrorBaseError(RuntimeError):
@@ -115,13 +115,10 @@ def _python_for_version(version: str) -> Path:
 		path = shutil.which(candidate)
 		if path is None:
 			continue
-		result = subprocess.run(
+		result = run_probe(
 			[path, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
-			capture_output=True,
-			text=True,
-			check=False,
 		)
-		if result.returncode == 0 and result.stdout.strip() == requested:
+		if result.returncode == 0 and result.stdout.decode("utf-8", "replace").strip() == requested:
 			return Path(path).resolve()
 	raise RuntimeUnavailable(f"Python {requested} is not installed")
 
@@ -207,12 +204,9 @@ class RuntimeManager:
 					else ("--without-pip",)
 				)
 				try:
-					result = subprocess.run(
+					result = run_probe(
 						[str(python), "-m", "venv", *venv_options, str(staged)],
 						cwd=root,
-						capture_output=True,
-						text=True,
-						check=False,
 					)
 				except OSError as error:
 					raise RuntimeUnavailable(
@@ -246,7 +240,7 @@ class RuntimeManager:
 			if tool.path.lower().endswith(".whl")
 		)
 		if wheels:
-			result = subprocess.run(
+			result = run_probe(
 				[
 					str(python),
 					"-m",
@@ -257,9 +251,6 @@ class RuntimeManager:
 					str(policy_root),
 					*(str(path) for path in wheels),
 				],
-				capture_output=True,
-				text=True,
-				check=False,
 			)
 			if result.returncode:
 				raise RuntimeUnavailable("policy or external tool installation failed")
@@ -286,7 +277,7 @@ class RuntimeManager:
 				command = [str(python), "-m", "pip", "install", "--no-deps", str(root)]
 			else:
 				continue
-			result = subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
+			result = run_probe(command, cwd=root)
 			if result.returncode:
 				raise RuntimeUnavailable(f"dependency installation failed for {relative}")
 

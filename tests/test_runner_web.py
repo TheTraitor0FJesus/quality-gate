@@ -8,6 +8,10 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from runner_operation_fixtures import (
+	isolate_runner_unit_tests_from_host_gate_slots as isolate_runner_unit_tests_from_host_gate_slots,
+	use_long_windows_staging_limit_for_gate_temp_workspace as use_long_windows_staging_limit_for_gate_temp_workspace,
+)
 from test_runner import (
 	_assert_biome_invocations,
 	_fake_biome_command,

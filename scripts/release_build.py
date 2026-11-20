@@ -18,13 +18,34 @@ sys.path.insert(0, str(Path.cwd()))
 from quality_gate.contracts import load_manifest
 from quality_gate.publication_artifacts import load_json_record
 from quality_gate.temp_workspace import temporary_workspace
-from scripts.release_metadata import load_release_timeout
+from scripts.release_metadata import ArtifactIdentity, load_release_timeout
 
 
 def _write_json(path: Path, value: object) -> None:
 	temporary = path.with_suffix(path.suffix + ".tmp")
 	temporary.write_text(json.dumps(value) + "\n", encoding="utf-8")
 	temporary.replace(path)
+
+
+def _require_clean_checkout(root: Path, timeout: float, expected_sha: str) -> None:
+	status = subprocess.run(
+		["git", "status", "--porcelain=v1", "--untracked-files=all"],
+		cwd=root,
+		capture_output=True,
+		text=True,
+		check=True,
+		timeout=timeout,
+	)
+	head = subprocess.run(
+		["git", "rev-parse", "HEAD"],
+		cwd=root,
+		capture_output=True,
+		text=True,
+		check=True,
+		timeout=timeout,
+	)
+	if status.stdout.strip() or head.stdout.strip() != expected_sha:
+		raise SystemExit("product verification requires a clean exact-head checkout")
 
 
 @contextmanager
@@ -60,19 +81,23 @@ def _run_stage(
 		subprocess.run(command, check=True, timeout=timeout, stdout=stdout, env=env)
 
 
-def _run_release_build() -> None:
 
-	candidate_path = Path(os.environ["CANDIDATE_PATH"])
-	with candidate_path.open("rb") as candidate_file:
-		candidate = load_json_record(candidate_file)
-	candidate_bytes = (
-		json.dumps(candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-	).encode("utf-8")
-	if (
-		hashlib.sha256(candidate_bytes).hexdigest() != os.environ["CANDIDATE_DIGEST"]
-		or candidate["source_sha"] != os.environ["SOURCE_SHA"]
-	):
-		raise SystemExit("release: original candidate transfer or source mismatch")
+def _run_release_build(*, pull_request: bool = False) -> None:
+
+	candidate: dict[str, object] = {}
+	candidate_bytes = b""
+	if not pull_request:
+		candidate_path = Path(os.environ["CANDIDATE_PATH"])
+		with candidate_path.open("rb") as candidate_file:
+			candidate = load_json_record(candidate_file)
+		candidate_bytes = (
+			json.dumps(candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+		).encode("utf-8")
+		if (
+			hashlib.sha256(candidate_bytes).hexdigest() != os.environ["CANDIDATE_DIGEST"]
+			or candidate["source_sha"] != os.environ["SOURCE_SHA"]
+		):
+			raise SystemExit("release: original candidate transfer or source mismatch")
 
 	root = Path.cwd()
 	with _stage("suite-contract"):
@@ -83,6 +108,8 @@ def _run_release_build() -> None:
 		):
 			raise SystemExit("release: installed-artifact Gate must cover the complete tests directory")
 	subprocess_timeout = load_release_timeout(root, "subprocess_seconds")
+	if pull_request:
+		_require_clean_checkout(root, subprocess_timeout, os.environ["SOURCE_SHA"])
 	output = (
 		Path(os.environ["RUNNER_TEMP"]) / "quality-gate-release" / os.environ["RELEASE_PLATFORM"]
 	)
@@ -139,17 +166,28 @@ def _run_release_build() -> None:
 		)
 		build_output.seek(0)
 		identity = load_json_record(build_output)
+	if pull_request:
+		_require_clean_checkout(root, subprocess_timeout, os.environ["SOURCE_SHA"])
+		artifact_identity = ArtifactIdentity.from_mapping(identity)
+		if (
+			artifact_identity.source_sha != os.environ["SOURCE_SHA"]
+			or artifact_identity.platform != os.environ["RELEASE_PLATFORM"]
+		):
+			raise SystemExit("product verification artifact source or platform mismatch")
+	verify_command = [
+		sys.executable,
+		"scripts/release_adapter.py",
+		"verify-pr" if pull_request else "runtime-check",
+		"--source-sha",
+		os.environ["SOURCE_SHA"],
+		"--artifact",
+		identity["path"],
+	]
+	if pull_request:
+		verify_command.extend(["--sha256", identity["sha256"]])
 	_run_stage(
 		"artifact-verification",
-		[
-			sys.executable,
-			"scripts/release_adapter.py",
-			"runtime-check",
-			"--source-sha",
-			os.environ["SOURCE_SHA"],
-			"--artifact",
-			identity["path"],
-		],
+		verify_command,
 		timeout=subprocess_timeout,
 	)
 	cache = Path(os.environ["RUNNER_TEMP"]) / "quality-gate-cache" / "quality-gate"
@@ -236,6 +274,8 @@ def _run_release_build() -> None:
 		env=test_environment,
 		timeout=subprocess_timeout,
 	)
+	if pull_request:
+		_require_clean_checkout(root, subprocess_timeout, os.environ["SOURCE_SHA"])
 	with _stage("package-finalization"):
 		package = Path(identity["path"])
 		published_package = output / package.name
@@ -245,6 +285,28 @@ def _run_release_build() -> None:
 			shutil.copy2(package, published_package)
 		identity["path"] = str(published_package)
 		_write_json(output / "artifact.json", identity)
+		if pull_request:
+			_write_json(
+				output / "verification.json",
+				{
+					"schema": 1,
+					"repository": os.environ["GITHUB_REPOSITORY"],
+					"base_sha": os.environ["BASE_SHA"],
+					"head_sha": identity["source_sha"],
+					"producer": "package",
+					"platform": os.environ["RELEASE_PLATFORM"],
+					"kind": "artifact",
+					"status": "passed",
+					"applicability": "applicable",
+					"artifact": {
+						"name": identity["name"],
+						"sha256": identity["sha256"],
+						"source_sha": identity["source_sha"],
+					},
+					"evidence": f"run/{os.environ['GITHUB_RUN_ID']}/attempt/{os.environ['GITHUB_RUN_ATTEMPT']}",
+				},
+			)
+			return
 
 		evidence = {
 			"schema": 1,
@@ -263,16 +325,19 @@ def _run_release_build() -> None:
 		_write_json(output / "evidence.json", evidence)
 
 
-def main() -> None:
+
+def main(*, pull_request: bool = False) -> None:
 	with ExitStack() as workspace:
 		with _stage("workspace-setup"):
 			workspace.enter_context(temporary_workspace(Path.cwd()))
 		try:
-			_run_release_build()
+			_run_release_build(pull_request=pull_request)
 		finally:
 			with _stage("workspace-cleanup"):
 				workspace.close()
 
 
 if __name__ == "__main__":
-	main()
+	if sys.argv[1:] not in ([], ["--pull-request"]):
+		raise SystemExit("usage: release_build.py [--pull-request]")
+	main(pull_request=sys.argv[1:] == ["--pull-request"])

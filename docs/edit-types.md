@@ -1,61 +1,72 @@
-# Check types in working-tree changes with `edit-types`
+# Типизация изменённых компонентов: `edit-types`
 
-`quality-gate edit-types` runs mypy for affected Python components using the selected policy. It
-reads one UTF-8 JSON object from stdin through EOF and writes one JSON result. It does not modify
-project files or import project code while checking prerequisites.
+`quality-gate edit-types` запускает mypy для затронутых Python-компонентов по выбранной политике.
+Команда не меняет файлы и не импортирует код проекта при проверке предпосылок. Хост отвечает за
+общий бюджет события, отмену фоновой задачи, доставку и независимую проверку актуальности результата.
 
-## Request
+## Запрос
 
-Required fields are `schema`, an absolute `root`, `files`, and an integer `deadline_unix_ms`. Each
-file has a root-relative `path` and `sha256` of its current bytes. Use `sha256: null` to assert that
-a file is absent, such as a deleted file.
+Передайте один UTF-8 JSON-объект в stdin и закройте поток. Пути файлов относительны абсолютного
+`root`; SHA-256 связывает их текущие байты. `null` указывает, что файл должен отсутствовать.
 
 ```json
 {
   "schema": 1,
   "root": "/absolute/project",
   "files": [
-    {"path": "app/api.py", "sha256": "<64 lowercase hex digits>"},
+    {"path": "app/api.py", "sha256": "<sha256 текущих байтов>"},
     {"path": "app/removed.py", "sha256": null}
   ],
-  "deadline_unix_ms": "<current Unix time in milliseconds plus the budget>"
+  "deadline_unix_ms": 1792512009000,
+  "baseline": {"policy_release": "v2.4.2"},
+  "cache_dir": "/absolute/cache"
 }
 ```
 
-Replace the deadline placeholder with an integer. `baseline` with the single field `policy_release`
-is required only for unmanaged scope. Optional `cache_dir` must be an absolute path outside the
-project. An invalid manifest never falls back to the baseline.
+Обязательны `schema`, `root`, `files` и целое `deadline_unix_ms`. Схема 1 допускает до 10 файлов
+и максимум 10 секунд. `baseline` с одним `policy_release` нужен для области вне компонентов манифеста;
+невалидный манифест никогда не переключается на baseline. `cache_dir` необязателен и должен быть
+абсолютным внешним каталогом. Команда не загружает, не устанавливает и не чинит инструменты или среды.
 
-Schema 1 allows up to 10 files and a deadline of at most 10 seconds. Background requests use
-`schema: 2`, `mode: "background"`, a canonical UUID `event_id`, and an absolute `cancel_path` in the
-external cache at `edit-types-events/<event_id>.cancel`; their deadline can be up to 30 seconds.
-The host creates that file to cancel the run. The response echoes `event_id` so the host can match
-the completion to its request.
+Для ограниченной фоновой работы используйте схему 2: добавьте `mode: "background"`, канонический
+UUID `event_id` и `cancel_path` вида `<cache>/edit-types-events/<event_id>.cancel`. Хост создаёт файл
+для отмены и должен сопоставлять ответ с тем же событием. Срок такой задачи — не более 30 секунд;
+исполнитель проверяет отмену во время работы. Схема 1 остаётся синхронной.
 
-## Result
+Управляемый компонент анализируется целиком, включая неизменённые файлы. Манифест и объявленные
+корни источников определяют охват; явные выключения `typecheck` не считаются пройденной типизацией.
+Для неуправляемой области нужен baseline и подготовленная среда `root/.venv`. Предпосылки проверяются
+без исполнения импортов, плагинов или кода проекта.
 
-The result includes `status`, `reason`, `action`, `root`, `root_identity`, `files`, `configuration`,
-`selections`, `components`, `freshness_sha256`, `process_count`, and `elapsed_ms`. Background
-responses also include `schema: 2`, `mode`, and `event_id`. `writes_may_have_occurred` is always
-`false`.
+## Результат
 
-Each component record reports its analyzed scope, selected environment, status, and diagnostics. A
-diagnostic contains only the path, line, column, and mypy code; messages and source fragments are
-not returned. Before showing a result, the host should confirm that its request, files, and
-configuration are still current and that `freshness_sha256` matches; rerun the check if inputs
-changed.
+Ответ содержит `status`, фиксированные `reason` и `action`, `root_identity`, файлы, конфигурацию,
+выборы релизов и сред, список компонентов, `freshness_sha256`, счётчики процессов и времени.
+Флаг `writes_may_have_occurred` всегда равен `false`. В фоновой схеме возвращаются также `schema: 2`,
+`mode` и соответствующий `event_id`.
 
-| Status | Exit code | Meaning |
+Запись компонента описывает охват, среду, состояние и диагностики. Диагностика раскрывает только путь,
+строку, столбец и код mypy; сообщения, фрагменты кода, значения и исключения не возвращаются.
+Хеш свежести связывает корень, файлы, настройки, выбранные инструменты и полный список исходников и
+каталогов. Перед показом хоста должны повторно совпасть идентичность корня, хеши, состав каталогов,
+среда и событие. Если что-либо изменилось, доказательство устарело.
+
+| Статус | Код выхода | Значение |
 | --- | ---: | --- |
-| `passed`, `not_applicable` | 0 | Checks passed, or there was no affected scope |
-| `failed` | 1 | Mypy reported diagnostics |
-| `unchecked` | 2 | The check or its completeness could not be confirmed |
+| `passed` | 0 | Проверка охвата завершена без замечаний |
+| `not_applicable` | 0 | Затронутой области нет; это не свидетельство запуска mypy |
+| `failed` | 1 | Mypy нашёл диагностики |
+| `unchecked` | 2 | Полноту подтвердить нельзя; результат не означает успех |
 
-An empty file list returns `not_applicable`. Invalid requests, stale hashes, unsupported policies,
-or unavailable environments return `unchecked`, never a pass.
+Недоступная среда, устаревший вход, неподдерживаемая политика, отмена или превышение лимита дают
+`unchecked`. Нельзя засчитывать частичную проверку как успешную. Хост показывает только ответ с
+полным охватом, совпадающими хешами и корректным кодом выхода.
 
-## Limits
+## Ограничения
 
-The shared request is limited to 64 KiB and 10 files; the result is limited to 256 KiB. The command
-also bounds source scanning and environment evidence. Exceeding a limit returns `unchecked` without
-partial coverage. The response's `action` gives the recovery step for an `unchecked` result.
+Запрос ограничен 64 KiB и 10 файлами, ответ — 256 KiB. Поддерживается не более 1 024 исходников,
+16 MiB исходного текста и 200 диагностик. Превышение любого предела завершает работу статусом
+`unchecked`, без усечения доказательства.
+
+Подготовка потребителя и проверка интерфейса описаны в [инструкции настройки](consumer-setup.md)
+и [контракте релиза](release.md#working-tree-interface-verification).

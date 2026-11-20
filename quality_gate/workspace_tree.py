@@ -10,17 +10,18 @@ from pathlib import Path
 from .path_safety import is_link_or_reparse
 from .workspace_constants import _ROOT_CONTROL_FILE_NAMES
 from .workspace_keys import _plain_lock_file, _same_file_identity
+from .workspace_locks import _check_workspace_deadline
 from .workspace_quarantine import _remove_directory, _remove_file, _remove_link
 
 _DIRECTORY_REMOVAL_MAX_RESCANS = 16
 
 
-def _remove_tree(path: Path, identity: os.stat_result) -> None:
+def _remove_tree(path: Path, identity: os.stat_result, *, deadline: float | None = None) -> None:
 	pending = [(path, identity)]
 	rescans: dict[tuple[Path, int, int], int] = {}
 	while pending:
 		tree_path, tree_identity = pending.pop()
-		_remove_tree_attempt(tree_path, tree_identity, pending, rescans)
+		_remove_tree_attempt(tree_path, tree_identity, pending, rescans, deadline=deadline)
 
 
 def _remove_tree_attempt(
@@ -28,10 +29,17 @@ def _remove_tree_attempt(
 	tree_identity: os.stat_result,
 	pending: list[tuple[Path, os.stat_result]],
 	rescans: dict[tuple[Path, int, int], int],
+	*,
+	deadline: float | None = None,
 ) -> None:
-	directories, deferred_root_controls = _scan_tree_for_removal(tree_path, tree_identity)
+	_check_workspace_deadline(deadline)
+	directories, deferred_root_controls = _scan_tree_for_removal(
+		tree_path, tree_identity, deadline=deadline
+	)
 	for directory, expected in reversed(directories[1:]):
-		if not _remove_collected_directory_with_retry(directory, expected, rescans):
+		if not _remove_collected_directory_with_retry(
+			directory, expected, rescans, deadline=deadline
+		):
 			# Retry only the raced subtree; unrelated directories have separate budgets.
 			pending.extend(((tree_path, tree_identity), (directory, expected)))
 			return
@@ -43,10 +51,13 @@ def _remove_tree_attempt(
 			child_identity,
 			[],
 			root_control=True,
+			deadline=deadline,
 		)
 	if directories:
 		root_path, root_identity = directories[0]
-		if not _remove_collected_directory_with_retry(root_path, root_identity, rescans):
+		if not _remove_collected_directory_with_retry(
+			root_path, root_identity, rescans, deadline=deadline
+		):
 			pending.append((root_path, root_identity))
 
 
@@ -54,10 +65,13 @@ def _remove_collected_directory_with_retry(
 	path: Path,
 	expected: os.stat_result,
 	rescans: dict[tuple[Path, int, int], int],
+	*,
+	deadline: float | None = None,
 ) -> bool:
+	_check_workspace_deadline(deadline)
 	key = (path, expected.st_dev, expected.st_ino)
 	try:
-		_remove_collected_directory(path, expected)
+		_remove_collected_directory(path, expected, deadline=deadline)
 	except OSError as error:
 		if not _can_rescan_directory(error, rescans.get(key, 0)):
 			raise
@@ -74,18 +88,20 @@ def _can_rescan_directory(error: OSError, rescans: int) -> bool:
 
 
 def _scan_tree_for_removal(
-	path: Path, identity: os.stat_result
+	path: Path, identity: os.stat_result, *, deadline: float | None = None
 ) -> tuple[list[tuple[Path, os.stat_result]], list[tuple[Path, os.stat_result]]]:
 	directories: list[tuple[Path, os.stat_result]] = []
 	deferred_root_controls: list[tuple[Path, os.stat_result]] = []
 	pending = [(path, identity)]
 	while pending:
+		_check_workspace_deadline(deadline)
 		directory, expected = pending.pop()
-		entries = _directory_entries_for_removal(directory, expected)
+		entries = _directory_entries_for_removal(directory, expected, deadline=deadline)
 		if entries is None:
 			continue
 		directories.append((directory, expected))
 		for child_path, scanned_identity in entries:
+			_check_workspace_deadline(deadline)
 			_remove_scanned_child(
 				directory,
 				expected,
@@ -93,13 +109,15 @@ def _scan_tree_for_removal(
 				scanned_identity,
 				pending,
 				deferred_root_controls=(deferred_root_controls if directory == path else None),
+				deadline=deadline,
 			)
 	return directories, deferred_root_controls
 
 
 def _directory_entries_for_removal(
-	directory: Path, expected: os.stat_result
+	directory: Path, expected: os.stat_result, *, deadline: float | None = None
 ) -> list[tuple[Path, os.stat_result]] | None:
+	_check_workspace_deadline(deadline)
 	try:
 		before = directory.lstat()
 	except FileNotFoundError:
@@ -114,10 +132,15 @@ def _directory_entries_for_removal(
 		return None
 	try:
 		with os.scandir(directory) as children:
-			entries = [(Path(child.path), Path(child.path).lstat()) for child in children]
+			entries: list[tuple[Path, os.stat_result]] = []
+			for child in children:
+				_check_workspace_deadline(deadline)
+				child_path = Path(child.path)
+				entries.append((child_path, child_path.lstat()))
 	except FileNotFoundError:
 		return None
 	after = directory.lstat()
+	_check_workspace_deadline(deadline)
 	if is_link_or_reparse(after) or not _same_file_identity(before, after):
 		raise OSError(f"temporary workspace directory changed while scanning it: {directory}")
 	return entries
@@ -132,7 +155,9 @@ def _remove_scanned_child(
 	*,
 	deferred_root_controls: list[tuple[Path, os.stat_result]] | None = None,
 	root_control: bool = False,
+	deadline: float | None = None,
 ) -> None:
+	_check_workspace_deadline(deadline)
 	parent_now = parent.lstat()
 	if is_link_or_reparse(parent_now) or not _same_file_identity(parent_identity, parent_now):
 		raise OSError(f"temporary workspace directory changed during removal: {parent}")
@@ -155,9 +180,13 @@ def _remove_scanned_child(
 		pending.append((path, metadata))
 	else:
 		_remove_file(path, metadata)
+	_check_workspace_deadline(deadline)
 
 
-def _remove_collected_directory(path: Path, expected: os.stat_result) -> None:
+def _remove_collected_directory(
+	path: Path, expected: os.stat_result, *, deadline: float | None = None
+) -> None:
+	_check_workspace_deadline(deadline)
 	try:
 		metadata = path.lstat()
 	except FileNotFoundError:
@@ -168,9 +197,16 @@ def _remove_collected_directory(path: Path, expected: os.stat_result) -> None:
 		_remove_link(path, metadata)
 	else:
 		_remove_directory(path, expected_identity=expected)
+	_check_workspace_deadline(deadline)
 
 
-def _remove_entry(path: Path, *, expected_identity: os.stat_result | None = None) -> None:
+def _remove_entry(
+	path: Path,
+	*,
+	expected_identity: os.stat_result | None = None,
+	deadline: float | None = None,
+) -> None:
+	_check_workspace_deadline(deadline)
 	try:
 		metadata = path.lstat()
 	except FileNotFoundError:
@@ -180,6 +216,7 @@ def _remove_entry(path: Path, *, expected_identity: os.stat_result | None = None
 	if is_link_or_reparse(metadata):
 		_remove_link(path, metadata)
 	elif stat.S_ISDIR(metadata.st_mode):
-		_remove_tree(path, metadata)
+		_remove_tree(path, metadata, deadline=deadline)
 	else:
 		_remove_file(path, metadata)
+	_check_workspace_deadline(deadline)

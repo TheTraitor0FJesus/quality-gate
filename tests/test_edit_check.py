@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from edit_check_support78 import invoke as invoke
 
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import (
@@ -133,7 +134,14 @@ def _selected_ruff_artifact(
 def edit_cache() -> Iterator[Path]:
 	"""Immutable test infrastructure: selected release Ruff, synthetic other inventory."""
 	# Avoid ensurepip's Windows path limit inside Gate's nested temporary workspace.
-	parent = Path(os.environ["SYSTEMROOT"]) / "Temp" if os.name == "nt" else None
+	parent = (
+		next(
+			(path for path in (REPOSITORY, *REPOSITORY.parents) if (path / ".git").exists()),
+			REPOSITORY,
+		)
+		/ "temp"
+	)
+	parent.mkdir(exist_ok=True)
 	with tempfile.TemporaryDirectory(prefix="quality-gate-edit-", dir=parent) as directory:
 		yield prepare_edit_cache(Path(directory))
 
@@ -283,28 +291,6 @@ def request(root: Path, cache: Path, *paths: str) -> dict[str, Any]:
 		},
 		"deadline_unix_ms": int(time.time() * 1000) + 10_000,
 	}
-
-
-def invoke(payload: object, *, engine_wheel: Path | None = None) -> tuple[int, dict[str, Any]]:
-	invocation_environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-	if engine_wheel is not None:
-		invocation_environment["PYTHONPATH"] = str(engine_wheel)
-	if isinstance(payload, dict) and isinstance(payload.get("root"), str):
-		project = Path(payload["root"])
-		# Keep mutable result reuse local to this test, independently of shared releases.
-		cache_home = str(project.parent / f"{project.name}-user-cache")
-		invocation_environment.update(LOCALAPPDATA=cache_home, XDG_CACHE_HOME=cache_home)
-	result = subprocess.run(
-		[sys.executable, "-B", "-m", "quality_gate.cli", "edit-check"],
-		input=payload if isinstance(payload, bytes) else json.dumps(payload).encode(),
-		cwd=REPOSITORY if engine_wheel is None else engine_wheel.parent,
-		env=invocation_environment,
-		capture_output=True,
-		check=False,
-		timeout=15,
-	)
-	assert result.stderr == b"", result.stderr.decode(errors="replace")
-	return result.returncode, json.loads(result.stdout)
 
 
 def managed(root: Path, cache: Path, *, version: str = "v2.4.2", setup: bool = True) -> Path:

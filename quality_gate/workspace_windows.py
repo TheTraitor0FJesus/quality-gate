@@ -5,10 +5,19 @@ from __future__ import annotations
 import ctypes
 import os
 import stat
+from ctypes import wintypes
+from functools import cache
 from pathlib import Path
 from typing import Any, cast
 
 from .path_safety import is_link_or_reparse
+from .workspace_windows_types import (
+	_WindowsByHandleFileInformation,
+	_WindowsFileBasicInformation,
+	_WindowsFileDispositionInformation,
+	_WindowsFileDispositionInformationEx,
+	_WindowsFileIdInformation,
+)
 
 _WINDOWS_ACL_SIZE_INFORMATION = 2
 
@@ -88,15 +97,19 @@ _WINDOWS_FILE_BASIC_INFORMATION = 0
 _WINDOWS_FILE_DISPOSITION_INFORMATION = 4
 
 
+_WINDOWS_FILE_DISPOSITION_INFORMATION_EX = 21
+_WINDOWS_FILE_DISPOSITION_DELETE = 0x00000001
+_WINDOWS_FILE_DISPOSITION_POSIX_SEMANTICS = 0x00000002
+_WINDOWS_UNSUPPORTED_DISPOSITION_ERRORS = frozenset({1, 50, 87})
 _WINDOWS_FILE_ID_INFORMATION = 18
 
 
+@cache
 def _windows_security_api() -> tuple[Any, Any]:
 	loader_name = "WinDLL"
 	loader = cast(Any, getattr(ctypes, loader_name))
 	kernel32 = cast(Any, loader("kernel32", use_last_error=True))
 	advapi32 = cast(Any, loader("advapi32", use_last_error=True))
-	from ctypes import wintypes
 
 	get_process = cast(Any, kernel32.GetCurrentProcess)
 	get_process.restype = wintypes.HANDLE
@@ -148,7 +161,6 @@ def _windows_error(code: int | None = None) -> OSError:
 
 
 def _windows_user_sid() -> str:
-	from ctypes import wintypes
 
 	class SidAndAttributes(ctypes.Structure):
 		_fields_ = [("sid", ctypes.c_void_p), ("attributes", wintypes.DWORD)]
@@ -209,7 +221,6 @@ def _windows_user_sid() -> str:
 
 
 def _windows_directory_acl_is_private(path: Path) -> bool:
-	from ctypes import wintypes
 
 	kernel32, advapi32 = _windows_security_api()
 	get_named_security_info = cast(Any, advapi32.GetNamedSecurityInfoW)
@@ -253,7 +264,6 @@ def _windows_directory_acl_is_private(path: Path) -> bool:
 
 
 def _windows_dacl_is_private(dacl: ctypes.c_void_p) -> bool:
-	from ctypes import wintypes
 
 	class AclSizeInformation(ctypes.Structure):
 		_fields_ = [
@@ -310,7 +320,6 @@ def _windows_dacl_is_private(dacl: ctypes.c_void_p) -> bool:
 
 
 def _ensure_windows_private_directory(path: Path) -> os.stat_result:
-	from ctypes import wintypes
 
 	class SecurityAttributes(ctypes.Structure):
 		_fields_ = [
@@ -346,7 +355,6 @@ def _ensure_windows_private_directory(path: Path) -> os.stat_result:
 
 
 def _open_windows_removal_handle(path: Path, kernel32: object) -> int:
-	from ctypes import wintypes
 
 	api = cast(Any, kernel32)
 	handle = api.CreateFileW(
@@ -366,35 +374,7 @@ def _open_windows_removal_handle(path: Path, kernel32: object) -> int:
 def _windows_file_identity(
 	handle: int, kernel32: object
 ) -> tuple[tuple[int, int], tuple[int, int] | None, int]:
-	from ctypes import wintypes
-
-	class ByHandleFileInformation(ctypes.Structure):
-		_fields_ = [
-			("attributes", wintypes.DWORD),
-			("creation_time_low", wintypes.DWORD),
-			("creation_time_high", wintypes.DWORD),
-			("last_access_low", wintypes.DWORD),
-			("last_access_high", wintypes.DWORD),
-			("last_write_low", wintypes.DWORD),
-			("last_write_high", wintypes.DWORD),
-			("volume_serial", wintypes.DWORD),
-			("size_high", wintypes.DWORD),
-			("size_low", wintypes.DWORD),
-			("links", wintypes.DWORD),
-			("index_high", wintypes.DWORD),
-			("index_low", wintypes.DWORD),
-		]
-
-	class FileIdentifier(ctypes.Structure):
-		_fields_ = [("low", ctypes.c_uint64), ("high", ctypes.c_uint64)]
-
-	class FileIdInformation(ctypes.Structure):
-		_fields_ = [
-			("volume_serial", ctypes.c_uint64),
-			("file_id", FileIdentifier),
-		]
-
-	information = ByHandleFileInformation()
+	information = _WindowsByHandleFileInformation()
 	api = cast(Any, kernel32)
 	get_file_information = api.GetFileInformationByHandle
 	if not get_file_information(handle, ctypes.byref(information)):
@@ -403,7 +383,7 @@ def _windows_file_identity(
 		int(information.volume_serial),
 		(int(information.index_high) << 32) | int(information.index_low),
 	)
-	file_id_information = FileIdInformation()
+	file_id_information = _WindowsFileIdInformation()
 	get_file_information_ex = api.GetFileInformationByHandleEx
 	modern_identity: tuple[int, int] | None = None
 	if get_file_information_ex(
@@ -445,23 +425,12 @@ def _validate_windows_removal_identity(
 
 
 def _clear_windows_readonly_attribute(handle: int, attributes: int, kernel32: object) -> None:
-	from ctypes import wintypes
-
-	class FileBasicInformation(ctypes.Structure):
-		_fields_ = [
-			("creation_time", ctypes.c_longlong),
-			("last_access_time", ctypes.c_longlong),
-			("last_write_time", ctypes.c_longlong),
-			("change_time", ctypes.c_longlong),
-			("attributes", wintypes.DWORD),
-		]
-
 	if not attributes & _WINDOWS_FILE_ATTRIBUTE_READONLY:
 		return
 	api = cast(Any, kernel32)
 	get_file_information = api.GetFileInformationByHandleEx
 	set_file_information = api.SetFileInformationByHandle
-	basic = FileBasicInformation()
+	basic = _WindowsFileBasicInformation()
 	if not get_file_information(
 		handle,
 		_WINDOWS_FILE_BASIC_INFORMATION,
@@ -482,13 +451,22 @@ def _clear_windows_readonly_attribute(handle: int, attributes: int, kernel32: ob
 
 
 def _mark_windows_handle_for_deletion(handle: int, kernel32: object) -> None:
-	from ctypes import wintypes
-
-	class FileDispositionInformation(ctypes.Structure):
-		_fields_ = [("delete_file", wintypes.BOOLEAN)]
-
-	disposition = FileDispositionInformation(True)
 	set_file_information = cast(Any, kernel32).SetFileInformationByHandle
+	extended = _WindowsFileDispositionInformationEx(
+		_WINDOWS_FILE_DISPOSITION_DELETE | _WINDOWS_FILE_DISPOSITION_POSIX_SEMANTICS
+	)
+	if set_file_information(
+		handle,
+		_WINDOWS_FILE_DISPOSITION_INFORMATION_EX,
+		ctypes.byref(extended),
+		ctypes.sizeof(extended),
+	):
+		return
+	error = _windows_error()
+	if getattr(error, "winerror", None) not in _WINDOWS_UNSUPPORTED_DISPOSITION_ERRORS:
+		raise error
+	# Older systems and filesystems retain the existing delete-on-last-close behavior.
+	disposition = _WindowsFileDispositionInformation(True)
 	if not set_file_information(
 		handle,
 		_WINDOWS_FILE_DISPOSITION_INFORMATION,

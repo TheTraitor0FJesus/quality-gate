@@ -8,7 +8,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
+from typing import Literal
 
+MAX_TELEMETRY_TEXT = 512
 _CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 _WILDCARD = re.compile(r"[*?\[\]{}]")
 
@@ -117,6 +119,90 @@ class Finding:
 		return self.path, self.line or 0, self.message, self.action
 
 
+def _telemetry_duration(value: int | None, *, required: bool = False) -> None:
+	if (required and value is None) or (
+		value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
+	):
+		raise ValueError("telemetry duration must be a non-negative integer")
+
+
+@dataclass(frozen=True, slots=True)
+class StageTiming:
+	"""Observed cost and disposition; never an eligibility claim for stored results."""
+
+	stage: str
+	elapsed_ms: int
+	scope: str
+	disposition: Literal["executed", "reused", "not-run"]
+	reason: str = ""
+	lookup_ms: int | None = None
+	validation_ms: int | None = None
+	original_elapsed_ms: int | None = None
+	original_operation_id: str | None = None
+	tool_cache: str = "not-measured"
+
+	def __post_init__(self) -> None:
+		_telemetry_duration(self.elapsed_ms, required=True)
+		for duration in (
+			self.lookup_ms,
+			self.validation_ms,
+			self.original_elapsed_ms,
+		):
+			_telemetry_duration(duration)
+		if self.disposition not in {"executed", "reused", "not-run"}:
+			raise ValueError("invalid execution disposition")
+		if self.disposition == "reused" and (
+			self.original_elapsed_ms is None or not self.original_operation_id
+		):
+			raise ValueError("reused telemetry requires original execution metadata")
+		for value in (
+			self.stage,
+			self.scope,
+			self.reason,
+			self.original_operation_id,
+			self.tool_cache,
+		):
+			if value is not None and (
+				not isinstance(value, str) or len(value) > MAX_TELEMETRY_TEXT
+			):
+				raise ValueError("telemetry text must be a bounded string")
+
+
+@dataclass(frozen=True, slots=True)
+class OperationTelemetry:
+	"""One operation, reported only after work and owned cleanup have settled."""
+
+	operation_id: str
+	operation: str
+	profile: str
+	candidate: str
+	elapsed_ms: int
+	stages: tuple[StageTiming, ...] = ()
+	complete: bool = True
+	current_stage: str | None = None
+	last_completed_stage: str | None = None
+	timed_out: bool = False
+	scope: str = "staged"
+
+	def __post_init__(self) -> None:
+		_telemetry_duration(self.elapsed_ms, required=True)
+		for value in (
+			self.operation_id,
+			self.operation,
+			self.profile,
+			self.candidate,
+			self.scope,
+			self.current_stage,
+			self.last_completed_stage,
+		):
+			if value is not None and (
+				not isinstance(value, str) or len(value) > MAX_TELEMETRY_TEXT
+			):
+				raise ValueError("operation telemetry text must be a bounded string")
+		if self.timed_out and self.complete:
+			raise ValueError("a timed-out operation cannot be complete")
+
+
 @dataclass(frozen=True, slots=True)
 class CheckResult:
 	check_id: str
@@ -127,6 +213,7 @@ class CheckResult:
 	waiver_target: str | None = None
 	_secrets: tuple[str, ...] = field(default=(), repr=False, compare=False)
 	omitted_findings: int | None = 0
+	telemetry: StageTiming | None = field(default=None, compare=False)
 
 	def __post_init__(self) -> None:
 		if not _CHECK_ID.fullmatch(self.check_id):
@@ -163,6 +250,7 @@ class CheckResult:
 @dataclass(frozen=True, slots=True)
 class Verdict:
 	results: tuple[CheckResult, ...]
+	operation: OperationTelemetry | None = field(default=None, compare=False)
 
 	def __post_init__(self) -> None:
 		ids = [result.check_id for result in self.results]
@@ -172,7 +260,9 @@ class Verdict:
 	@property
 	def exit_code(self) -> int:
 		statuses = {result.status for result in self.results}
-		if Status.UNCHECKED in statuses:
+		if Status.UNCHECKED in statuses or (
+			self.operation is not None and not self.operation.complete
+		):
 			return 2
 		return 1 if Status.FAILED in statuses else 0
 

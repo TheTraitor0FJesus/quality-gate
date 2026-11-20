@@ -8,12 +8,13 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .integrity_workflow_release import _QUALITY_GATE_PROVIDER
+from .operation import OperationTimeoutError, run_probe
 
 
 def _is_repository_root(path: Path) -> bool:
 	try:
 		requested_root = path.resolve()
-		result = subprocess.run(
+		result = run_probe(
 			[
 				"git",
 				"-C",
@@ -21,13 +22,14 @@ def _is_repository_root(path: Path) -> bool:
 				"rev-parse",
 				"--show-toplevel",
 			],
-			capture_output=True,
-			check=False,
+			cwd=requested_root,
 			timeout=5,
 		)
 		if result.returncode:
 			return False
 		git_root = Path(result.stdout.decode("utf-8").strip()).resolve()
+	except OperationTimeoutError:
+		raise
 	except (OSError, RuntimeError, UnicodeError, subprocess.TimeoutExpired):
 		return False
 	return os.path.normcase(str(git_root)) == os.path.normcase(str(requested_root))
@@ -41,10 +43,9 @@ def _is_quality_gate_origin(repository_root: Path) -> bool:
 	if not _is_repository_root(repository_root):
 		return False
 	try:
-		result = subprocess.run(
+		result = run_probe(
 			["git", "-C", str(repository_root), "remote", "get-url", "origin"],
-			capture_output=True,
-			check=False,
+			cwd=repository_root,
 			timeout=5,
 		)
 	except (OSError, subprocess.TimeoutExpired):

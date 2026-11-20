@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from .contracts import CheckResult, Finding, Manifest, Status
+from .integrity_documents import required_documents_result as required_documents_result
 from .integrity_origin import _is_quality_gate_origin
 from .integrity_workflow_common import _workflow_finding
 from .integrity_workflow_parser import _parse_workflow, _Workflow
@@ -19,6 +20,7 @@ from .integrity_workflows import (
 	_workflow_findings,
 	_workflow_paths,
 )
+from .operation import current_operation, observe_check, run_probe
 
 _CONFLICT_MARKER = re.compile(r"^\s*(?:<{7}|={7}|>{7})(?:\s|$)")
 MAX_CONFLICT_FILE_BYTES = 8 * 1024 * 1024
@@ -73,6 +75,106 @@ class _ConflictScanError(Exception):
 	def __init__(self, finding: Finding) -> None:
 		super().__init__(finding.message)
 		self.finding = finding
+
+
+def git_integrity_results(
+	root: Path,
+	manifest: Manifest,
+	repository: Path | None = None,
+	index_file: Path | None = None,
+) -> tuple[CheckResult, ...]:
+	operation = current_operation()
+	if operation is None:
+		scan = _scan_tree(root)
+	else:
+		with operation.stage("repository.git.tree-inventory", "staged repository tree"):
+			scan = _scan_tree(root)
+	return (
+		observe_check(
+			"repository.git.conflict_markers",
+			"staged text files",
+			lambda: _git_conflict_result(manifest, scan),
+		),
+		observe_check(
+			"repository.git.tracked_junk",
+			"staged repository paths",
+			lambda: _git_junk_result(manifest, scan),
+		),
+		observe_check(
+			"repository.git.large_blobs",
+			"staged Git blob sizes",
+			lambda: _git_large_blob_result(manifest, scan),
+		),
+		observe_check(
+			"repository.git.case_collisions",
+			"staged Git index paths",
+			lambda: _git_case_result(manifest, scan, repository, index_file),
+		),
+		observe_check(
+			"repository.git.unsafe_symlinks",
+			"staged symbolic links",
+			lambda: _git_symlink_result(root, manifest, scan),
+		),
+	)
+
+
+def workflow_result(
+	root: Path,
+	manifest: Manifest,
+	*,
+	repository_root: Path | None = None,
+) -> CheckResult:
+	workflow_paths = _workflow_paths(root)
+	if not workflow_paths:
+		return _unchecked(
+			"repository.workflow",
+			"required GitHub Actions workflow is missing",
+			(
+				_workflow_finding(
+					".github/workflows",
+					"no supported workflow file is declared",
+					"add a supported GitHub Actions workflow",
+				),
+			),
+		)
+	workflows: list[_Workflow] = []
+	for path in workflow_paths:
+		relative = path.relative_to(root).as_posix()
+		try:
+			workflows.append(_parse_workflow(path, relative))
+		except ValueError as error:
+			return _unchecked(
+				"repository.workflow",
+				"workflow input is not parseable",
+				(_workflow_finding(relative, str(error), "repair the workflow YAML and retry"),),
+			)
+	findings = _workflow_findings(
+		root,
+		workflows,
+		_is_quality_gate_origin(repository_root or root),
+	)
+	return _failed_or_waived(
+		"repository.workflow",
+		"workflow hygiene requirements are not satisfied",
+		findings,
+		manifest,
+		non_waivable_targets=frozenset({_DEPENDABOT_AUTO_MERGE_WORKFLOW_PATH}),
+	)
+
+
+def documentation_results(root: Path, manifest: Manifest) -> tuple[CheckResult, ...]:
+	return (
+		observe_check(
+			"repository.documentation.links",
+			"staged Markdown links",
+			lambda: documentation_link_result(root, manifest),
+		),
+		observe_check(
+			"repository.documentation.components",
+			"documented Python and web component paths",
+			lambda: documentation_component_result(root, manifest),
+		),
+	)
 
 
 def _scan_tree(root: Path) -> _TreeScan:
@@ -409,11 +511,10 @@ def _git_case_result(
 			environment = os.environ.copy()
 			if index_file is not None:
 				environment["GIT_INDEX_FILE"] = str(index_file)
-			result = subprocess.run(
+			result = run_probe(
 				["git", "-C", str(repository), "ls-files", "--cached", "-z"],
-				capture_output=True,
-				check=False,
-				env=environment,
+				cwd=repository,
+				environment=environment,
 				timeout=manifest.repository.command_timeout_seconds,
 			)
 		except (OSError, subprocess.TimeoutExpired):
@@ -497,66 +598,6 @@ def _git_symlink_result(root: Path, manifest: Manifest, scan: _TreeScan) -> Chec
 		"candidate contains unsafe symbolic links",
 		findings,
 		manifest,
-	)
-
-
-def git_integrity_results(
-	root: Path,
-	manifest: Manifest,
-	repository: Path | None = None,
-	index_file: Path | None = None,
-) -> tuple[CheckResult, ...]:
-	scan = _scan_tree(root)
-	return (
-		_git_conflict_result(manifest, scan),
-		_git_junk_result(manifest, scan),
-		_git_large_blob_result(manifest, scan),
-		_git_case_result(manifest, scan, repository, index_file),
-		_git_symlink_result(root, manifest, scan),
-	)
-
-
-def workflow_result(
-	root: Path,
-	manifest: Manifest,
-	*,
-	repository_root: Path | None = None,
-) -> CheckResult:
-	workflow_paths = _workflow_paths(root)
-	if not workflow_paths:
-		return _unchecked(
-			"repository.workflow",
-			"required GitHub Actions workflow is missing",
-			(
-				_workflow_finding(
-					".github/workflows",
-					"no supported workflow file is declared",
-					"add a supported GitHub Actions workflow",
-				),
-			),
-		)
-	workflows: list[_Workflow] = []
-	for path in workflow_paths:
-		relative = path.relative_to(root).as_posix()
-		try:
-			workflows.append(_parse_workflow(path, relative))
-		except ValueError as error:
-			return _unchecked(
-				"repository.workflow",
-				"workflow input is not parseable",
-				(_workflow_finding(relative, str(error), "repair the workflow YAML and retry"),),
-			)
-	findings = _workflow_findings(
-		root,
-		workflows,
-		_is_quality_gate_origin(repository_root or root),
-	)
-	return _failed_or_waived(
-		"repository.workflow",
-		"workflow hygiene requirements are not satisfied",
-		findings,
-		manifest,
-		non_waivable_targets=frozenset({_DEPENDABOT_AUTO_MERGE_WORKFLOW_PATH}),
 	)
 
 
@@ -656,57 +697,4 @@ def documentation_component_result(root: Path, manifest: Manifest) -> CheckResul
 		"documented component paths match the manifest",
 		findings,
 		manifest,
-	)
-
-
-def documentation_results(root: Path, manifest: Manifest) -> tuple[CheckResult, ...]:
-	return (
-		documentation_link_result(root, manifest),
-		documentation_component_result(root, manifest),
-	)
-
-
-def required_documents_result(root: Path, manifest: Manifest) -> CheckResult:
-	findings: list[Finding] = []
-	unreadable = False
-	for document in manifest.repository.required_documents:
-		target = root / document
-		try:
-			if not target.is_file():
-				findings.append(
-					Finding(
-						document,
-						message="required document is missing",
-						action=f"restore {document}",
-					)
-				)
-			elif not target.read_bytes().strip():
-				findings.append(
-					Finding(
-						document, message="required document is empty", action=f"restore {document}"
-					)
-				)
-		except OSError:
-			unreadable = True
-			findings.append(
-				Finding(
-					document,
-					message="required document is unreadable",
-					action=f"restore {document}",
-				)
-			)
-	return CheckResult(
-		check_id="manifest.documents",
-		status=(Status.UNCHECKED if unreadable else Status.FAILED if findings else Status.PASSED),
-		summary="required documents satisfy the schema 2 contract"
-		if not findings
-		else "required documents are incomplete",
-		findings=tuple(findings),
-		recovery_action=(
-			"restore access to every unreadable document and run check again"
-			if unreadable
-			else "restore every required document and run check again"
-			if findings
-			else None
-		),
 	)

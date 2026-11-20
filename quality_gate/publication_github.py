@@ -1,4 +1,4 @@
-"""Standard GitHub CLI transport without product installation or startup."""
+"""Bounded GitHub CLI transport."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 from urllib.parse import quote
 
+from .publication import MAX_VERSION_LENGTH as MAX_VERSION_LENGTH
+from .publication import VERSION as VERSION
 from .publication import (
 	MissingResourceError,
 	PublicationError,

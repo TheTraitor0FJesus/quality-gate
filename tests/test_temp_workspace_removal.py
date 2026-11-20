@@ -39,12 +39,14 @@ def test_removal_rescans_tree_after_repeated_nonempty_errors(
 	transient_errors = 8
 	attempts = 0
 
-	def fail_first_removals(path: Path, expected: os.stat_result) -> None:
+	def fail_first_removals(
+		path: Path, expected: os.stat_result, *, deadline: float | None = None
+	) -> None:
 		nonlocal attempts
 		if path == victim and attempts < transient_errors:
 			attempts += 1
 			raise OSError(errno.ENOTEMPTY, "directory not empty", os.fspath(path))
-		original_remove(path, expected)
+		original_remove(path, expected, deadline=deadline)
 
 	monkeypatch.setattr(workspace_tree, "_remove_collected_directory", fail_first_removals)
 
@@ -117,11 +119,13 @@ def test_temporary_workspace_cleanup_retries_each_directory_independently(
 	victims: set[Path] = set()
 	interrupted: set[Path] = set()
 
-	def interrupt_each_directory_once(path: Path, expected: os.stat_result) -> None:
+	def interrupt_each_directory_once(
+		path: Path, expected: os.stat_result, *, deadline: float | None = None
+	) -> None:
 		if path in victims and path not in interrupted:
 			interrupted.add(path)
 			raise OSError(errno.ENOTEMPTY, "directory not empty", os.fspath(path))
-		original_remove(path, expected)
+		original_remove(path, expected, deadline=deadline)
 
 	monkeypatch.setattr(
 		workspace_tree, "_remove_collected_directory", interrupt_each_directory_once
@@ -518,12 +522,14 @@ def test_read_only_repository_uses_a_per_repository_system_temp_fallback(
 
 	def reject_read_only_root(
 		root: Path,
+		*,
+		deadline: float | None = None,
 	) -> tuple[Path, Path, BinaryIO, os.stat_result, os.stat_result]:
 		attempted_roots.append(root)
 		if root == repository.resolve():
 			error = TemporaryWorkspaceError("repository temp is not writable")
 			raise error from PermissionError(errno.EACCES, "read-only repository")
-		return prepare_workspace(root)
+		return prepare_workspace(root, deadline=deadline)
 
 	monkeypatch.setattr(temp_workspace, "_prepare_workspace", reject_read_only_root)
 	fallback_root = temp_workspace._fallback_workspace_root(repository.resolve())
