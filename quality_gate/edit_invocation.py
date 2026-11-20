@@ -36,6 +36,7 @@ from .edit_ruff_support import (
 	_file_local_identity,
 	_format_report,
 )
+from .evidence_identity import RUFF_LOCAL_COMMON, RUFF_LOCAL_FORMAT, RUFF_LOCAL_LINT
 from .runtime import RuntimeManager, runtime_fingerprint, runtime_identity
 from .verification_evidence import (
 	EvidenceHit,
@@ -512,36 +513,14 @@ class Invocation:
 		fresh: dict[str, dict[str, Any]] = {}
 		missed_paths = [str(workspace / file.path) for file in misses]
 		missed_included = {file.path for file in misses}
-		local_common = ["--config", str(selection.policy), "--no-cache"]
+		local_common = ["--config", str(selection.policy), *RUFF_LOCAL_COMMON]
 		lint_code, lint_output, _stderr = self.run(
-			[
-				str(selection.tool),
-				"check",
-				*local_common,
-				"--force-exclude",
-				"--no-fix",
-				"--extend-ignore",
-				"I",
-				"--output-format",
-				"json",
-				"--",
-				*missed_paths,
-			],
+			[str(selection.tool), "check", *local_common, *RUFF_LOCAL_LINT, "--", *missed_paths],
 			cwd=workspace,
 		)
 		local_findings = self.findings(lint_code, lint_output, workspace, missed_included)
 		format_code, format_output, _stderr = self.run(
-			[
-				str(selection.tool),
-				"format",
-				*local_common,
-				"--force-exclude",
-				"--check",
-				"--output-format",
-				"json",
-				"--",
-				*missed_paths,
-			],
+			[str(selection.tool), "format", *local_common, *RUFF_LOCAL_FORMAT, "--", *missed_paths],
 			cwd=workspace,
 		)
 		syntax = {item["path"] for item in local_findings if item["rule"] == "invalid-syntax"}

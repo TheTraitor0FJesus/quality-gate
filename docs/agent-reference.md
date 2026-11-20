@@ -104,8 +104,13 @@ check telemetry records monotonic elapsed time, actual scope, stage and executio
 (`executed`, `reused` or `not-run`); outcome remains the check's separate `passed`, `failed`,
 `unchecked` or other status. Readiness, policy/runtime cache lookup and validation, candidate
 preparation and cleanup have their own stage observations. A reused result must carry its original
-execution identity and duration separately from current lookup and validation; the current Gate does
-not implement complete-result reuse or automatic rerun selection. Pytest telemetry retains bounded
+execution identity and duration separately from current lookup and validation. For file-local Ruff
+evidence, `original_elapsed_ms` is the longest original producer operation duration among reused
+files. `original_operation_id` identifies that producer by its operation name and UTC start time.
+This representative duration includes the producer's work beyond formatting and is not a sum of
+per-file execution times. Mixed fresh and reused checks remain `executed`; fully reused formatting
+is `reused`, including a retained failed outcome. The current Gate does not implement whole-suite
+result reuse or automatic rerun selection. Pytest telemetry retains bounded
 terminal outcome totals when available. Telemetry is additive, redacted and bounded; it does not
 change whether a check is eligible or which exit code wins.
 

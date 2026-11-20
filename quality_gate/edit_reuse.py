@@ -24,23 +24,23 @@ class ResultReuse:
 
 	def lookup(
 		self,
-		identity: dict[str, Any] | str | None,
+		identity: dict[str, Any] | None,
 		*,
-		expected_engine: EngineIdentity | None = None,
+		expected_engine: EngineIdentity | None,
 	) -> dict[str, Any] | None:
-		if not isinstance(identity, dict) or expected_engine is None:
+		if identity is None or expected_engine is None:
 			return None
 		hit: EvidenceHit | None = self.store.lookup(identity, expected_engine=expected_engine)
 		return hit.outcome if hit is not None else None
 
 	def remember(
 		self,
-		identity: dict[str, Any] | str | None,
+		identity: dict[str, Any] | None,
 		result: dict[str, Any],
 		*,
-		producer: EvidenceProducer | None = None,
+		producer: EvidenceProducer | None,
 	) -> None:
-		if not isinstance(identity, dict) or producer is None:
+		if identity is None or producer is None:
 			return
 		scope = identity.get("scope")
 		if not isinstance(scope, dict):

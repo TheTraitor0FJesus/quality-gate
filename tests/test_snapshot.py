@@ -1,7 +1,19 @@
 """Collect the feature tests from their supporting modules."""
 
+import os
+from pathlib import Path
+
+import pytest
+
+from quality_gate.snapshot import candidate_snapshot
+from snapshot_feature_split72_support import _git
+
+
 from snapshot_feature_split72_cases1 import (
 	test_candidate_index_identity_stays_bound_to_captured_index as test_candidate_index_identity_stays_bound_to_captured_index,
+)
+from snapshot_feature_split72_cases1 import (
+	test_candidate_rejects_incomplete_snapshot_inputs as test_candidate_rejects_incomplete_snapshot_inputs,
 )
 from snapshot_feature_split72_cases1 import (
 	test_candidate_snapshot_contains_staged_renames_and_deletions_only as test_candidate_snapshot_contains_staged_renames_and_deletions_only,
@@ -94,9 +106,6 @@ from snapshot_feature_split72_cases2 import (
 	test_candidate_snapshot_stops_preparation_at_the_shared_deadline as test_candidate_snapshot_stops_preparation_at_the_shared_deadline,
 )
 from snapshot_feature_split72_cases3 import (
-	test_candidate_snapshot_aggregate_bound_scales_with_indexed_paths as test_candidate_snapshot_aggregate_bound_scales_with_indexed_paths,
-)
-from snapshot_feature_split72_cases3 import (
 	test_candidate_snapshot_process_count_is_fixed_discovery_plus_two_batches as test_candidate_snapshot_process_count_is_fixed_discovery_plus_two_batches,
 )
 from snapshot_feature_split72_cases3 import (
@@ -109,5 +118,35 @@ from snapshot_feature_split72_cases3 import (
 	test_candidate_snapshot_reaps_process_after_malformed_attribute_response as test_candidate_snapshot_reaps_process_after_malformed_attribute_response,
 )
 from snapshot_feature_split72_cases3 import (
+	test_candidate_snapshot_rejects_aggregate_bound_with_valid_blob_size as test_candidate_snapshot_rejects_aggregate_bound_with_valid_blob_size,
+)
+from snapshot_feature_split72_cases3 import (
 	test_candidate_snapshot_requests_repeated_object_only_once as test_candidate_snapshot_requests_repeated_object_only_once,
 )
+from snapshot_feature_split72_cases3 import (
+	test_candidate_snapshot_stops_descendant_holding_real_batch_pipe as test_candidate_snapshot_stops_descendant_holding_real_batch_pipe,
+)
+from snapshot_feature_split72_cases3 import (
+	test_snapshot_materialization_timeout_runs_owned_cleanup as test_snapshot_materialization_timeout_runs_owned_cleanup,
+)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX symlink path semantics")
+def test_snapshot_index_path_preserves_symlink_parent_semantics(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	repository = tmp_path / "repository"
+	repository.mkdir()
+	assert _git(repository, "init").returncode == 0
+	(repository / "first.txt").write_text("first", encoding="utf-8")
+	assert _git(repository, "add", "first.txt").returncode == 0
+	other = tmp_path / "other"
+	(other / "sub").mkdir(parents=True)
+	(repository / "link").symlink_to(other / "sub", target_is_directory=True)
+	monkeypatch.setenv("GIT_INDEX_FILE", str(other / "index"))
+	(repository / "second.txt").write_text("second", encoding="utf-8")
+	assert _git(repository, "add", "second.txt").returncode == 0
+	monkeypatch.setenv("GIT_INDEX_FILE", str(repository / "link" / ".." / "index"))
+	with candidate_snapshot(repository) as snapshot:
+		assert (snapshot.root / "second.txt").read_text(encoding="utf-8") == "second"
+		assert not (snapshot.root / "first.txt").exists()

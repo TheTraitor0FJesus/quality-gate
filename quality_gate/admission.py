@@ -110,9 +110,14 @@ def running_in_ci(environment: Mapping[str, str] | None = None) -> bool:
 	)
 
 
+def child_ci_environment() -> dict[str, str]:
+	"""Pass only the normalized CI marker across a sanitized worker boundary."""
+	return {_CI_ENVIRONMENT: "1"} if running_in_ci() else {}
+
+
 def child_admission_environment() -> dict[str, str]:
 	"""Preserve CI admission context or a live lease for Gate descendants."""
-	environment = {_CI_ENVIRONMENT: "1"} if running_in_ci() else {}
+	environment = child_ci_environment()
 	lease = _active_lease.get()
 	if lease is None:
 		return environment

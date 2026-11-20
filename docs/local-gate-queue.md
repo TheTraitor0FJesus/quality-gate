@@ -66,12 +66,13 @@ bridge.
 
 Before activating a queue-aware release, adapt the bridge's `run_released_command` to derive its
 outer timeout from the same staged manifest bytes used to select the wheel. Validate schema 2,
-read `repository.defaults.gate_timeout_seconds`, and add the validated local queue wait outside
-CI. Preserve the existing UTF-8 transport, wheel verification, return codes, and process ownership.
+read `repository.defaults.gate_timeout_seconds`, and add the 120-second Gate cleanup allowance.
+Outside CI, add the validated local queue wait as well. Preserve the existing UTF-8 transport,
+wheel verification, return codes, and process ownership.
 The bridge must not acquire another admission slot or import mutable checkout source.
 
-`quality_gate.hooks.commit_gate_timeout_seconds` provides the staged-manifest Gate-plus-queue
-calculation for release-backed callers. A standalone bridge can perform the same small calculation
+`quality_gate.hooks.commit_gate_timeout_seconds` calculates the full timeout for release-backed
+callers. A standalone bridge can perform the same calculation
 with the standard library. The isolated adapter in `tests/test_native_gate_queue.py` exercises
 that proposed change through the actual native bridge and a verified temporary candidate wheel.
 It covers waiting, automatic continuation into successful repository checks, and queue exhaustion.

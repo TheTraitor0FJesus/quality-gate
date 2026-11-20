@@ -39,6 +39,7 @@ from .verification_evidence import (
 class LookupStats:
 	lookup_ns: int = 0
 	producer_durations_ms: list[int] = field(default_factory=list)
+	slowest_producer: EvidenceProducer | None = None
 
 	@property
 	def lookup_ms(self) -> int:
@@ -76,6 +77,7 @@ def _collect_evidence(
 		or not isinstance(runtime_identity_value, RuntimeIdentity)
 	):
 		raise ValueError("evidence readiness changed")
+	by_directory: dict[Path, Configuration] = {}
 	for path in eligible:
 		candidate = root / path
 		metadata = candidate.lstat()
@@ -93,18 +95,14 @@ def _collect_evidence(
 			misses.append(path)
 			continue
 		evidence_files[path] = (content, mode)
-		configuration = Configuration(root)
-		configuration.capture("quality-gate.toml")
-		configuration.for_sources(
-			[
-				SourceFile(
-					path,
-					content,
-					hashlib.sha256(content).hexdigest(),
-					mode,
-				)
-			]
-		)
+		content_sha = hashlib.sha256(content).hexdigest()
+		directory = candidate.parent
+		configuration = by_directory.get(directory)
+		if configuration is None:
+			configuration = Configuration(root)
+			configuration.capture("quality-gate.toml")
+			configuration.for_sources([SourceFile(path, content, content_sha, mode)])
+			by_directory[directory] = configuration
 		configurations[path] = configuration
 		configuration_values = [
 			item
@@ -124,7 +122,7 @@ def _collect_evidence(
 			repository=repository,
 			path=path,
 			mode=mode,
-			content_sha256=hashlib.sha256(content).hexdigest(),
+			content_sha256=content_sha,
 			tool_version=ruff_tool.version,
 			tool_sha256=verified_tool_sha256,
 			policy_release=release_manifest.version,
@@ -140,13 +138,15 @@ def _collect_evidence(
 			misses.append(path)
 			continue
 		identities[path] = identity
-		configuration.assert_current()
-		started = time.monotonic_ns()
 		hit = store.lookup(identity, expected_engine=engine)
-		stats.lookup_ns += max(0, time.monotonic_ns() - started)
 		if hit is not None and valid_ruff_file_outcome(hit.outcome, path=path):
 			cached[path] = hit.outcome
 			stats.producer_durations_ms.append(hit.producer.duration_ms)
+			if (
+				stats.slowest_producer is None
+				or hit.producer.duration_ms > stats.slowest_producer.duration_ms
+			):
+				stats.slowest_producer = hit.producer
 		else:
 			misses.append(path)
 
@@ -330,7 +330,7 @@ def _assert_evidence_current(
 ) -> None:
 	"""Revalidate hits before publishing either lint or format results."""
 	candidate.assert_current(files)
-	for configuration in configurations.values():
+	for configuration in set(configurations.values()):
 		configuration.assert_current()
 	if (
 		native_tool.is_symlink()

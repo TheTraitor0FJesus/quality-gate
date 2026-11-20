@@ -349,7 +349,7 @@ def test_stale_reclamation_preserves_owner_record_without_valid_signature(
 	assert (run_directory / "owned-content").read_text(encoding="utf-8") == "owned"
 
 
-@pytest.mark.parametrize("signature", [None, 1, "0" * 63, "A" * 64, "g" * 64, "Г©" * 64])
+@pytest.mark.parametrize("signature", [None, 1, "0" * 63, "A" * 64, "g" * 64, "é" * 64])
 def test_valid_signed_record_rejects_malformed_signature_before_comparison(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signature: object
 ) -> None:

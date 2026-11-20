@@ -142,6 +142,8 @@ from .workspace_tree import _remove_entry as _remove_entry
 _SYSTEM_TEMP_ENVIRONMENT = "QUALITY_GATE_SYSTEM_TEMP"
 SYSTEM_TEMP_DIRECTORY = Path(os.environ.get(_SYSTEM_TEMP_ENVIRONMENT) or tempfile.gettempdir())
 _ROOT_LOCK_NAME = ".quality-gate.lock"
+_WORKSPACE_WRITE_ERRORS = {errno.EACCES, errno.EPERM, errno.EROFS}
+_STALE_CLEANUP_READ_ONLY = 3
 _TEMP_ENVIRONMENT = ("TMP", "TEMP", "TMPDIR")
 _active_workspace: ContextVar[tuple[Path, Path] | None] = ContextVar(
 	"quality_gate_active_workspace", default=None
@@ -164,7 +166,7 @@ def _locked_file(path: Path, *, deadline: float | None = None) -> Iterator[None]
 	except OSError as error:
 		if "symbolic link" in str(error):
 			raise
-		raise OSError(f"could not acquire temporary workspace lock: {path}") from error
+		raise OSError(error.errno, "could not acquire temporary workspace lock", path) from error
 	if handle is None:
 		raise OSError(f"could not acquire temporary workspace lock: {path}")
 	try:
@@ -252,7 +254,10 @@ def _fallback_workspace_root(root: Path, *, deadline: float | None = None) -> Pa
 	user_key = hashlib.sha256(os.path.normcase(user_identity).encode("utf-8")).hexdigest()[:16]
 	root_key = os.path.normcase(str(root)).encode("utf-8")
 	root_hash = hashlib.sha256(root_key).hexdigest()[:20]
-	user_root = SYSTEM_TEMP_DIRECTORY / f"quality-gate-workspaces-{user_key}"
+	system_temp = SYSTEM_TEMP_DIRECTORY
+	if not system_temp.is_absolute():
+		system_temp = Path.cwd() / system_temp
+	user_root = system_temp / f"quality-gate-workspaces-{user_key}"
 	_check_ordinary_directory(user_root, allow_missing=True)
 	_check_workspace_deadline(deadline)
 	user_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -275,11 +280,7 @@ def _prepare_workspace_with_fallback(
 		return _prepare_workspace(root, deadline=deadline)
 	except TemporaryWorkspaceError as error:
 		cause = error.__cause__
-		if not isinstance(cause, OSError) or cause.errno not in {
-			errno.EACCES,
-			errno.EPERM,
-			errno.EROFS,
-		}:
+		if not isinstance(cause, OSError) or cause.errno not in _WORKSPACE_WRITE_ERRORS:
 			raise
 	try:
 		fallback_root = _fallback_workspace_root(root, deadline=deadline)
@@ -497,10 +498,16 @@ def _locked_process_scope(deadline: float | None) -> Iterator[None]:
 		_process_lock.release()
 
 
-def _clean_stale_workspace_entries(temp_root: Path) -> None:
-	_check_ordinary_directory(temp_root)
-	with _locked_file(temp_root / _ROOT_LOCK_NAME):
-		_clean_stale_entries(temp_root)
+def _clean_stale_workspace_entries(temp_root: Path) -> int:
+	try:
+		_check_ordinary_directory(temp_root)
+		with _locked_file(temp_root / _ROOT_LOCK_NAME):
+			_clean_stale_entries(temp_root)
+	except OSError as error:
+		if error.errno in _WORKSPACE_WRITE_ERRORS:
+			return _STALE_CLEANUP_READ_ONLY
+		raise
+	return 0
 
 
 def _bounded_stale_workspace_cleanup(temp_root: Path, deadline: float | None) -> bool:
@@ -518,7 +525,7 @@ def _bounded_stale_workspace_cleanup(temp_root: Path, deadline: float | None) ->
 		"from pathlib import Path\n"
 		"sys.path.insert(0, sys.argv[1])\n"
 		"from quality_gate.temp_workspace import _clean_stale_workspace_entries\n"
-		"_clean_stale_workspace_entries(Path(sys.argv[2]))\n"
+		"sys.exit(_clean_stale_workspace_entries(Path(sys.argv[2])))\n"
 	)
 	try:
 		returncode, _output, _diagnostics = operation.run_process(
@@ -541,6 +548,8 @@ def _bounded_stale_workspace_cleanup(temp_root: Path, deadline: float | None) ->
 		raise TemporaryWorkspaceError(
 			"stale temporary workspace cleanup did not complete within the operation budget"
 		) from error
+	if returncode == _STALE_CLEANUP_READ_ONLY:
+		raise OSError(errno.EACCES, "temporary workspace is not writable", temp_root)
 	if returncode != 0:
 		raise OSError("stale temporary workspace cleanup failed")
 	_check_workspace_deadline(deadline)

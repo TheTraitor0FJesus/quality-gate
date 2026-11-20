@@ -39,6 +39,11 @@ class EngineIdentity:
 		return {"form": self.form, "version": self.version, "digest": self.digest}
 
 
+RUFF_LOCAL_COMMON = ("--no-cache", "--force-exclude")
+RUFF_LOCAL_LINT = ("--no-fix", "--extend-ignore", "I", "--output-format", "json")
+RUFF_LOCAL_FORMAT = ("--check", "--output-format", "json")
+
+
 def ruff_file_identity(
 	*,
 	engine: EngineIdentity,
@@ -129,27 +134,13 @@ def ruff_file_identity(
 		"platform": platform,
 		"configuration": sorted(configurations, key=lambda item: item["path"]),
 		"options": {
-			"lint": [
-				"check",
-				"--config",
-				"<pinned-policy>",
-				"--no-cache",
-				"--force-exclude",
-				"--no-fix",
-				"--extend-ignore",
-				"I",
-				"--output-format",
-				"json",
-			],
+			"lint": ["check", "--config", "<pinned-policy>", *RUFF_LOCAL_COMMON, *RUFF_LOCAL_LINT],
 			"format": [
 				"format",
 				"--config",
 				"<pinned-policy>",
-				"--no-cache",
-				"--force-exclude",
-				"--check",
-				"--output-format",
-				"json",
+				*RUFF_LOCAL_COMMON,
+				*RUFF_LOCAL_FORMAT,
 			],
 		},
 	}

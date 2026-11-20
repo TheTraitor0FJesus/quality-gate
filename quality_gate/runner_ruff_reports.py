@@ -73,7 +73,6 @@ def _ruff_unformatted(
 	output: str,
 	root: Path,
 	included: set[str],
-	syntax_paths: set[str],
 ) -> set[str]:
 	if code == 0 and not output.strip():
 		return set()
@@ -81,7 +80,7 @@ def _ruff_unformatted(
 		report = json.loads(output)
 	except json.JSONDecodeError as error:
 		raise ValueError("Ruff format returned invalid JSON") from error
-	if not isinstance(report, list) or code not in {0, 1, _runner.EXIT_UNCHECKED}:
+	if not isinstance(report, list) or code not in {0, 1}:
 		raise ValueError("Ruff format returned an incomplete report")
 	if (code == 0 and report) or (code == 1 and not report):
 		raise ValueError("Ruff format status does not match its report")
@@ -99,32 +98,7 @@ def _ruff_unformatted(
 		if path not in included:
 			raise ValueError("Ruff format reported a path outside the checked scope")
 		paths.add(path)
-	if code == _runner.EXIT_UNCHECKED and not syntax_paths:
-		raise ValueError("Ruff format exited without a syntax diagnostic")
 	return paths
-
-
-def _ruff_evidence_errors(
-	error: _runner.QualityGateError, check_id: str, format_id: str
-) -> tuple[CheckResult, CheckResult]:
-	return (
-		_runner._error_result(
-			_runner.QualityGateError(
-				str(error),
-				check_id=check_id,
-				exit_code=error.exit_code,
-				recovery_action=error.recovery_action,
-			)
-		),
-		_runner._error_result(
-			_runner.QualityGateError(
-				str(error),
-				check_id=format_id,
-				exit_code=error.exit_code,
-				recovery_action=error.recovery_action,
-			)
-		),
-	)
 
 
 def _build_ruff_results(

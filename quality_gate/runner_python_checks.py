@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from . import runner as _runner
+from .contracts import MAX_TELEMETRY_TEXT
+
+if TYPE_CHECKING:
+	from .runner_ruff_evidence import LookupStats
 
 _RUFF_COMMAND_PAIR_SIZE = 2
 
@@ -91,8 +97,10 @@ def _append_unavailable_runtime_checks(
 def _record_evidence_lookup(
 	operation: _runner.GateOperation,
 	check_id: str,
-	lookup_ms: int,
+	lookup: LookupStats,
 	*,
+	lookup_ms: int | None = None,
+	validation_ms: int,
 	reused_only: bool,
 ) -> None:
 	"""Attach shared lookup cost without claiming that a cached format process ran."""
@@ -100,7 +108,41 @@ def _record_evidence_lookup(
 	if timing is None:
 		return
 	reason = "file-local results reused; no format process" if reused_only else timing.reason
-	operation.check_timings[check_id] = _runner.replace(timing, lookup_ms=lookup_ms, reason=reason)
+	producer = lookup.slowest_producer
+	if producer is None:
+		raise ValueError("reused Ruff results require original producer metadata")
+	operation.check_timings[check_id] = _runner.replace(
+		timing,
+		lookup_ms=lookup_ms,
+		validation_ms=validation_ms,
+		disposition="reused" if reused_only else timing.disposition,
+		reason=f"{reason}; original metadata identifies the slowest producer operation".lstrip(
+			"; "
+		)[:MAX_TELEMETRY_TEXT],
+		original_elapsed_ms=producer.duration_ms,
+		original_operation_id=f"{producer.operation}@{producer.started_at}",
+	)
+
+
+def _full_ruff_result(
+	context: _runner._PythonCheckContext,
+	environment: dict[str, str],
+	specification: tuple[str, list[str], int],
+) -> _runner.CheckResult:
+	check_id, command, timeout = specification
+	errors: list[_runner.QualityGateError] = []
+	try:
+		_runner.run(
+			[*command, "--no-cache"],
+			context.root,
+			_runner._ruff_environment(environment),
+			timeout=_runner._remaining(
+				context.deadline, min(timeout, context.component.timeout_seconds)
+			),
+		)
+	except _runner.QualityGateError as error:
+		errors.append(_runner._command_error(check_id, error))
+	return _runner._command_results([check_id], errors, {})[0]
 
 
 def _run_ruff_with_evidence(
@@ -141,9 +183,21 @@ def _run_ruff_with_evidence(
 		return commands
 	if evidence is None:
 		return commands
-	lint = _runner.observe_check(check_id, scope, evidence.lint_checked, process_required=True)
+	lint = _runner.observe_check(
+		check_id,
+		scope,
+		lambda: evidence.lint_checked(lambda: _full_ruff_result(context, environment, commands[0])),
+		process_required=True,
+	)
 	if evidence.cached:
-		_record_evidence_lookup(operation, check_id, evidence.lookup.lookup_ms, reused_only=False)
+		_record_evidence_lookup(
+			operation,
+			check_id,
+			evidence.lookup,
+			lookup_ms=evidence.lookup.lookup_ms,
+			validation_ms=evidence.lint_validation_ms,
+			reused_only=False,
+		)
 		lint = operation.record_result(lint)
 	results.append(lint)
 	if not evidence.lint_complete:
@@ -151,15 +205,19 @@ def _run_ruff_with_evidence(
 	format_result = _runner.observe_check(
 		format_id,
 		results.scope_for(format_id),
-		evidence.format_checked,
+		lambda: evidence.format_checked(
+			lambda: _full_ruff_result(context, environment, commands[1])
+		),
 		process_required=True,
 	)
 	if evidence.cached:
 		_record_evidence_lookup(
 			operation,
 			format_id,
-			evidence.lookup.lookup_ms,
-			reused_only=not evidence.targets,
+			evidence.lookup,
+			validation_ms=evidence.format_validation_ms,
+			reused_only=not evidence.targets
+			and format_result.status in {_runner.Status.PASSED, _runner.Status.FAILED},
 		)
 		format_result = operation.record_result(format_result)
 	results.append(format_result)

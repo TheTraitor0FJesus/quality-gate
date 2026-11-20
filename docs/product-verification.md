@@ -34,15 +34,20 @@ file. These functions validate content; neither authenticates the origin of its 
 `verify_transport` separately returns `transport-verified` after checking the GitHub run, latest attempt, producer job, required steps,
 artifact metadata, creation time and upload-log receipt. The shared workflow must obtain these
 records with its read-only Actions token, select the exact run and attempt, and reject incomplete or
-ambiguous API lists. It must download each artifact by its verified ID, validate GitHub's ZIP digest
+ambiguous API lists. For the upload receipt, use
+`GET /repos/{owner}/{repo}/actions/jobs/{job_id}/steps/{step_number}/logs` with the producer job ID and
+the number of its `Upload verification evidence` step. Pass the response as `upload_log` with
+`job_id`, `step_number`, and `text`. The job-wide log can contain output from PR code.
+The workflow must download each artifact by its verified ID, validate GitHub's ZIP digest
 before extraction, and pass only those extracted files to `aggregate_directory`. It must run both
 content and transport validation on the same result records before reporting success. It must also
 include the separate full audit and release-readiness obligations in the full-profile aggregate.
 A caller must never substitute untrusted
 JSON for GitHub API or job-log records. The proof requires job name `Verify product <producer>
 <platform>`, successful `Verify product` and `Upload verification evidence` steps, and artifact
-name `product-verification-<producer>-<platform>-<attempt>`. The artifact upload receipt binds its
-GitHub ID and ZIP SHA-256 to the job. The per-file digest binds the delivered product bytes. A failed
+name `product-verification-<producer>-<platform>-<attempt>`. Choose producer and platform
+identifiers that yield a distinct artifact name for each obligation. The upload receipt binds its
+GitHub ID and ZIP SHA-256 to the upload step. The per-file digest binds the delivered product bytes. A failed
 or pending newer attempt blocks a prior success; this contract does not reuse earlier attempts.
 
 The consumer's caller schedules each required product or checks-only job on its own repository and
@@ -59,7 +64,9 @@ incomplete. Exact run and artifact evidence is not a publication receipt or auth
 On each platform, check out `head_sha` with credentials disabled, then run
 `python scripts/release_build.py --pull-request` with `SOURCE_SHA`, `BASE_SHA`, `RELEASE_PLATFORM`,
 `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT` and `RUNNER_TEMP` set from the trusted
-workflow context. The adapter rejects a dirty checkout and its build checks the exact Git HEAD. It
+workflow context. The adapter checks that the checkout is clean and at the requested Git HEAD
+before building, after building, and after testing. The ZIP comment records the source commit.
+The PR verifier checks this comment and the archive digest against the requested build. It
 builds the actual wheel and platform archive, validates the inventory and hashes, installs in an
 isolated runtime, runs setup and audit, and runs the complete repository tests against the candidate
 policy. On success it writes `verification.json` and the ZIP under

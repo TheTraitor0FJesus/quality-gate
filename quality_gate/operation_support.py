@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import subprocess
@@ -9,9 +10,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
-from . import operation as _operation
+from .contracts import CheckResult, Status
 
-_Result = TypeVar("_Result", bound=_operation.CheckResult)
+_Result = TypeVar("_Result", bound=CheckResult)
 
 _CLEANUP_BODY = """
 import json, sys
@@ -22,18 +23,12 @@ if len(payload) > limit:
     raise ValueError('cleanup inventory exceeded its limit')
 from pathlib import Path
 from quality_gate.temp_workspace import cleanup_handed_off_workspace
-from quality_gate.snapshot import remove_snapshot
 from quality_gate.native_cache import cleanup_native_cache_source_workspace
 inventory = json.loads(payload)
 failed = False
 for temp_root, run_directory in inventory['workspaces']:
     try:
         cleanup_handed_off_workspace(Path(temp_root), Path(run_directory))
-    except Exception:
-        failed = True
-for snapshot_root in inventory['snapshots']:
-    try:
-        remove_snapshot(Path(snapshot_root))
     except Exception:
         failed = True
 for source_workspace in inventory['native_cache']:
@@ -46,13 +41,34 @@ if failed:
 """
 
 
+def cleanup_inventory(
+	workspaces: list[tuple[Path, Path]],
+	native_cache: dict[Path, bytes],
+) -> bytes:
+	from .operation import MAX_CLEANUP_INVENTORY_BYTES
+
+	payload = json.dumps(
+		{
+			"workspaces": [[str(temp), str(root)] for temp, root in workspaces],
+			"native_cache": [
+				json.loads(native_cache[path]) for path in sorted(native_cache, key=str)
+			],
+		}
+	).encode("utf-8")
+	if len(payload) > MAX_CLEANUP_INVENTORY_BYTES:
+		raise ValueError("owned cleanup inventory exceeded its bound")
+	return payload
+
+
 def _is_lowercase_hex(value: str, length: int) -> bool:
-	return len(value) == length and all(
-		character in _operation._LOWERCASE_HEX for character in value
-	)
+	from .operation import _LOWERCASE_HEX
+
+	return len(value) == length and all(character in _LOWERCASE_HEX for character in value)
 
 
 def _is_system_workspace_temp(temp_root: Path, fallback_root: Path) -> bool:
+	from . import operation as _operation
+
 	try:
 		parts = temp_root.relative_to(fallback_root).parts
 	except ValueError:
@@ -70,7 +86,9 @@ def _is_system_workspace_temp(temp_root: Path, fallback_root: Path) -> bool:
 
 
 def remaining_timeout(limit: float | None = None) -> float | None:
-	operation = _operation.current_operation()
+	from .operation import current_operation
+
+	operation = current_operation()
 	return limit if operation is None else operation.remaining(limit)
 
 
@@ -82,7 +100,9 @@ def observe_check(
 	process_required: bool = False,
 ) -> _Result:
 	"""Time one stable check id and retain its result before later work can fail."""
-	operation = _operation.current_operation()
+	from .operation import OperationTimeoutError, current_operation
+
+	operation = current_operation()
 	if operation is None:
 		return check()
 	completed_result: _Result | None = None
@@ -95,13 +115,13 @@ def observe_check(
 		):
 			result = check()
 			completed_result = result
-	except _operation.OperationTimeoutError as error:
+	except OperationTimeoutError as error:
 		operation.record_result(
 			completed_result
 			if completed_result is not None
-			else _operation.CheckResult(
+			else CheckResult(
 				check_id,
-				_operation.Status.UNCHECKED,
+				Status.UNCHECKED,
 				f"operation deadline expired during {check_id}",
 				recovery_action=(
 					"inspect the current and last completed stages; restore the budget and retry"
@@ -121,6 +141,8 @@ def run_probe(
 	payload: bytes | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
 	"""Run a bounded readiness or Git probe on the active operation deadline."""
+	from . import operation as _operation
+
 	operation = _operation.current_operation()
 	if operation is None:
 		return subprocess.run(

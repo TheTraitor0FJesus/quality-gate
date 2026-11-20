@@ -19,7 +19,7 @@ def test_format_timeout_keeps_completed_ruff_failure(
 		lint_complete = True
 		cached: dict[str, object] = {}
 
-		def lint_checked(self) -> CheckResult:
+		def lint_checked(self, _fallback: object) -> CheckResult:
 			return CheckResult(
 				"python.component_1.ruff",
 				Status.FAILED,
@@ -27,7 +27,7 @@ def test_format_timeout_keeps_completed_ruff_failure(
 				recovery_action="resolve the finding",
 			)
 
-		def format_checked(self) -> CheckResult:
+		def format_checked(self, _fallback: object) -> CheckResult:
 			raise operation.OperationTimeoutError("deadline during format")
 
 	monkeypatch.setattr(runner_ruff, "prepare_ruff_evidence", lambda *args: EvidencePlan())

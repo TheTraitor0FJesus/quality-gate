@@ -98,9 +98,10 @@
   run; consumer runs keep their own dependency preparation contract. This 180-character bound is
   specific to release workspaces and does not limit consumer checkout paths.
   Snapshot construction batches cached-filter attribute queries and retrieves staged blob data in one
-  bounded Git batch. It validates each response, then reconstructs every indexed path and mode.
-  `candidate_snapshot` accepts one absolute work deadline and can transfer its owned staging root to
-  a registered cleanup owner. The work deadline does not bound teardown.
+  bounded Git batch. `quality_gate/snapshot_io.py` supervises its blocking filesystem phases under the
+  operation deadline. The snapshot validates each Git response, then reconstructs every indexed path
+  and mode. `candidate_snapshot` accepts one absolute work deadline and can transfer its owned staging
+  root to a registered cleanup owner. The work deadline does not bound teardown.
 - **Release and runtime preparation** — `quality-gate sync` → verified immutable release cache → `quality-gate setup` → repository-keyed runtime fingerprint → isolated Python environment; `quality-gate doctor` reports missing prerequisites as unchecked.
 - **Project bootstrap** — `$setup-repo` → `quality-gate.toml` and a CI caller → reusable `quality.yml`.
 - **Agent verification**: `python <CODEX_HOME>/tools/test_runner/cli.py run --repo <repo> --scope full --json`

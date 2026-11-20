@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib as hashlib
 import logging
-import math
 import os
 import shutil
 import stat
@@ -14,6 +13,7 @@ import tempfile
 import threading as threading
 import time
 import tomllib as tomllib
+import uuid
 from collections.abc import Callable, Iterator
 from collections.abc import Mapping as Mapping
 from contextlib import contextmanager
@@ -22,54 +22,27 @@ from pathlib import Path
 from typing import BinaryIO as BinaryIO
 from typing import cast as cast
 
+from . import snapshot_batch as _batch
 from .contracts import (
 	DEFAULT_COMMAND_TIMEOUT_SECONDS,
 )
 from .contracts import (
 	DEFAULT_MAX_BLOB_SIZE_MIB as DEFAULT_MAX_BLOB_SIZE_MIB,
 )
-from .snapshot_batch import (
-	_candidate_limits as _candidate_limits,
-)
-from .snapshot_batch import (
-	_close_pipe as _close_pipe,
-)
-from .snapshot_batch import (
-	_GitBatchOutput as _GitBatchOutput,
-)
-from .snapshot_batch import (
-	_object_header as _object_header,
-)
-from .snapshot_batch import (
-	_prepare_index as _prepare_index,
-)
-from .snapshot_batch import (
-	_read_batch_object as _read_batch_object,
-)
-from .snapshot_batch import (
-	_read_cached_blob as _read_cached_blob,
-)
-from .snapshot_batch import (
-	_read_git_blobs as _read_git_blobs,
-)
-from .snapshot_batch import (
-	_reject_filtered_paths as _reject_filtered_paths,
-)
-from .snapshot_batch import (
-	_run_git_batch as _run_git_batch,
-)
-from .snapshot_batch import (
-	_stop_and_reap as _stop_and_reap,
-)
-from .snapshot_batch import (
-	_wait_for_git_batch as _wait_for_git_batch,
-)
+from .edit_process import run_process as supervise_process
+from .edit_protocol import EditError
+from .path_safety import is_link_or_reparse
+from .snapshot_io import positive_snapshot_limit as _positive_limit
+from .snapshot_io import validate_snapshot_deadline as _validate_deadline
 
 _SUPPORTED_MODES = {b"100644", b"100755", b"120000"}
 _IndexFingerprint = tuple[int, int, int, bytes] | None
 _LOGGER = logging.getLogger(__name__)
 _MAX_MANIFEST_BYTES = 1024 * 1024
+_MAX_DISCOVERY_BYTES = 64 * 1024 * 1024
+_MAX_INDEX_PATH_BYTES = 64 * 1024
 MAX_CANDIDATE_BLOB_SIZE_MIB = 64
+_MAX_SNAPSHOT_DATA_BYTES = 1024 * 1024 * 1024
 _SHA1_OBJECT_ID_BYTES = 40
 _SHA256_OBJECT_ID_BYTES = 64
 _MISSING_OBJECT_HEADER_FIELDS = 2
@@ -88,22 +61,8 @@ class SnapshotError(RuntimeError):
 		super().__init__(message)
 
 
-def _positive_limit(value: int, name: str) -> int:
-	if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-		raise SnapshotError(f"{name} must be a positive integer")
-	return value
-
-
-def _validate_deadline(deadline: float | None) -> float | None:
-	if deadline is None:
-		return None
-	if (
-		isinstance(deadline, bool)
-		or not isinstance(deadline, (int, float))
-		or not math.isfinite(deadline)
-	):
-		raise SnapshotError("snapshot deadline must be a finite monotonic timestamp")
-	return float(deadline)
+class _GitCommandError(SnapshotError):
+	"""Git returned a nonzero exit status after completing the probe."""
 
 
 def _check_deadline(deadline: float | None) -> None:
@@ -128,56 +87,88 @@ def _git(
 	*,
 	index_file: Path | None = None,
 	deadline: float | None = None,
+	limit: int = _MAX_DISCOVERY_BYTES,
 ) -> subprocess.CompletedProcess[bytes]:
+	from .operation import OperationTimeoutError, current_operation
+	from .snapshot_io import inherits_snapshot_worker_tree
+
 	environment = os.environ.copy()
 	if index_file is not None:
 		environment["GIT_INDEX_FILE"] = str(index_file)
 	_LOGGER.debug("running Git candidate operation")
+	command = ["git", *arguments]
+	operation = current_operation()
+	timeout = _remaining_timeout(timeout_seconds, deadline)
 	try:
-		result = subprocess.run(
-			["git", *arguments],
-			cwd=repository,
-			env=environment,
-			capture_output=True,
-			check=False,
-			timeout=_remaining_timeout(timeout_seconds, deadline),
-		)
-	except (OSError, subprocess.TimeoutExpired) as exc:
+		if operation is None:
+			end = time.monotonic() + timeout
+			code, output, diagnostics = supervise_process(
+				command,
+				root=repository,
+				environment=environment,
+				deadline=end,
+				limit=limit,
+				own_tree=not inherits_snapshot_worker_tree(),
+				cleanup_deadline=end + 1,
+			)
+		else:
+			code, output, diagnostics = operation.run_process(
+				command,
+				root=repository,
+				environment=environment,
+				timeout_seconds=timeout,
+				limit=limit,
+				check_execution=False,
+			)
+	except EditError as exc:
+		if str(exc) == "limits":
+			raise SnapshotError("Git candidate response exceeds the snapshot limit") from exc
+		_check_deadline(deadline)
+		raise SnapshotError("Git could not provide the candidate snapshot") from exc
+	except (OSError, OperationTimeoutError) as exc:
 		if deadline is not None and time.monotonic() >= deadline:
 			raise SnapshotError("candidate snapshot exceeded its operation deadline") from exc
 		raise SnapshotError("Git could not provide the candidate snapshot") from exc
 	_check_deadline(deadline)
-	if result.returncode != 0:
-		raise SnapshotError(
-			f"Git could not provide the candidate snapshot (exit code {result.returncode})"
-		)
-	return result
+	if code != 0:
+		raise _GitCommandError(f"Git could not provide the candidate snapshot (exit code {code})")
+	return subprocess.CompletedProcess(command, code, output, diagnostics)
 
 
 def _index_path(repository: Path, timeout_seconds: int, deadline: float | None = None) -> Path:
 	configured_path = os.environ.get("GIT_INDEX_FILE")
 	if configured_path:
 		path = Path(configured_path)
-		return (path if path.is_absolute() else repository / path).resolve()
+		return path if path.is_absolute() else repository / path
 	result = _git(
 		repository,
 		("rev-parse", "--git-path", "index"),
 		timeout_seconds,
 		deadline=deadline,
+		limit=_MAX_INDEX_PATH_BYTES,
 	)
 	try:
 		raw_path = result.stdout.decode("utf-8").strip()
 	except UnicodeDecodeError as exc:
 		raise SnapshotError("Git returned a non-UTF-8 index path") from exc
 	path = Path(raw_path)
-	return (path if path.is_absolute() else repository / path).resolve()
+	return path if path.is_absolute() else repository / path
 
 
 def _index_fingerprint(path: Path, deadline: float | None = None) -> _IndexFingerprint:
+	from .operation import current_operation
+	from .snapshot_io import supervised_snapshot_io
+
+	if current_operation() is not None:
+		return supervised_snapshot_io("fingerprint", (path,), deadline)
 	_check_deadline(deadline)
 	try:
 		metadata = path.stat()
-		content = path.read_bytes()
+		digest = hashlib.sha256()
+		with path.open("rb") as stream:
+			while chunk := stream.read(_BATCH_READ_CHUNK_BYTES):
+				_check_deadline(deadline)
+				digest.update(chunk)
 	except FileNotFoundError:
 		_check_deadline(deadline)
 		return None
@@ -188,7 +179,7 @@ def _index_fingerprint(path: Path, deadline: float | None = None) -> _IndexFinge
 		metadata.st_size,
 		metadata.st_mtime_ns,
 		metadata.st_ctime_ns,
-		hashlib.sha256(content).digest(),
+		digest.digest(),
 	)
 
 
@@ -255,7 +246,10 @@ def _parse_staged_entry(raw_entry: bytes) -> _StagedEntry | None:
 def _candidate_path(root: Path, relative_path: str) -> Path:
 	path = root / relative_path
 	resolved_root = root.resolve()
-	resolved_path = path.resolve()
+	try:
+		resolved_path = path.resolve()
+	except (RuntimeError, OSError) as exc:
+		raise SnapshotError("a candidate path has an unresolved symbolic link") from exc
 	if resolved_path != resolved_root and resolved_root not in resolved_path.parents:
 		raise SnapshotError("the candidate path escapes its snapshot root")
 	return path
@@ -278,16 +272,30 @@ def _index_state(
 		index_file=index_file,
 		deadline=deadline,
 	).stdout
-	status = _git(
-		repository,
-		("status", "--porcelain=v2", "--untracked-files=no"),
-		timeout_seconds,
-		index_file=index_file,
-		deadline=deadline,
-	).stdout
 	if unmerged:
 		raise SnapshotError("the Git index contains unresolved merge entries")
-	if any(line.startswith(b"1 .A ") and b" 000000 " in line for line in status.splitlines()):
+	# Compare two index-only views. Worktree status may invoke a clean filter.
+	diffs = [
+		_git(
+			repository,
+			(
+				"diff",
+				"--cached",
+				"--raw",
+				"-z",
+				"--no-renames",
+				"--no-ext-diff",
+				"--no-textconv",
+				visibility,
+				"--",
+			),
+			timeout_seconds,
+			index_file=index_file,
+			deadline=deadline,
+		).stdout
+		for visibility in ("--ita-visible-in-index", "--ita-invisible-in-index")
+	]
+	if diffs[0] != diffs[1]:
 		raise SnapshotError("Git intent-to-add entries are not supported by this snapshot")
 	entries: list[_StagedEntry] = []
 	for raw_entry in staged.split(b"\0"):
@@ -301,16 +309,22 @@ def _index_state(
 
 def _make_read_only(path: Path, deadline: float | None = None) -> None:
 	try:
-		for child in sorted(path.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+		pending = [path]
+		while pending:
+			directory = pending.pop()
 			_check_deadline(deadline)
-			if child.is_symlink():
-				continue
-			mode = child.stat().st_mode
-			read_only_mode = stat.S_IREAD
-			if child.is_dir() or mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-				read_only_mode |= stat.S_IEXEC
-			os.chmod(child, read_only_mode)
-		os.chmod(path, stat.S_IREAD | stat.S_IEXEC)
+			with os.scandir(directory) as entries:
+				for entry in entries:
+					_check_deadline(deadline)
+					metadata = entry.stat(follow_symlinks=False)
+					if is_link_or_reparse(metadata):
+						continue
+					if stat.S_ISDIR(metadata.st_mode):
+						pending.append(Path(entry.path))
+					else:
+						executable = metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+						os.chmod(entry.path, stat.S_IREAD | (stat.S_IEXEC if executable else 0))
+			os.chmod(directory, stat.S_IREAD | stat.S_IEXEC)
 		_check_deadline(deadline)
 	except SnapshotError:
 		raise
@@ -421,7 +435,7 @@ def _materialize_candidate(context: _MaterializationContext) -> None:
 	_, entries = _index_state(
 		context.repository, context.timeout_seconds, context.index_copy, context.deadline
 	)
-	_reject_filtered_paths(
+	_batch._reject_filtered_paths(
 		context.repository,
 		entries,
 		context.index_copy,
@@ -432,18 +446,20 @@ def _materialize_candidate(context: _MaterializationContext) -> None:
 		raise SnapshotError("the Git index changed during candidate construction")
 	_check_deadline(context.deadline)
 	object_directory = context.candidate_root.parent / "objects"
-	object_sizes = _read_git_blobs(context, entries, object_directory)
+	object_sizes = _batch._read_git_blobs(context, entries, object_directory)
 	for entry in entries:
 		_check_deadline(context.deadline)
-		blob = _read_cached_blob(
+		blob = _batch._read_cached_blob(
 			object_directory / entry.object_id.decode("ascii"),
 			object_sizes[entry.object_id],
 			context.max_blob_bytes,
 			context.deadline,
 		)
 		_materialize_entry(context, entry, blob)
-	if object_directory.exists():
-		shutil.rmtree(object_directory)
+	for entry in entries:
+		_check_deadline(context.deadline)
+		if entry.mode == b"120000":
+			_candidate_path(context.candidate_root, entry.relative_path)
 	_make_read_only(context.candidate_root, context.deadline)
 	_check_deadline(context.deadline)
 
@@ -455,6 +471,9 @@ def _create_snapshot(
 	deadline: float | None = None,
 	register_cleanup: Callable[[Path], None] | None = None,
 ) -> CandidateSnapshot:
+	from .operation import current_operation
+	from .snapshot_io import supervise_materialization, supervised_snapshot_io
+
 	bootstrap_timeout = (
 		DEFAULT_COMMAND_TIMEOUT_SECONDS
 		if timeout_seconds is None
@@ -465,17 +484,24 @@ def _create_snapshot(
 	staging_root: Path | None = None
 	construction_succeeded = False
 	construction_error: BaseException | None = None
+	operation = current_operation()
 	try:
-		staging_root = Path(tempfile.mkdtemp(prefix="quality-gate-candidate-"))
-		_check_deadline(deadline)
+		if operation is None:
+			staging_root = Path(tempfile.mkdtemp(prefix="quality-gate-candidate-"))
+			(staging_root / "candidate").mkdir()
+		else:
+			if not isinstance(tempfile.tempdir, str):
+				raise SnapshotError("candidate snapshot requires an owned workspace")
+			staging_root = Path(tempfile.tempdir) / f"quality-gate-candidate-{uuid.uuid4().hex}"
+			operation.register_cleanup(staging_root)
+			supervised_snapshot_io("initialize", (staging_root,), deadline)
 		candidate_root = staging_root / "candidate"
-		candidate_root.mkdir()
 		_check_deadline(deadline)
-		index_path, source_fingerprint, index_copy = _prepare_index(
+		index_path, source_fingerprint, index_copy = _batch._prepare_index(
 			repository, staging_root, bootstrap_timeout, deadline
 		)
 		_check_deadline(deadline)
-		manifest_timeout, manifest_blob_limit = _candidate_limits(
+		manifest_timeout, manifest_blob_limit = _batch._candidate_limits(
 			repository, index_copy, bootstrap_timeout, deadline
 		)
 		effective_timeout = bootstrap_timeout if timeout_seconds is not None else manifest_timeout
@@ -484,18 +510,20 @@ def _create_snapshot(
 			if max_blob_size_mib is not None
 			else max(manifest_blob_limit, MAX_CANDIDATE_BLOB_SIZE_MIB)
 		)
-		_materialize_candidate(
-			_MaterializationContext(
-				repository=repository,
-				candidate_root=candidate_root,
-				index_path=index_path,
-				source_fingerprint=source_fingerprint,
-				index_copy=index_copy,
-				timeout_seconds=effective_timeout,
-				max_blob_bytes=effective_blob_limit * 1024 * 1024,
-				deadline=deadline,
-			)
+		context = _MaterializationContext(
+			repository=repository,
+			candidate_root=candidate_root,
+			index_path=index_path,
+			source_fingerprint=source_fingerprint,
+			index_copy=index_copy,
+			timeout_seconds=effective_timeout,
+			max_blob_bytes=effective_blob_limit * 1024 * 1024,
+			deadline=deadline,
 		)
+		if current_operation() is None:
+			_materialize_candidate(context)
+		else:
+			supervise_materialization(context)
 		_check_deadline(deadline)
 		snapshot = CandidateSnapshot(
 			root=candidate_root,
@@ -537,10 +565,10 @@ class CandidateSnapshot:
 			return "staged Git index identity unavailable"
 		return f"git-index-sha256:{self._source_fingerprint[3].hex()}"
 
-	def assert_unchanged(self) -> None:
+	def assert_unchanged(self, deadline: float | None = None) -> None:
 		"""Reject verification when the source Git index changed after snapshot creation."""
 
-		if _index_fingerprint(self.repository_index) != self._source_fingerprint:
+		if _index_fingerprint(self.repository_index, deadline) != self._source_fingerprint:
 			raise SnapshotError("the Git index changed during candidate verification")
 
 
@@ -557,12 +585,12 @@ def candidate_snapshot(
 
 	The deadline is one absolute ``time.monotonic()`` timestamp for preparation and
 	materialization; it does not bound teardown. When provided, ``register_cleanup`` receives the
-	complete owned staging root once and takes responsibility for cleanup. This handoff still
-	runs after the deadline.
+	complete owned staging root, including the batch objects, once and takes responsibility for
+	cleanup. This handoff still runs after the deadline.
 	"""
 
 	snapshot = _create_snapshot(
-		Path(repository).resolve(),
+		Path(repository) if Path(repository).is_absolute() else Path.cwd() / repository,
 		timeout_seconds,
 		max_blob_size_mib,
 		deadline,
@@ -571,7 +599,7 @@ def candidate_snapshot(
 	primary_error: BaseException | None = None
 	try:
 		yield snapshot
-		snapshot.assert_unchanged()
+		snapshot.assert_unchanged(deadline)
 	except KeyboardInterrupt as exc:
 		primary_error = SnapshotError("candidate verification was interrupted")
 		raise primary_error from exc

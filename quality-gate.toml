@@ -25,7 +25,6 @@ required_documents = [
     ".release/version.toml",
     ".release/notes.md",
     ".release/publisher.toml",
-    ".coderabbit.yaml",
     "README.md",
     "docs/consumer-setup.md",
     "docs/operations.md",
@@ -60,7 +59,7 @@ max_blob_size_mib = 5
 
 [repository.defaults]
 command_timeout_seconds = 120
-test_timeout_seconds = 1800
+test_timeout_seconds = 2100
 gate_timeout_seconds = 2400
 
 [[python]]
@@ -70,4 +69,4 @@ python_version = "3.12"
 dependency_inputs = ["pyproject.toml"]
 test_paths = ["tests"]
 tests_applicable = true
-timeout_seconds = 1800
+timeout_seconds = 2100

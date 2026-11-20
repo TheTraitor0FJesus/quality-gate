@@ -20,8 +20,6 @@ SnapshotError = snapshot_module.SnapshotError
 
 candidate_snapshot = snapshot_module.candidate_snapshot
 
-EXPECTED_FIXED_DISCOVERY_PROCESSES = 5
-
 EXPECTED_BATCH_ATTRIBUTE_PROCESSES = 1
 
 EXPECTED_BATCH_OBJECT_PROCESSES = 1
@@ -124,6 +122,14 @@ def _fake_batch_process(
 ) -> _FakeBatchProcess:
 	process = _FakeBatchProcess(response)
 	monkeypatch.setattr(snapshot_module.subprocess, "Popen", lambda *args, **kwargs: process)
+	monkeypatch.setattr(snapshot_module._batch, "_windows_job", lambda child: None)
+	monkeypatch.setattr(snapshot_module._batch, "_resume_windows", lambda child: None)
+	real_stop = snapshot_module._batch._stop
+	monkeypatch.setattr(
+		snapshot_module._batch,
+		"_stop",
+		lambda child, job, own_tree, deadline: real_stop(child, None, False, deadline),
+	)
 	return process
 
 
@@ -150,7 +156,6 @@ __all__ = [
 	"Callable",
 	"EXPECTED_BATCH_ATTRIBUTE_PROCESSES",
 	"EXPECTED_BATCH_OBJECT_PROCESSES",
-	"EXPECTED_FIXED_DISCOVERY_PROCESSES",
 	"Path",
 	"SnapshotError",
 	"_BlockingOutput",

@@ -12,9 +12,6 @@ from snapshot_feature_split72_support import (
 	EXPECTED_BATCH_OBJECT_PROCESSES as EXPECTED_BATCH_OBJECT_PROCESSES,
 )
 from snapshot_feature_split72_support import (
-	EXPECTED_FIXED_DISCOVERY_PROCESSES as EXPECTED_FIXED_DISCOVERY_PROCESSES,
-)
-from snapshot_feature_split72_support import (
 	Callable as Callable,
 )
 from snapshot_feature_split72_support import (
@@ -78,6 +75,8 @@ from snapshot_feature_split72_support import (
 	time as time,
 )
 
+from quality_gate import snapshot_batch
+
 
 def test_candidate_snapshot_preserves_construction_failure_if_registration_fails(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -97,7 +96,7 @@ def test_candidate_snapshot_preserves_construction_failure_if_registration_fails
 		registered.append(path)
 		raise registration_error
 
-	monkeypatch.setattr(snapshot_module, "_candidate_limits", fail_candidate_limits)
+	monkeypatch.setattr(snapshot_batch, "_candidate_limits", fail_candidate_limits)
 	monkeypatch.setattr(snapshot_module, "remove_snapshot", removed.append)
 	with pytest.raises(SnapshotError, match="registration failed") as raised:
 		with candidate_snapshot(tmp_path, register_cleanup=reject_registration):
@@ -122,7 +121,7 @@ def test_candidate_snapshot_registers_allocated_root_after_deadline_expires(
 	expired = False
 	registered: list[Path] = []
 	registered_at: list[float] = []
-	real_prepare_index = snapshot_module._prepare_index
+	real_prepare_index = snapshot_batch._prepare_index
 
 	def controlled_monotonic() -> float:
 		return deadline + 1 if expired else real_monotonic()
@@ -143,7 +142,7 @@ def test_candidate_snapshot_registers_allocated_root_after_deadline_expires(
 		registered_at.append(time.monotonic())
 
 	monkeypatch.setattr(snapshot_module.time, "monotonic", controlled_monotonic)
-	monkeypatch.setattr(snapshot_module, "_prepare_index", expire_after_index_copy)
+	monkeypatch.setattr(snapshot_batch, "_prepare_index", expire_after_index_copy)
 	with pytest.raises(SnapshotError, match="deadline"):
 		with candidate_snapshot(tmp_path, deadline=deadline, register_cleanup=register):
 			pass
@@ -188,7 +187,7 @@ def test_candidate_snapshot_propagates_one_absolute_deadline_to_git_batches(
 	git_deadlines: list[float | None] = []
 	batch_deadlines: list[float | None] = []
 	real_git = snapshot_module._git
-	real_batch = snapshot_module._run_git_batch
+	real_batch = snapshot_batch._run_git_batch
 
 	def record_git(
 		repository: Path,
@@ -197,6 +196,7 @@ def test_candidate_snapshot_propagates_one_absolute_deadline_to_git_batches(
 		*,
 		index_file: Path | None = None,
 		deadline: float | None = None,
+		limit: int = snapshot_module._MAX_DISCOVERY_BYTES,
 	) -> subprocess.CompletedProcess[bytes]:
 		git_deadlines.append(deadline)
 		return real_git(
@@ -205,6 +205,7 @@ def test_candidate_snapshot_propagates_one_absolute_deadline_to_git_batches(
 			timeout_seconds,
 			index_file=index_file,
 			deadline=deadline,
+			limit=limit,
 		)
 
 	def record_batch(
@@ -229,7 +230,7 @@ def test_candidate_snapshot_propagates_one_absolute_deadline_to_git_batches(
 		)
 
 	monkeypatch.setattr(snapshot_module, "_git", record_git)
-	monkeypatch.setattr(snapshot_module, "_run_git_batch", record_batch)
+	monkeypatch.setattr(snapshot_batch, "_run_git_batch", record_batch)
 	with candidate_snapshot(tmp_path, deadline=deadline) as snapshot:
 		assert (snapshot.root / "tracked.txt").read_bytes() == b"staged\n"
 
@@ -245,7 +246,7 @@ def test_candidate_snapshot_stops_preparation_at_the_shared_deadline(
 	real_monotonic = time.monotonic
 	deadline = real_monotonic() + 60
 	expired = False
-	real_prepare_index = snapshot_module._prepare_index
+	real_prepare_index = snapshot_batch._prepare_index
 
 	def controlled_monotonic() -> float:
 		return deadline + 1 if expired else real_monotonic()
@@ -262,7 +263,7 @@ def test_candidate_snapshot_stops_preparation_at_the_shared_deadline(
 		return result
 
 	monkeypatch.setattr(snapshot_module.time, "monotonic", controlled_monotonic)
-	monkeypatch.setattr(snapshot_module, "_prepare_index", expire_after_index_copy)
+	monkeypatch.setattr(snapshot_batch, "_prepare_index", expire_after_index_copy)
 	with pytest.raises(SnapshotError, match="deadline"):
 		with candidate_snapshot(tmp_path, deadline=deadline):
 			pass
@@ -392,12 +393,17 @@ def test_candidate_snapshot_deduplicates_shared_file_and_symlink_objects(tmp_pat
 @pytest.mark.skipif(
 	os.name == "nt", reason="Windows symlink creation can require elevated privileges"
 )
-def test_candidate_snapshot_rejects_staged_symlink_escape(tmp_path: Path) -> None:
+@pytest.mark.parametrize("compound", [False, True])
+def test_candidate_snapshot_rejects_staged_symlink_escape(tmp_path: Path, compound: bool) -> None:
 	assert _git(tmp_path, "init").returncode == 0
-	os.symlink("../outside", tmp_path / "escaping-link")
-	assert _git(tmp_path, "add", "--", "escaping-link").returncode == 0
+	if compound:
+		os.symlink("b/../outside", tmp_path / "a")
+		os.symlink(".", tmp_path / "b")
+	else:
+		os.symlink("../outside", tmp_path / "a")
+	assert _git(tmp_path, "add", "--", ".").returncode == 0
 
-	with pytest.raises(SnapshotError, match="symbolic link escapes"):
+	with pytest.raises(SnapshotError, match="escapes its snapshot root"):
 		with candidate_snapshot(tmp_path):
 			pass
 
@@ -407,10 +413,13 @@ def test_candidate_snapshot_rejects_cached_filter_attribute(tmp_path: Path) -> N
 	_init_and_stage(tmp_path, "tracked.txt")
 	(tmp_path / ".gitattributes").write_text("tracked.txt filter=blocked\n", encoding="utf-8")
 	assert _git(tmp_path, "add", ".gitattributes").returncode == 0
+	assert _git(tmp_path, "config", "filter.blocked.clean", "touch filter-ran; cat").returncode == 0
+	(tmp_path / "tracked.txt").write_text("different worktree content\n", encoding="utf-8")
 
 	with pytest.raises(SnapshotError, match="filters are not supported"):
 		with candidate_snapshot(tmp_path):
 			pass
+	assert not (tmp_path / "filter-ran").exists()
 
 
 def test_candidate_snapshot_reads_filter_attributes_from_the_staged_index(tmp_path: Path) -> None:

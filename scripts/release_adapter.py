@@ -324,10 +324,11 @@ def _write_manifest(output: Path, version: str, platform: str) -> None:
 	os.replace(temporary, output / "release.toml")
 
 
-def _archive(output: Path, version: str, platform: str) -> Path:
+def _archive(output: Path, version: str, platform: str, source_sha: str) -> Path:
 	label = "Windows" if platform == "windows" else "Linux"
 	archive = output.parent / f"quality-gate-v{version}-{label}.zip"
 	with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+		zipped.comment = source_sha.encode("ascii")
 		for path in sorted(item for item in output.rglob("*") if item.is_file()):
 			zipped.write(path, path.relative_to(output).as_posix())
 	return archive
@@ -386,7 +387,8 @@ def build(
 	_download_biome(root, output, selected)
 	_download_gitleaks(root, output, selected)
 	_write_manifest(output, projection.version, selected)
-	archive = _archive(output, projection.version, selected)
+	_assert_source(root, source_sha)
+	archive = _archive(output, projection.version, selected, source_sha)
 	return ArtifactIdentity(
 		projection.version,
 		source_sha,
@@ -426,6 +428,12 @@ def verify_pr(source_sha: str, artifact: Path | str, expected_sha256: str) -> Ar
 	path = Path(artifact).resolve()
 	if not path.is_file() or _sha256(path) != expected_sha256:
 		raise ReleaseError("artifact is missing or its digest does not match")
+	try:
+		with zipfile.ZipFile(path) as archive:
+			if archive.comment != source_sha.encode("ascii"):
+				raise ReleaseError("artifact does not match the requested source commit")
+	except (OSError, zipfile.BadZipFile) as error:
+		raise ReleaseError("artifact is not a readable ZIP archive") from error
 	projection = validate_version_projections(root)
 	try:
 		verify_product_candidate(root, path, version=f"v{projection.version}")
@@ -433,6 +441,7 @@ def verify_pr(source_sha: str, artifact: Path | str, expected_sha256: str) -> Ar
 		raise ReleaseError(f"product verification rejected the artifact: {error}") from error
 	if _sha256(path) != expected_sha256:
 		raise ReleaseError("artifact changed during verification")
+	_assert_source(root, source_sha)
 	return ArtifactIdentity(
 		projection.version, source_sha, _platform(), path.name, expected_sha256, str(path)
 	)

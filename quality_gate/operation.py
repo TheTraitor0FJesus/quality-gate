@@ -6,7 +6,6 @@ import json
 import math
 import os
 import sys
-import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator
@@ -37,6 +36,7 @@ from .operation_support import (
 from .operation_support import (
 	_is_system_workspace_temp as _is_system_workspace_temp,
 )
+from .operation_support import cleanup_inventory
 from .operation_support import (
 	observe_check as observe_check,
 )
@@ -119,7 +119,7 @@ class GateOperation:
 		self._cleaned = False
 		self._bases: set[Path] = set()
 		self._roots: set[tuple[Path, Path]] = set()
-		self._cleanup_roots: set[Path] = set()
+		self._workspace_handoffs: set[tuple[Path, Path]] = set()
 		self._native_cache_cleanup: dict[Path, bytes] = {}
 		self._deferred_releases: list[Callable[[], None]] = []
 		self._planned_checks: dict[str, str] = {}
@@ -342,36 +342,20 @@ class GateOperation:
 		):
 			raise ValueError("cleanup root is not an owned temporary workspace")
 		self._bases.add(actual)
+		self._bases.add(root)
 		self._roots.add((actual_temp_root, actual))
+		self._workspace_handoffs.add((temp_root, root))
 
 	def handoff_workspace(self, temp_root: Path, root: Path) -> None:
 		"""Confirm a workspace registered at allocation is left to operation cleanup."""
-		pair = (temp_root.resolve(), root.resolve())
-		if pair not in self._roots:
+		pair = (temp_root, root)
+		if pair not in self._workspace_handoffs:
 			raise ValueError("temporary workspace was not registered to this operation")
 
 	def register_cleanup(self, root: Path) -> None:
-		actual = root.resolve()
-		temp_root = Path(tempfile.gettempdir()).resolve()
-		inside_workspace = any(actual.is_relative_to(base) for base in self._bases)
-		is_operation_staging = (
-			actual.parent == temp_root
-			and actual.name.startswith("quality-gate-")
-			and actual.is_dir()
-		)
-		if (
-			root.is_symlink()
-			or actual.is_symlink()
-			or not (inside_workspace or is_operation_staging)
-			or actual == self.root
-			or actual in self.root.parents
-		):
-			raise ValueError(
-				"cleanup root is outside the operation-owned workspace or snapshot staging"
-			)
-		if actual in self._cleanup_roots:
-			raise ValueError("cleanup root was registered more than once")
-		self._cleanup_roots.add(actual)
+		"""Confirm that the authenticated workspace already owns this child."""
+		if ".." in root.parts or not any(base in root.parents for base in self._bases):
+			raise ValueError("cleanup root is outside the operation-owned workspace")
 
 	def register_native_cache_cleanup(self, payload: bytes) -> None:
 		"""Register one serialized, ownership-checked native source tree cleanup."""
@@ -486,7 +470,7 @@ class GateOperation:
 		roots = sorted(self._roots, key=lambda item: (str(item[0]), len(item[1].parts)))
 		cleanup_error: Exception | None = None
 		try:
-			if roots or self._cleanup_roots or self._native_cache_cleanup:
+			if roots or self._native_cache_cleanup:
 				self._remove_roots(roots, end)
 		except Exception as error:
 			cleanup_error = error
@@ -526,25 +510,14 @@ class GateOperation:
 						else "deferred cache leases released"
 						if self._deferred_releases
 						else "no owned roots"
-						if not roots and not self._cleanup_roots and not self._native_cache_cleanup
+						if not roots and not self._native_cache_cleanup
 						else "cleanup worker did not start"
 					),
 				)
 			)
 
 	def _remove_roots(self, roots: list[tuple[Path, Path]], end: float) -> None:
-		payload = json.dumps(
-			{
-				"workspaces": [[str(temp_root), str(root)] for temp_root, root in roots],
-				"snapshots": [str(root) for root in sorted(self._cleanup_roots, key=str)],
-				"native_cache": [
-					json.loads(self._native_cache_cleanup[path].decode("utf-8"))
-					for path in sorted(self._native_cache_cleanup, key=str)
-				],
-			}
-		).encode("utf-8")
-		if len(payload) > MAX_CLEANUP_INVENTORY_BYTES:
-			raise ValueError("owned cleanup inventory exceeded its bound")
+		payload = cleanup_inventory(roots, self._native_cache_cleanup)
 		reserve = min(1.0, self.cleanup_seconds / 2)
 		code, _output, _diagnostics = supervise_process(
 			[
@@ -555,7 +528,7 @@ class GateOperation:
 				"-c",
 				_CLEANUP_BODY,
 				str(MAX_CLEANUP_INVENTORY_BYTES),
-				str(Path(__file__).resolve().parent.parent),
+				os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 			],
 			root=self.root,
 			environment=dict(os.environ),
@@ -566,12 +539,7 @@ class GateOperation:
 			on_started=lambda: setattr(self, "_cleanup_process_started", True),
 			cleanup_deadline=end,
 		)
-		if (
-			code != 0
-			or any(root.exists() for _temp_root, root in roots)
-			or any(root.exists() for root in self._cleanup_roots)
-			or any(root.exists() or root.is_symlink() for root in self._native_cache_cleanup)
-		):
+		if code != 0:
 			raise OSError("owned temporary workspaces were not safely removed")
 
 	@staticmethod

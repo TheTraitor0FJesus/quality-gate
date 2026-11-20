@@ -12,9 +12,6 @@ from snapshot_feature_split72_support import (
 	EXPECTED_BATCH_OBJECT_PROCESSES as EXPECTED_BATCH_OBJECT_PROCESSES,
 )
 from snapshot_feature_split72_support import (
-	EXPECTED_FIXED_DISCOVERY_PROCESSES as EXPECTED_FIXED_DISCOVERY_PROCESSES,
-)
-from snapshot_feature_split72_support import (
 	Callable as Callable,
 )
 from snapshot_feature_split72_support import (
@@ -144,10 +141,10 @@ def test_candidate_snapshot_reports_git_timeout_as_unchecked(
 		return str(path)
 
 	def timeout(*args: object, **kwargs: object) -> None:
-		raise subprocess.TimeoutExpired("git", 1)
+		raise snapshot_module.EditError("deadline")
 
 	monkeypatch.setattr(snapshot_module.tempfile, "mkdtemp", capture_mkdtemp)
-	monkeypatch.setattr(snapshot_module.subprocess, "run", timeout)
+	monkeypatch.setattr(snapshot_module, "supervise_process", timeout)
 
 	with pytest.raises(SnapshotError, match="Git could not provide"):
 		with candidate_snapshot(tmp_path):
@@ -156,6 +153,40 @@ def test_candidate_snapshot_reports_git_timeout_as_unchecked(
 	monkeypatch.undo()
 	assert created and all(not path.exists() for path in created)
 	assert _git(tmp_path, "diff", "--cached", "--binary").stdout == index_before
+
+
+@pytest.mark.parametrize("different_index", [False, True])
+def test_candidate_rejects_incomplete_snapshot_inputs(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, different_index: bool
+) -> None:
+	from io import BytesIO
+
+	manifest = tmp_path / "quality-gate.toml"
+	manifest.write_bytes(b"# larger than the machine capture limit\n")
+	_init_and_stage(tmp_path, manifest.name)
+	monkeypatch.delenv("GIT_INDEX_FILE", raising=False)
+	if different_index:
+		index = tmp_path / ".git" / "index"
+		captured = index.read_bytes()
+		open_path = Path.open
+		reads = 0
+
+		def open_index(path: Path, *args: object, **kwargs: object) -> object:
+			nonlocal reads
+			if path == index:
+				reads += 1
+				if reads == 2:
+					return BytesIO(bytes([captured[0] ^ 1]) + captured[1:])
+			return open_path(path, *args, **kwargs)
+
+		monkeypatch.setattr(Path, "open", open_index)
+		expected = "copied Git index does not match"
+	else:
+		monkeypatch.setattr(snapshot_module, "_MAX_MANIFEST_BYTES", 16)
+		expected = "response exceeds the snapshot limit"
+	with pytest.raises(SnapshotError, match=expected):
+		with candidate_snapshot(tmp_path):
+			pytest.fail("an incomplete candidate was yielded")
 
 
 def test_candidate_snapshot_converts_interruption_and_cleans_up(tmp_path: Path) -> None:
@@ -199,12 +230,16 @@ def test_candidate_snapshot_reports_cleanup_failure_after_verification(
 	def fail_cleanup(path: Path) -> None:
 		raise OSError("locked")
 
-	monkeypatch.setattr(snapshot_module.shutil, "rmtree", fail_cleanup)
-
+	cleanup_root = None
 	with pytest.raises(SnapshotError, match="cleanup failed"):
-		with candidate_snapshot(tmp_path):
-			pass
+		with candidate_snapshot(tmp_path) as snapshot:
+			cleanup_root = snapshot.root.parent
+			assert (snapshot.root / "tracked.txt").is_file()
+			monkeypatch.setattr(snapshot_module.shutil, "rmtree", fail_cleanup)
 
+	assert cleanup_root is not None
+	monkeypatch.undo()
+	snapshot_module.remove_snapshot(cleanup_root)
 	assert _git(tmp_path, "diff", "--cached", "--binary").stdout == index_before
 
 
@@ -309,15 +344,23 @@ def test_candidate_snapshot_rejects_non_positive_timeout(tmp_path: Path) -> None
 			pass
 
 
-def test_candidate_snapshot_registers_full_owned_root_once_on_normal_exit(tmp_path: Path) -> None:
+def test_candidate_snapshot_registers_full_owned_root_once_on_normal_exit(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
 	(tmp_path / "tracked.txt").write_bytes(b"staged\n")
 	_init_and_stage(tmp_path, "tracked.txt")
 	registered: list[Path] = []
 	owned_root: Path | None = None
+
+	def fail_early_cleanup(path: Path) -> None:
+		pytest.fail(f"snapshot tried to delete {path} before handing off cleanup")
+
 	try:
-		with candidate_snapshot(tmp_path, register_cleanup=registered.append) as snapshot:
-			owned_root = snapshot.root.parent
-			assert (snapshot.root / "tracked.txt").read_bytes() == b"staged\n"
+		with monkeypatch.context() as patch:
+			patch.setattr(snapshot_module.shutil, "rmtree", fail_early_cleanup)
+			with candidate_snapshot(tmp_path, register_cleanup=registered.append) as snapshot:
+				owned_root = snapshot.root.parent
+				assert (snapshot.root / "tracked.txt").read_bytes() == b"staged\n"
 		assert registered == [owned_root]
 		assert owned_root is not None
 		assert owned_root.is_dir()
@@ -377,7 +420,7 @@ def test_candidate_snapshot_registers_once_after_construction_failure(
 		raise SnapshotError("construction failed after staging allocation")
 
 	monkeypatch.setattr(snapshot_module.tempfile, "mkdtemp", capture_mkdtemp)
-	monkeypatch.setattr(snapshot_module, "_candidate_limits", fail_candidate_limits)
+	monkeypatch.setattr(snapshot_module._batch, "_candidate_limits", fail_candidate_limits)
 	with pytest.raises(SnapshotError, match="construction failed after staging allocation"):
 		with candidate_snapshot(tmp_path, register_cleanup=registered.append):
 			pass

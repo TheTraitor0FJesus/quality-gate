@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from subprocess import list2cmdline
 from typing import Any
 
 from . import runner as _runner
@@ -14,7 +16,7 @@ from .distribution import ExternalTool, ReleaseManifest
 from .edit_inputs import Configuration
 from .edit_protocol import EditError
 from .evidence_candidate import CandidateEvidence
-from .evidence_identity import _REVIEWED_RUFF_POLICIES
+from .evidence_identity import _REVIEWED_RUFF_POLICIES, RUFF_LOCAL_COMMON
 from .launcher import PreparedEnvironment
 from .runner_ruff_evidence import (
 	LookupStats,
@@ -78,7 +80,7 @@ class RuffEvidenceChecks:
 		self.policy_sha, self.release_sha, self.python_sha = policy_sha, release_sha, python_sha
 		self.policy = prepared.policy_root / "quality_gate" / "policy" / "ruff.toml"
 		self.arguments = [component.path.relative_to(root).as_posix()]
-		self.common = ["--config", str(self.policy), "--no-cache", "--force-exclude", "--quiet"]
+		self.common = ["--config", str(self.policy), *RUFF_LOCAL_COMMON, "--quiet"]
 		self.started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 		self.started_monotonic = time.monotonic()
 		self.check_id = f"python.component_{index}.ruff"
@@ -87,6 +89,8 @@ class RuffEvidenceChecks:
 		self.identities: dict[str, dict[str, Any]] = {}
 		self.cached: dict[str, dict[str, Any]] = {}
 		self.lookup = LookupStats()
+		self.lint_validation_ms = 0
+		self.format_validation_ms = 0
 		self.files: dict[str, tuple[bytes, int]] = {}
 		self.fresh: dict[str, dict[str, object]] = {}
 		self.eligible: list[str] = []
@@ -113,6 +117,12 @@ class RuffEvidenceChecks:
 
 	def lint(self) -> _runner.CheckResult:
 		"""Run fresh import rules and missing file-local lint before recording Ruff."""
+		if any(
+			("\n" in path or "\r" in path or entry.mode == b"120000")
+			and Path(path).is_relative_to(self.arguments[0])
+			for path, entry in self.candidate.entries.items()
+		):
+			raise ValueError("Ruff discovery cannot prove unambiguous paths")
 		self.eligible = _eligible_files(
 			self.tool,
 			self.common,
@@ -123,6 +133,7 @@ class RuffEvidenceChecks:
 			self.timeout,
 		)
 		misses: list[str] = []
+		lookup_started = time.monotonic_ns()
 		_collect_evidence(
 			self.store,
 			self.engine,
@@ -145,10 +156,10 @@ class RuffEvidenceChecks:
 			self.lookup,
 		)
 		self.targets = list(misses)
-		if len(" ".join(self.targets)) + 2048 > _MAX_TARGET_ARGUMENT_CHARS:
-			self.targets = list(self.eligible)
-			self.cached.clear()
-			self.lookup.producer_durations_ms.clear()
+		self.lookup.lookup_ns = time.monotonic_ns() - lookup_started
+		command_line = list2cmdline([*self.tool, *self.common, *self.targets])
+		if len(command_line.encode("utf-16-le")) // 2 + 2048 > _MAX_TARGET_ARGUMENT_CHARS:
+			raise ValueError("Ruff file-local command exceeds its argument budget")
 		if self.eligible:
 			self.import_findings = _check_import_rules(
 				self.tool,
@@ -180,9 +191,10 @@ class RuffEvidenceChecks:
 				}
 		if set(self.cached) | set(self.fresh) != set(self.eligible):
 			raise ValueError("Ruff evidence did not cover the selected scope")
+		validation_started = time.monotonic_ns()
 		self.assert_current()
-		self.lint_complete = True
-		return self._with_lookup_summary(
+		self.lint_validation_ms = (time.monotonic_ns() - validation_started) // 1_000_000
+		result = self._with_lookup_summary(
 			_build_ruff_results(
 				self.cached | self.fresh,
 				self.import_findings,
@@ -192,6 +204,8 @@ class RuffEvidenceChecks:
 				self.format_id,
 			)[0]
 		)
+		self.lint_complete = True
+		return result
 
 	def format(self) -> _runner.CheckResult:
 		"""Run missing format checks, revalidate all hits and publish complete outcomes."""
@@ -203,7 +217,6 @@ class RuffEvidenceChecks:
 			self.environment,
 			self.deadline,
 			self.timeout,
-			self.syntax_paths,
 		)
 		for path, outcome in self.fresh.items():
 			format_status = (
@@ -215,7 +228,23 @@ class RuffEvidenceChecks:
 				if outcome["lint_status"] == "failed" or format_status == "failed"
 				else "passed"
 			)
+		validation_started = time.monotonic_ns()
 		self.assert_current()
+		self.format_validation_ms = (time.monotonic_ns() - validation_started) // 1_000_000
+		if self.fresh:
+			self._publish_fresh()
+		return self._with_lookup_summary(
+			_build_ruff_results(
+				self.cached | self.fresh,
+				self.import_findings,
+				self.cached,
+				self.eligible,
+				self.check_id,
+				self.format_id,
+			)[1]
+		)
+
+	def _publish_fresh(self) -> None:
 		_publish_evidence(
 			self.candidate,
 			self.store,
@@ -236,30 +265,25 @@ class RuffEvidenceChecks:
 			self.started_at,
 			self.started_monotonic,
 		)
-		return self._with_lookup_summary(
-			_build_ruff_results(
-				self.cached | self.fresh,
-				self.import_findings,
-				self.cached,
-				self.eligible,
-				self.check_id,
-				self.format_id,
-			)[1]
-		)
 
 	def _with_lookup_summary(self, result: _runner.CheckResult) -> _runner.CheckResult:
 		if not self.cached:
 			return result
 		durations = self.lookup.producer_durations_ms
+		cost = (
+			f"evidence validation {self.format_validation_ms} ms"
+			if result.check_id == self.format_id
+			else f"evidence lookup {self.lookup.lookup_ms} ms"
+		)
 		return replace(
 			result,
 			summary=(
-				f"{result.summary}; shared evidence lookup {self.lookup.lookup_ms} ms; "
+				f"{result.summary}; {cost}; "
 				f"original producer operation duration {min(durations)} to {max(durations)} ms"
 			),
 		)
 
-	def lint_checked(self) -> _runner.CheckResult:
+	def lint_checked(self, fallback: Callable[[], _runner.CheckResult]) -> _runner.CheckResult:
 		try:
 			return self.lint()
 		except (
@@ -270,10 +294,11 @@ class RuffEvidenceChecks:
 			KeyError,
 			EditError,
 			SnapshotError,
-		) as error:
-			return _unchecked(self.check_id, error)
+		):
+			self.cached.clear()
+			return fallback()
 
-	def format_checked(self) -> _runner.CheckResult:
+	def format_checked(self, fallback: Callable[[], _runner.CheckResult]) -> _runner.CheckResult:
 		try:
 			return self.format()
 		except (
@@ -284,19 +309,9 @@ class RuffEvidenceChecks:
 			KeyError,
 			EditError,
 			SnapshotError,
-		) as error:
-			return _unchecked(self.format_id, error)
-
-
-def _unchecked(check_id: str, error: Exception) -> _runner.CheckResult:
-	return _runner._error_result(
-		_runner.QualityGateError(
-			f"Ruff evidence verification is incomplete: {error}",
-			check_id=check_id,
-			exit_code=_runner.EXIT_UNCHECKED,
-			recovery_action="restore complete Ruff reports and retry the quality gate",
-		)
-	)
+		):
+			self.cached.clear()
+			return fallback()
 
 
 def prepare_ruff_evidence(

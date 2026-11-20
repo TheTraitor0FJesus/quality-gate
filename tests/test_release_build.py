@@ -6,17 +6,27 @@ import hashlib
 import json
 import os
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import BinaryIO, cast
 
 import pytest
+
 from quality_gate.contracts import load_manifest
 from scripts import release_build
 
 
-@pytest.mark.parametrize("test_exit_code", [0, 1])
-def test_release_build_isolates_test_history_and_preserves_evidence(
-	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, test_exit_code: int
+@pytest.mark.parametrize(
+	"failed_command",
+	[None, "runtime-check", "doctor", "collection-error", "no-tests", "timeout", "interrupt"],
+)
+def test_release_build_checks_pin_readiness_without_repeating_artifact_suite(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+	failed_command: str | None,
 ) -> None:
 	source_sha = "a" * 40
 	provider_sha = "b" * 40
@@ -62,18 +72,62 @@ def test_release_build_isolates_test_history_and_preserves_evidence(
 		commands.append(list(command))
 		if "build" in command:
 			cast(BinaryIO, options["stdout"]).write(json.dumps(identity).encode())
-		if "pytest" in command:
+		if "doctor" in command:
 			test_environments.append(dict(cast(dict[str, str], options["env"])))
-			if test_exit_code:
-				raise subprocess.CalledProcessError(test_exit_code, command)
+		failure_at = (
+			"runtime-check"
+			if failed_command in {"collection-error", "no-tests", "timeout", "interrupt"}
+			else failed_command
+		)
+		if failure_at is not None and failure_at in command:
+			if failed_command == "collection-error":
+				raise subprocess.CalledProcessError(2, command)
+			if failed_command == "no-tests":
+				raise subprocess.CalledProcessError(5, command)
+			if failed_command == "timeout":
+				raise subprocess.TimeoutExpired(command, 1)
+			if failed_command == "interrupt":
+				raise KeyboardInterrupt
+			raise subprocess.CalledProcessError(1, command)
 		return subprocess.CompletedProcess(command, 0)
 
 	monkeypatch.setattr(subprocess, "run", run)
-	if test_exit_code:
-		with pytest.raises(subprocess.CalledProcessError):
+	if failed_command:
+		expected_error = {
+			"timeout": subprocess.TimeoutExpired,
+			"interrupt": KeyboardInterrupt,
+		}.get(failed_command, subprocess.CalledProcessError)
+		with pytest.raises(expected_error):
 			release_build.main()
 	else:
 		release_build.main()
+	assert not any("pytest" in command for command in commands)
+	assert sum("runtime-check" in command for command in commands) == 1
+	timings = [
+		json.loads(line.removeprefix("release-timing: "))
+		for line in capsys.readouterr().out.splitlines()
+		if line.startswith("release-timing: ")
+	]
+	assert timings[0]["stage"] == "workspace-setup"
+	assert timings[-1]["stage"] == "workspace-cleanup"
+	assert timings[-1]["status"] == "completed"
+	assert all(record["elapsed_seconds"] >= 0 for record in timings)
+	failed_stages = [record["stage"] for record in timings if record["status"] == "failed"]
+	output = tmp_path / "quality-gate-release" / context["RELEASE_PLATFORM"]
+	if failed_command:
+		assert not (output / "evidence.json").exists()
+		assert not (output / "artifact.json").exists()
+		assert not any(record["stage"] == "package-finalization" for record in timings)
+	else:
+		assert not failed_stages
+		assert timings[-2]["stage"] == "package-finalization"
+	if failed_command in {"runtime-check", "collection-error", "no-tests", "timeout", "interrupt"}:
+		assert failed_stages == ["artifact-verification"]
+		assert not any("doctor" in command or "sync" in command for command in commands)
+		return
+	if failed_command == "doctor":
+		assert failed_stages == ["pinned-policy-readiness"]
+	assert sum("doctor" in command for command in commands) == 1
 
 	pinned_release = load_manifest(Path.cwd()).policy_release
 	candidate_syncs = [
@@ -119,11 +173,7 @@ def test_release_build_isolates_test_history_and_preserves_evidence(
 	assert (
 		Path(test_environment["QUALITY_GATE_POLICY_ROOT"]) == cache / "quality-gate/releases/v2.3.0"
 	)
-	output = tmp_path / "quality-gate-release" / context["RELEASE_PLATFORM"]
-	if test_exit_code:
-		assert not (output / "evidence.json").exists()
-		assert not (output / "artifact.json").exists()
-	else:
+	if failed_command is None:
 		evidence = json.loads((output / "evidence.json").read_text(encoding="utf-8"))
 		assert evidence["repository"] == "owner/quality-gate"
 		assert evidence["source_sha"] == source_sha
@@ -133,8 +183,9 @@ def test_release_build_isolates_test_history_and_preserves_evidence(
 		assert (output / package.name).read_bytes() == package.read_bytes()
 
 
+@pytest.mark.parametrize("switch_during_verification", [False, True])
 def test_pr_build_does_not_require_publication_candidate(
-	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, switch_during_verification: bool
 ) -> None:
 	source_sha = "a" * 40
 	platform = "windows" if os.name == "nt" else "linux"
@@ -161,16 +212,27 @@ def test_pr_build_does_not_require_publication_candidate(
 		"sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
 	}
 	commands: list[list[str]] = []
+	head = source_sha
 
 	def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
+		nonlocal head
 		commands.append(command)
+		if command == ["git", "rev-parse", "HEAD"]:
+			return subprocess.CompletedProcess(command, 0, stdout=head)
 		if "build" in command:
 			cast(BinaryIO, options["stdout"]).write(json.dumps(identity).encode())
+		if "verify-pr" in command and switch_during_verification:
+			head = "c" * 40
 		return subprocess.CompletedProcess(command, 0, stdout="")
 
 	monkeypatch.setattr(subprocess, "run", run)
-	release_build.main(pull_request=True)
 	evidence_path = tmp_path / "quality-gate-release" / platform / "verification.json"
+	if switch_during_verification:
+		with pytest.raises(SystemExit, match="clean exact-head checkout"):
+			release_build.main(pull_request=True)
+		assert not evidence_path.exists()
+		return
+	release_build.main(pull_request=True)
 	evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
 	assert evidence["base_sha"] == "b" * 40
 	assert evidence["head_sha"] == source_sha
@@ -179,8 +241,9 @@ def test_pr_build_does_not_require_publication_candidate(
 	assert not (evidence_path.parent / "evidence.json").exists()
 
 
+@pytest.mark.parametrize("dirty", [True, False])
 def test_pr_build_rejects_checkout_changed_during_build(
-	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dirty: bool
 ) -> None:
 	platform = "windows" if os.name == "nt" else "linux"
 	for key, value in {
@@ -193,20 +256,87 @@ def test_pr_build_rejects_checkout_changed_during_build(
 		"RUNNER_TEMP": str(tmp_path),
 	}.items():
 		monkeypatch.setenv(key, value)
-	checks = 0
+	source_sha = "a" * 40
+	current_head = source_sha
+	working_tree_dirty = False
+	package = tmp_path / "quality-gate-v2.3.0.zip"
+	package.write_bytes(b"verified artifact")
+	identity = {
+		"path": str(package),
+		"name": package.name,
+		"version": "2.3.0",
+		"source_sha": source_sha,
+		"platform": platform,
+		"sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
+	}
 
 	def run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
-		nonlocal checks
+		nonlocal current_head, working_tree_dirty
 		if command[:2] == ["git", "status"]:
-			checks += 1
 			return subprocess.CompletedProcess(
-				command, 0, stdout=" M source.py\n" if checks == 2 else ""
+				command, 0, stdout=" M source.py\n" if working_tree_dirty else ""
 			)
+		if command == ["git", "rev-parse", "HEAD"]:
+			return subprocess.CompletedProcess(command, 0, stdout=current_head)
 		if "build" in command:
-			cast(BinaryIO, options["stdout"]).write(b"{}")
+			cast(BinaryIO, options["stdout"]).write(json.dumps(identity).encode())
+			if dirty:
+				working_tree_dirty = True
+			else:
+				current_head = "c" * 40
 		return subprocess.CompletedProcess(command, 0, stdout="")
 
 	monkeypatch.setattr(subprocess, "run", run)
 	with pytest.raises(SystemExit, match="clean exact-head checkout"):
 		release_build.main(pull_request=True)
 	assert not (tmp_path / "quality-gate-release" / platform / "verification.json").exists()
+
+def test_release_build_reports_and_propagates_cleanup_failure(
+	monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+	@contextmanager
+	def workspace(_root: Path) -> Iterator[None]:
+		yield
+		raise OSError("cleanup unavailable")
+
+	monkeypatch.setattr(release_build, "temporary_workspace", workspace)
+	monkeypatch.setattr(release_build, "_run_release_build", lambda **_kwargs: None)
+	with pytest.raises(OSError, match="cleanup unavailable"):
+		release_build.main()
+	timings = [
+		json.loads(line.removeprefix("release-timing: "))
+		for line in capsys.readouterr().out.splitlines()
+	]
+	assert [(record["stage"], record["status"]) for record in timings] == [
+		("workspace-setup", "completed"),
+		("workspace-cleanup", "failed"),
+	]
+
+
+@pytest.mark.parametrize("missing", ["python-domain", "components", "test-root", "applicable-tests"])
+def test_release_build_rejects_a_manifest_that_could_skip_the_full_suite(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+	manifest = load_manifest(Path.cwd())
+	if missing == "python-domain":
+		manifest = replace(manifest, repository=replace(manifest.repository, domains=("repository",)))
+	elif missing == "components":
+		manifest = replace(manifest, python=())
+	else:
+		component = replace(
+			manifest.python[0],
+			test_paths=("tests/unit",) if missing == "test-root" else (),
+			tests_applicable=missing != "applicable-tests",
+			tests_reason="No tests are declared." if missing == "applicable-tests" else None,
+		)
+		manifest = replace(manifest, python=(component,))
+	monkeypatch.setattr(release_build, "load_manifest", lambda _root: manifest)
+	candidate = {"source_sha": "a" * 40, "pr": 27}
+	candidate_bytes = (json.dumps(candidate, sort_keys=True, separators=(",", ":")) + "\n").encode()
+	candidate_path = tmp_path / "candidate.json"
+	candidate_path.write_bytes(candidate_bytes)
+	monkeypatch.setenv("CANDIDATE_PATH", str(candidate_path))
+	monkeypatch.setenv("CANDIDATE_DIGEST", hashlib.sha256(candidate_bytes).hexdigest())
+	monkeypatch.setenv("SOURCE_SHA", candidate["source_sha"])
+	with pytest.raises(SystemExit, match="must cover the complete tests directory"):
+		release_build.main()

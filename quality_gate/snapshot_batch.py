@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from . import snapshot as _snapshot
+from .edit_process import _resume_windows, _stop, _windows_job
+from .edit_protocol import EditError
 
 
 def _prepare_index(
@@ -11,16 +13,43 @@ def _prepare_index(
 	timeout_seconds: int,
 	deadline: float | None = None,
 ) -> tuple[_snapshot.Path, _snapshot._IndexFingerprint, _snapshot.Path]:
+	from .operation import current_operation
+	from .snapshot_io import supervised_snapshot_io
+
 	_snapshot._check_deadline(deadline)
 	index_path = _snapshot._index_path(repository, timeout_seconds, deadline)
-	source_fingerprint = _snapshot._index_fingerprint(index_path, deadline)
 	index_copy = staging_root / "index"
+	source_fingerprint = (
+		_copy_index(index_path, index_copy, deadline)
+		if current_operation() is None
+		else supervised_snapshot_io("copy", (index_path, index_copy), deadline)
+	)
+	return (index_path, source_fingerprint, index_copy)
+
+
+def _copy_index(
+	index_path: _snapshot.Path,
+	index_copy: _snapshot.Path,
+	deadline: float | None = None,
+) -> _snapshot._IndexFingerprint:
+	source_fingerprint = _snapshot._index_fingerprint(index_path, deadline)
 	if source_fingerprint is not None:
-		_snapshot.shutil.copyfile(index_path, index_copy)
+		digest = _snapshot.hashlib.sha256()
+		copied_size = 0
+		with index_path.open("rb") as source, index_copy.open("xb") as target:
+			while chunk := source.read(_snapshot._BATCH_READ_CHUNK_BYTES):
+				_snapshot._check_deadline(deadline)
+				copied_size += len(chunk)
+				if copied_size > source_fingerprint[0]:
+					break
+				target.write(chunk)
+				digest.update(chunk)
+		if (copied_size, digest.digest()) != (source_fingerprint[0], source_fingerprint[3]):
+			raise _snapshot.SnapshotError("the copied Git index does not match the source")
 	_snapshot._check_deadline(deadline)
 	if _snapshot._index_fingerprint(index_path, deadline) != source_fingerprint:
 		raise _snapshot.SnapshotError("the Git index changed during candidate construction")
-	return (index_path, source_fingerprint, index_copy)
+	return source_fingerprint
 
 
 def _candidate_limits(
@@ -36,8 +65,9 @@ def _candidate_limits(
 			timeout_seconds,
 			index_file=index_file,
 			deadline=deadline,
+			limit=_snapshot._MAX_MANIFEST_BYTES,
 		).stdout
-	except _snapshot.SnapshotError:
+	except _snapshot._GitCommandError:
 		_snapshot._check_deadline(deadline)
 		return (_snapshot.DEFAULT_COMMAND_TIMEOUT_SECONDS, _snapshot.DEFAULT_MAX_BLOB_SIZE_MIB)
 	_snapshot._check_deadline(deadline)
@@ -90,7 +120,7 @@ def _reject_filtered_paths(
 			stream.write(entry.raw_path + b"\x00")
 
 	def read_attributes(stream: _snapshot.BinaryIO) -> None:
-		output = _snapshot._GitBatchOutput(stream, deadline)
+		output = _GitBatchOutput(stream, deadline)
 		for entry in entries:
 			_snapshot._check_deadline(deadline)
 			path = output.read_nul_field(len(entry.raw_path))
@@ -106,7 +136,7 @@ def _reject_filtered_paths(
 				)
 		output.assert_eof("Git returned an unexpected candidate attribute response")
 
-	_snapshot._run_git_batch(
+	_run_git_batch(
 		repository,
 		index_file,
 		timeout_seconds,
@@ -186,20 +216,15 @@ def _stop_and_reap(
 	process: _snapshot.subprocess.Popen[bytes],
 	workers: list[_snapshot.threading.Thread],
 	deadline: float,
+	job: tuple[object, int] | None,
+	own_tree: bool,
 ) -> None:
-	if process.poll() is None:
-		try:
-			process.kill()
-		except OSError:
-			if process.poll() is None:
-				raise
 	try:
-		process.wait(timeout=max(0.0, deadline - _snapshot.time.monotonic()))
-	except _snapshot.subprocess.TimeoutExpired as exc:
-		if process.poll() is None:
-			raise _snapshot.SnapshotError(
-				"Git could not stop the candidate batch before its deadline"
-			) from exc
+		_stop(process, job, own_tree, deadline)
+	except EditError as exc:
+		raise _snapshot.SnapshotError(
+			"Git could not stop the candidate batch before its deadline"
+		) from exc
 	for worker in workers:
 		worker.join(max(0.0, deadline - _snapshot.time.monotonic()))
 	if any(worker.is_alive() for worker in workers):
@@ -265,6 +290,17 @@ def _run_git_batch(
 	deadline: float | None = None,
 ) -> None:
 	_snapshot._check_deadline(deadline)
+	from .operation import current_operation
+	from .snapshot_io import inherits_snapshot_worker_tree
+
+	operation = current_operation()
+	inherits_tree = inherits_snapshot_worker_tree()
+	cleanup_deadline = _snapshot.time.monotonic() + timeout_seconds
+	batch_deadline = cleanup_deadline - min(1.0, timeout_seconds / 4)
+	if deadline is not None:
+		batch_deadline = min(batch_deadline, deadline)
+		cleanup_deadline = min(cleanup_deadline, deadline + 1)
+	windows = _snapshot.os.name == "nt"
 	try:
 		process = _snapshot.subprocess.Popen(
 			["git", *arguments],
@@ -273,6 +309,8 @@ def _run_git_batch(
 			stdin=_snapshot.subprocess.PIPE,
 			stdout=_snapshot.subprocess.PIPE,
 			stderr=_snapshot.subprocess.DEVNULL,
+			start_new_session=not windows and not inherits_tree,
+			creationflags=0x00000004 if windows and not inherits_tree else 0,
 		)
 	except OSError as exc:
 		raise _snapshot.SnapshotError("Git could not provide the candidate snapshot") from exc
@@ -280,10 +318,8 @@ def _run_git_batch(
 	stdout = _snapshot.cast(_snapshot.BinaryIO, process.stdout)
 	worker_errors: list[BaseException] = []
 	workers: list[_snapshot.threading.Thread] = []
-	cleanup_deadline = _snapshot.time.monotonic() + timeout_seconds
-	batch_deadline = cleanup_deadline - min(1.0, timeout_seconds / 4)
-	if deadline is not None:
-		batch_deadline = min(batch_deadline, deadline)
+	job = None
+	own_tree = not windows and not inherits_tree
 
 	def run_worker(
 		operation: _snapshot.Callable[[_snapshot.BinaryIO], None], pipe: _snapshot.BinaryIO
@@ -292,34 +328,36 @@ def _run_git_batch(
 			operation(pipe)
 		except Exception as exc:
 			worker_errors.append(exc)
-
-	def send_input(pipe: _snapshot.BinaryIO) -> None:
-		try:
-			write_input(pipe)
 		finally:
-			_snapshot._close_pipe(pipe)
+			_close_pipe(pipe)
 
 	try:
-		for operation, pipe in ((send_input, stdin), (read_output, stdout)):
+		if windows and not inherits_tree:
+			job = _windows_job(process)
+			own_tree = True
+			_resume_windows(process)
+		for handler, pipe in ((write_input, stdin), (read_output, stdout)):
 			worker = _snapshot.threading.Thread(
-				target=run_worker, args=(operation, pipe), daemon=True
+				target=run_worker, args=(handler, pipe), daemon=True
 			)
 			worker.start()
 			workers.append(worker)
-		_snapshot._wait_for_git_batch(process, workers, worker_errors, batch_deadline)
-	except BaseException as exc:
-		if process.poll() is None or any(worker.is_alive() for worker in workers):
-			try:
-				_snapshot._stop_and_reap(process, workers, cleanup_deadline)
-			except _snapshot.SnapshotError as cleanup_error:
-				raise cleanup_error from exc
-		raise
+		_wait_for_git_batch(process, workers, worker_errors, batch_deadline)
+	except EditError as exc:
+		raise _snapshot.SnapshotError("Git candidate batch could not be supervised") from exc
 	finally:
-		_snapshot._close_pipe(stdin)
-		_snapshot._close_pipe(stdout)
+		if operation is not None and (
+			process.poll() is None or any(worker.is_alive() for worker in workers)
+		):
+			cleanup_deadline = min(cleanup_deadline, operation._process_cleanup_deadline())
+		try:
+			_stop_and_reap(process, workers, cleanup_deadline, job, own_tree)
+		finally:
+			for pipe in (stdin, stdout)[len(workers) :]:
+				_close_pipe(pipe)
 
 
-def _object_header(output: _snapshot._GitBatchOutput, requested_id: bytes) -> int:
+def _object_header(output: _GitBatchOutput, requested_id: bytes) -> int:
 	header = output.read_line(_snapshot._MAX_OBJECT_HEADER_BYTES)
 	if not header.endswith(b"\n"):
 		raise _snapshot.SnapshotError("Git returned a malformed candidate object header")
@@ -347,7 +385,7 @@ def _object_header(output: _snapshot._GitBatchOutput, requested_id: bytes) -> in
 
 
 def _read_batch_object(
-	output: _snapshot._GitBatchOutput,
+	output: _GitBatchOutput,
 	object_id: bytes,
 	path_count: int,
 	object_directory: _snapshot.Path,
@@ -357,10 +395,11 @@ def _read_batch_object(
 	deadline: float | None = None,
 ) -> tuple[int, int]:
 	_snapshot._check_deadline(deadline)
-	size = _snapshot._object_header(output, object_id)
+	size = _object_header(output, object_id)
 	if size > max_blob_bytes:
 		raise _snapshot.SnapshotError("a staged blob exceeds the configured snapshot limit")
-	candidate_size = size * path_count
+	# One cached object and all its materialized copies coexist until cleanup.
+	candidate_size = size * (path_count + 1)
 	if candidate_bytes + candidate_size > max_candidate_bytes:
 		raise _snapshot.SnapshotError("staged blob data exceeds the aggregate snapshot limit")
 	candidate_bytes += candidate_size
@@ -399,7 +438,7 @@ def _read_git_blobs(
 		return {}
 	object_directory.mkdir()
 	object_sizes: dict[bytes, int] = {}
-	max_candidate_bytes = len(entries) * context.max_blob_bytes
+	max_candidate_bytes = _snapshot._MAX_SNAPSHOT_DATA_BYTES
 
 	def write_object_ids(stream: _snapshot.BinaryIO) -> None:
 		for object_id in entries_by_object:
@@ -407,11 +446,11 @@ def _read_git_blobs(
 			stream.write(object_id + b"\n")
 
 	def read_objects(stream: _snapshot.BinaryIO) -> None:
-		output = _snapshot._GitBatchOutput(stream, context.deadline)
+		output = _GitBatchOutput(stream, context.deadline)
 		candidate_bytes = 0
 		for object_id, object_entries in entries_by_object.items():
 			_snapshot._check_deadline(context.deadline)
-			size, candidate_bytes = _snapshot._read_batch_object(
+			size, candidate_bytes = _read_batch_object(
 				output,
 				object_id,
 				len(object_entries),
@@ -425,7 +464,7 @@ def _read_git_blobs(
 		output.assert_eof("Git returned unexpected candidate object data")
 
 	_snapshot._LOGGER.debug("running Git candidate object batch")
-	_snapshot._run_git_batch(
+	_run_git_batch(
 		context.repository,
 		context.index_copy,
 		context.timeout_seconds,

@@ -74,7 +74,8 @@ The canonical identity binds every input that can change the check's meaning:
 - a hash of the repository's Git common directory, or of its canonical root when
   it is not a Git repository;
 - exact root-relative file path, content SHA-256 and normalized file mode for each
-  file in scope, plus component membership and candidate kind;
+  file in scope. Edit batch identities also bind component membership. Gate
+  validates staged candidate identity separately before reusing file evidence;
 - executing provider engine form (`source` or `wheel`), version and digest of its
   actual code. The form is part of the digest input, so equal version text cannot
   authorize reuse between a mutable source checkout and a released wheel. If the

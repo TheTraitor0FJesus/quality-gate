@@ -306,36 +306,42 @@ def test_registered_roots_share_one_cleanup_and_leave_unowned_content(tmp_path: 
 	assert len([stage for stage in verdict.operation.stages if stage.stage == "cleanup"]) == 1
 
 
+@pytest.mark.parametrize("relative_system_temp", [False, True])
 def test_read_only_workspace_fallback_is_owned_until_shared_cleanup(
-	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative_system_temp: bool
 ) -> None:
 	repository = tmp_path / "read-only-repository"
 	repository.mkdir()
+	repository_temp = repository / "temp"
+	repository_temp.mkdir()
+	lock = repository_temp / ".quality-gate.lock"
+	lock.write_bytes(b"\0")
 	system_temp = tmp_path / "system-temp"
 	system_temp.mkdir()
+	if relative_system_temp:
+		monkeypatch.chdir(tmp_path)
+		system_temp = Path("system-temp")
 	monkeypatch.setattr(temp_workspace, "SYSTEM_TEMP_DIRECTORY", system_temp)
-	prepare_workspace = temp_workspace._prepare_workspace
-
-	def reject_repository_workspace(
-		root: Path, *, deadline: float | None = None
-	) -> tuple[Path, Path, object, object, object]:
-		if root == repository.resolve():
-			error = TemporaryWorkspaceError("repository temp is not writable")
-			raise error from PermissionError(errno.EROFS, "read-only repository")
-		return prepare_workspace(root, deadline=deadline)
-
-	monkeypatch.setattr(temp_workspace, "_prepare_workspace", reject_repository_workspace)
 	fallback_root = temp_workspace._fallback_workspace_root(repository.resolve())
 	gate = GateOperation(repository, "check", cleanup_seconds=3)
-	with gate:
-		with temporary_workspace(
-			repository,
-			deadline=gate.deadline,
-			workspace_registered=gate.register_workspace,
-			cleanup_owner=gate.handoff_workspace,
-		) as workspace:
-			assert workspace.parent == fallback_root / "temp"
-			assert workspace.is_dir()
+	lock.chmod(0o444)
+	try:
+		try:
+			with lock.open("r+b"):
+				pytest.skip("effective user can write the read-only lock")
+		except PermissionError:
+			pass
+		with gate:
+			with temporary_workspace(
+				repository,
+				deadline=gate.deadline,
+				workspace_registered=gate.register_workspace,
+				cleanup_owner=gate.handoff_workspace,
+			) as workspace:
+				assert workspace.parent.resolve() == (fallback_root / "temp").resolve()
+				assert workspace.is_dir()
+	finally:
+		lock.chmod(0o644)
 	verdict = gate.verdict()
 
 	assert verdict.exit_code == 0
@@ -416,33 +422,46 @@ def test_cleanup_stage_reports_time_spent_in_the_shared_cleanup_phase(
 	assert cleanup.disposition == "executed"
 
 
-def test_registered_snapshot_staging_root_is_removed_by_shared_cleanup(
+@pytest.mark.parametrize("replaced", [False, True])
+def test_snapshot_cleanup_uses_authenticated_workspace(
 	tmp_path: Path,
+	replaced: bool,
 ) -> None:
-	staging = Path(tempfile.mkdtemp(prefix="quality-gate-candidate-issue69-"))
-	(staging / "candidate").mkdir()
-	(staging / "candidate" / "staged.txt").write_text("candidate", encoding="utf-8")
-	try:
-		with GateOperation(tmp_path, "check", cleanup_seconds=3) as gate:
+	with GateOperation(tmp_path, "check", cleanup_seconds=3) as gate:
+		with temporary_workspace(
+			tmp_path,
+			workspace_registered=gate.register_workspace,
+			cleanup_owner=gate.handoff_workspace,
+		) as workspace:
+			staging = workspace / "quality-gate-candidate"
+			staging.mkdir()
+			(staging / "staged.txt").write_text("candidate", encoding="utf-8")
 			gate.register_cleanup(staging)
-		verdict = gate.verdict()
+		if replaced:
+			workspace.rename(workspace.with_name("displaced-workspace"))
+			staging.mkdir(parents=True)
+			(staging / "foreign.txt").write_text("foreign", encoding="utf-8")
+	verdict = gate.verdict()
+	if replaced:
+		assert (staging / "foreign.txt").read_text(encoding="utf-8") == "foreign"
+		assert verdict.exit_code == EXIT_UNCHECKED
+	else:
 		assert not staging.exists()
 		assert verdict.exit_code == 0
-		assert verdict.operation is not None
-		cleanup = next(stage for stage in verdict.operation.stages if stage.stage == "cleanup")
-		assert cleanup.disposition == "executed"
-	finally:
-		if staging.exists():
-			shutil.rmtree(staging)
+	assert verdict.operation is not None
+	cleanup = next(stage for stage in verdict.operation.stages if stage.stage == "cleanup")
+	assert cleanup.disposition == "executed"
 
 
-def test_cleanup_refuses_a_root_without_operation_ownership(tmp_path: Path) -> None:
-	protected = tmp_path / "quality_gate"
+def test_cleanup_refuses_a_root_without_operation_ownership(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+	protected = tmp_path / "quality-gate-candidate-unregistered"
 	protected.mkdir()
 	with GateOperation(tmp_path, "check") as gate:
-		with temporary_workspace(tmp_path, cleanup_owner=gate.register_workspace):
-			with pytest.raises(ValueError, match="owned"):
-				gate.register_cleanup(protected)
+		with pytest.raises(ValueError, match="owned"):
+			gate.register_cleanup(protected)
 	assert protected.is_dir()
 
 

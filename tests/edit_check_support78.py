@@ -307,8 +307,14 @@ def request(root: Path, cache: Path, *paths: str) -> dict[str, Any]:
 	}
 
 
-def invoke(payload: object, *, engine_wheel: Path | None = None) -> tuple[int, dict[str, Any]]:
+def invoke(
+	payload: object, *, engine_wheel: Path | None = None, ci: bool = False
+) -> tuple[int, dict[str, Any]]:
 	invocation_environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+	for flag in ("CI", "GITHUB_ACTIONS", "QUALITY_GATE_ADMISSION_CI"):
+		invocation_environment.pop(flag, None)
+	if ci:
+		invocation_environment["CI"] = "true"
 	if engine_wheel is not None:
 		invocation_environment["PYTHONPATH"] = str(engine_wheel)
 	if isinstance(payload, dict) and isinstance(payload.get("root"), str):

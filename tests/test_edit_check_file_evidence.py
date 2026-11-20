@@ -43,3 +43,7 @@ def test_read_only_validation_reuses_unchanged_file_results_and_keeps_other_fail
 	assert second["files"][2]["status"] == "passed"
 	assert {finding["rule"] for finding in second["files"][3]["findings"]} == {"F821"}
 	assert second["files"][3]["evidence"] == "reused"
+
+	ci_exit, ci_result = invoke(payload, ci=True)
+	assert ci_exit == 1, ci_result
+	assert all(file["evidence"] == "executed" for file in ci_result["files"])

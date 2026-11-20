@@ -503,35 +503,27 @@ class EvidenceStore:
 			return None
 
 	def _make_room(self, target: Path, key: bytes) -> bool:
-		entries: list[tuple[int, Path]] = []
-		record_count = 0
+		records: list[Path] = []
 		with os.scandir(self.root) as directory:
 			for entry in directory:
 				path = Path(entry.path)
 				if not _is_record_path(path):
 					continue
-				record_count += 1
-				if record_count > _MAX_RECORDS:
+				records.append(path)
+				if len(records) > _MAX_RECORDS:
 					return False
-				if path == target:
-					continue
-				try:
-					payload = self._load(
-						path,
-						key,
-						expected_digest=path.stem,
-					)
-				except (OSError, ValueError, TypeError, KeyError, RecursionError):
-					payload = None
-				if payload is not None:
-					entries.append((entry.stat(follow_symlinks=False).st_mtime_ns, path))
-		if target.exists() or record_count < _MAX_RECORDS:
+		if target in records or len(records) < _MAX_RECORDS:
 			return True
-		if not entries:
-			return False
-		_oldest_time, oldest = min(entries, key=lambda item: (item[0], item[1].name))
-		oldest.unlink()
-		return True
+		records.sort(key=lambda path: (path.lstat().st_mtime_ns, path.name))
+		for path in records:
+			try:
+				payload = self._load(path, key, expected_digest=path.stem)
+			except (OSError, ValueError, TypeError, KeyError, RecursionError):
+				continue
+			if payload is not None:
+				path.unlink()
+				return True
+		return False
 
 	def publish(
 		self,
@@ -583,7 +575,7 @@ class EvidenceStore:
 				record = _canonical(
 					{
 						"payload": payload,
-						"mac": hmac.digest(key, _canonical(payload), "sha256").hex(),
+						"mac": hmac.digest(key, payload_bytes, "sha256").hex(),
 					}
 				)
 				if len(record) <= _MAX_RECORD_BYTES:

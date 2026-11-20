@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import runner as _runner
+from .evidence_identity import RUFF_LOCAL_FORMAT, RUFF_LOCAL_LINT
 from .runner_ruff_reports import _ruff_report_findings, _ruff_unformatted
 
 
@@ -12,20 +13,13 @@ def _run_with_status(
 	command: list[str], root: Path, environment: dict[str, str], *, timeout: float
 ) -> tuple[int, str]:
 	"""Use the operation-owned subprocess path and retain the machine-report exit code."""
-	try:
-		return _runner._run_bounded_subprocess(command, root, environment, timeout)
-	except OSError as error:
-		raise _runner.QualityGateError(
-			f"Ruff could not be executed: {error}",
-			check_id="runtime.command",
-			exit_code=_runner.EXIT_UNCHECKED,
-		) from error
-	except (_runner.subprocess.TimeoutExpired, _runner.OutputReadError) as error:
-		raise _runner.QualityGateError(
-			f"Ruff verification could not complete: {error}",
-			check_id="runtime.timeout",
-			exit_code=_runner.EXIT_UNCHECKED,
-		) from error
+	operation = _runner.current_operation()
+	if operation is None:
+		raise ValueError("Ruff evidence requires an active operation")
+	code, output, _diagnostics = operation.run_process(
+		command, root=root, environment=environment, timeout_seconds=timeout
+	)
+	return code, output.decode("utf-8", errors="strict")
 
 
 def _eligible_files(
@@ -37,18 +31,24 @@ def _eligible_files(
 	deadline: float,
 	gate_timeout: int,
 ) -> list[str]:
-	show_output = _runner.run(
+	code, show_output = _run_with_status(
 		[*tool_command, "check", *common, "--show-files", "--", *arguments],
 		root,
 		_runner._ruff_environment(environment),
 		timeout=_runner._remaining(deadline, gate_timeout),
 	)
+	if code != 0:
+		raise ValueError("Ruff could not enumerate the selected files")
+	resolved_root = root.resolve(strict=True)
 	eligible: list[str] = []
-	for line in show_output.splitlines():
+	for line in show_output.split("\n"):
+		if not line:
+			continue
+		line = line.removesuffix("\r")
 		candidate = Path(line)
 		candidate = candidate if candidate.is_absolute() else root / candidate
-		path = candidate.resolve(strict=True).relative_to(root.resolve(strict=True)).as_posix()
-		if not path.startswith(arguments[0].rstrip("/") + "/") or Path(path).suffix not in {
+		path = candidate.resolve(strict=True).relative_to(resolved_root).as_posix()
+		if not Path(path).is_relative_to(arguments[0]) or Path(path).suffix not in {
 			".py",
 			".pyi",
 		}:
@@ -107,18 +107,7 @@ def _local_lint(
 	if not targets:
 		return {}, set()
 	code, output = _run_with_status(
-		[
-			*tool_command,
-			"check",
-			*common,
-			"--no-fix",
-			"--extend-ignore",
-			"I",
-			"--output-format",
-			"json",
-			"--",
-			*targets,
-		],
+		[*tool_command, "check", *common, *RUFF_LOCAL_LINT, "--", *targets],
 		root,
 		_runner._ruff_environment(environment),
 		timeout=_runner._remaining(deadline, timeout),
@@ -142,14 +131,13 @@ def _local_format(
 	environment: dict[str, str],
 	deadline: float,
 	timeout: int,
-	syntax_paths: set[str],
 ) -> set[str]:
 	if not targets:
 		return set()
 	code, output = _run_with_status(
-		[*tool_command, "format", *common, "--check", "--output-format", "json", "--", *targets],
+		[*tool_command, "format", *common, *RUFF_LOCAL_FORMAT, "--", *targets],
 		root,
 		_runner._ruff_environment(environment),
 		timeout=_runner._remaining(deadline, timeout),
 	)
-	return _ruff_unformatted(code, output, root, set(targets), syntax_paths)
+	return _ruff_unformatted(code, output, root, set(targets))

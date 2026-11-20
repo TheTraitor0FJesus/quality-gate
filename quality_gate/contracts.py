@@ -38,6 +38,9 @@ from .contract_models import (
 	WebComponent,
 )
 from .contract_models import (
+	MAX_TELEMETRY_TEXT as MAX_TELEMETRY_TEXT,
+)
+from .contract_models import (
 	CheckResult as CheckResult,
 )
 from .contract_models import (
@@ -90,7 +93,6 @@ DEFAULT_JAVASCRIPT_TOTAL_KIB = 250
 DEFAULT_CSS_TOTAL_KIB = 100
 MAX_FINDINGS_PER_CHECK = 20
 MAX_FINDINGS_TOTAL = 100
-MAX_TELEMETRY_TEXT = 512
 MAX_SUPPLEMENTAL_TESTS = 32
 MAX_SUPPLEMENTAL_TARGET_PATTERNS = 32
 MAX_SUPPLEMENTAL_TARGET_LENGTH = 256

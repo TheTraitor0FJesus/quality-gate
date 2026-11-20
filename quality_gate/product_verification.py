@@ -51,6 +51,7 @@ def _requirements(request: dict[str, Any]) -> dict[tuple[str, str], str]:
 	if not isinstance(obligations, list) or not 1 <= len(obligations) <= MAX_PRODUCERS:
 		raise VerificationError("invalid obligations")
 	required: dict[tuple[str, str], str] = {}
+	artifact_names: set[str] = set()
 	for obligation in obligations:
 		entry = _object(obligation, {"producer", "platform", "kind"}, "obligation")
 		producer, platform, kind = entry["producer"], entry["platform"], entry["kind"]
@@ -59,8 +60,16 @@ def _requirements(request: dict[str, Any]) -> dict[tuple[str, str], str]:
 		identity = (producer, platform)
 		if identity in required:
 			raise VerificationError("duplicate obligation")
+		name = _artifact_name(identity, 1)
+		if name in artifact_names:
+			raise VerificationError("obligations have colliding artifact names")
+		artifact_names.add(name)
 		required[identity] = kind
 	return required
+
+
+def _artifact_name(identity: tuple[str, str], attempt: int) -> str:
+	return f"product-verification-{identity[0]}-{identity[1]}-{attempt}"
 
 
 def _result_identity(
@@ -211,7 +220,7 @@ def _verify_artifact_transport(
 		or artifact_id <= 0
 		or not isinstance(digest, str)
 		or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
-		or artifact.get("name") != f"product-verification-{identity[0]}-{identity[1]}-{attempt}"
+		or artifact.get("name") != _artifact_name(identity, attempt)
 		or artifact.get("expired") is not False
 		or not isinstance(artifact_run, dict)
 		or artifact_run.get("id") != run_id
@@ -244,14 +253,26 @@ def _verify_artifact_transport(
 		raise VerificationError("missing upload receipt")
 
 
-def _verify_steps(job: dict[str, Any]) -> None:
+def _upload_step_number(job: dict[str, Any]) -> int:
 	steps = job.get("steps")
 	if not isinstance(steps, list) or len(steps) > MAX_JOB_STEPS:
 		raise VerificationError("invalid producer steps")
+	step_numbers: list[int] = []
 	for name in ("Verify product", "Upload verification evidence"):
 		matching = [step for step in steps if isinstance(step, dict) and step.get("name") == name]
 		if len(matching) != 1 or matching[0].get("conclusion") != "success":
 			raise VerificationError("missing successful producer step")
+		number = matching[0].get("number")
+		if type(number) is not int or number <= 0:
+			raise VerificationError("invalid producer step number")
+		step_numbers.append(number)
+	verify_number, upload_number = step_numbers
+	upload_matches = sum(
+		isinstance(step, dict) and step.get("number") == upload_number for step in steps
+	)
+	if verify_number >= upload_number or upload_matches != 1:
+		raise VerificationError("ambiguous producer step number")
+	return upload_number
 
 
 def verify_transport(
@@ -263,7 +284,7 @@ def verify_transport(
 	attempt: int,
 	workflow: str,
 ) -> dict[str, Any]:
-	"""Bind results to read-only GitHub run, job, artifact and upload-log records."""
+	"""Bind results to GitHub records and the log retrieved for the upload step."""
 	aggregated = aggregate(request, results)
 	if type(run_id) is not int or run_id <= 0 or type(attempt) is not int or attempt <= 0:
 		raise VerificationError("invalid run identity")
@@ -272,7 +293,9 @@ def verify_transport(
 	by_identity = {(item["producer"], item["platform"]): item for item in results}
 	seen: set[tuple[str, str]] = set()
 	for proof in proofs:
-		proof = _object(proof, {"producer", "platform", "run", "job", "artifact", "logs"}, "proof")
+		proof = _object(
+			proof, {"producer", "platform", "run", "job", "artifact", "upload_log"}, "proof"
+		)
 		identity = (proof["producer"], proof["platform"])
 		if (
 			not all(_name(item) for item in identity)
@@ -281,7 +304,7 @@ def verify_transport(
 		):
 			raise VerificationError("unexpected or duplicate transport proof")
 		seen.add(identity)
-		run, job, artifact, logs = proof["run"], proof["job"], proof["artifact"], proof["logs"]
+		run, job, artifact = proof["run"], proof["job"], proof["artifact"]
 		if not all(isinstance(item, dict) for item in (run, job, artifact)):
 			raise VerificationError("invalid Actions records")
 		repository = run.get("repository")
@@ -295,8 +318,11 @@ def verify_transport(
 			or repository.get("full_name") != request["repository"]
 		):
 			raise VerificationError("run identity mismatch")
+		job_id = job.get("id")
 		if (
-			job.get("run_id") != run_id
+			type(job_id) is not int
+			or job_id <= 0
+			or job.get("run_id") != run_id
 			or job.get("run_attempt") != attempt
 			or job.get("head_sha") != request["head_sha"]
 			or job.get("name") != f"Verify product {identity[0]} {identity[1]}"
@@ -304,9 +330,17 @@ def verify_transport(
 			or job.get("conclusion") != "success"
 		):
 			raise VerificationError("producer job is incomplete or mismatched")
-		_verify_steps(job)
+		upload_number = _upload_step_number(job)
+		upload_log = _object(proof["upload_log"], {"job_id", "step_number", "text"}, "upload log")
+		if (
+			type(upload_log["job_id"]) is not int
+			or upload_log["job_id"] != job_id
+			or type(upload_log["step_number"]) is not int
+			or upload_log["step_number"] != upload_number
+		):
+			raise VerificationError("upload log step identity mismatch")
 		_verify_artifact_transport(
-			artifact, job, logs, identity, run_id, attempt, request["head_sha"]
+			artifact, job, upload_log["text"], identity, run_id, attempt, request["head_sha"]
 		)
 		if by_identity[identity]["evidence"] != f"run/{run_id}/attempt/{attempt}":
 			raise VerificationError("result run identity mismatch")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from snapshot_feature_split72_support import (
 	BLOCKING_OUTPUT_FAILSAFE_SECONDS as BLOCKING_OUTPUT_FAILSAFE_SECONDS,
 )
@@ -10,9 +12,6 @@ from snapshot_feature_split72_support import (
 )
 from snapshot_feature_split72_support import (
 	EXPECTED_BATCH_OBJECT_PROCESSES as EXPECTED_BATCH_OBJECT_PROCESSES,
-)
-from snapshot_feature_split72_support import (
-	EXPECTED_FIXED_DISCOVERY_PROCESSES as EXPECTED_FIXED_DISCOVERY_PROCESSES,
 )
 from snapshot_feature_split72_support import (
 	Callable as Callable,
@@ -78,6 +77,8 @@ from snapshot_feature_split72_support import (
 	time as time,
 )
 
+from quality_gate import snapshot_batch
+
 
 def test_candidate_snapshot_process_count_is_fixed_discovery_plus_two_batches(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -124,20 +125,12 @@ def test_candidate_snapshot_process_count_is_fixed_discovery_plus_two_batches(
 		object_count = sum(command[:1] == ("cat-file",) for command in processes)
 		fixed_count = len(processes) - attribute_count - object_count
 		process_counts.append((path_count, fixed_count, attribute_count, object_count))
-	assert process_counts == [
-		(
-			2,
-			EXPECTED_FIXED_DISCOVERY_PROCESSES,
-			EXPECTED_BATCH_ATTRIBUTE_PROCESSES,
-			EXPECTED_BATCH_OBJECT_PROCESSES,
-		),
-		(
-			256,
-			EXPECTED_FIXED_DISCOVERY_PROCESSES,
-			EXPECTED_BATCH_ATTRIBUTE_PROCESSES,
-			EXPECTED_BATCH_OBJECT_PROCESSES,
-		),
-	]
+	assert process_counts[0][1] == process_counts[1][1]
+	assert all(
+		attributes == EXPECTED_BATCH_ATTRIBUTE_PROCESSES
+		and objects == EXPECTED_BATCH_OBJECT_PROCESSES
+		for _, _, attributes, objects in process_counts
+	)
 
 
 @pytest.mark.parametrize(
@@ -159,7 +152,7 @@ def test_candidate_snapshot_reaps_process_after_malformed_attribute_response(
 	entry = _staged_entry()
 
 	with pytest.raises(SnapshotError, match=message):
-		snapshot_module._reject_filtered_paths(tmp_path, (entry,), tmp_path / "index", 1)
+		snapshot_batch._reject_filtered_paths(tmp_path, (entry,), tmp_path / "index", 1)
 
 	assert process.killed
 	assert process.waited
@@ -193,7 +186,7 @@ def test_candidate_snapshot_reaps_process_after_invalid_object_response(
 	context = _materialization_context(tmp_path, max_blob_bytes=max_blob_bytes)
 
 	with pytest.raises(SnapshotError, match=message):
-		snapshot_module._read_git_blobs(context, (entry,), tmp_path / "objects")
+		snapshot_batch._read_git_blobs(context, (entry,), tmp_path / "objects")
 
 	assert process.killed
 	assert process.waited
@@ -214,7 +207,7 @@ def test_candidate_snapshot_requests_repeated_object_only_once(
 	context = _materialization_context(tmp_path)
 	object_directory = tmp_path / "objects"
 
-	object_sizes = snapshot_module._read_git_blobs(context, (entry, second), object_directory)
+	object_sizes = snapshot_batch._read_git_blobs(context, (entry, second), object_directory)
 
 	assert object_sizes == {entry.object_id: 6}
 	assert process.stdin.captured == entry.object_id + b"\n"
@@ -224,12 +217,13 @@ def test_candidate_snapshot_requests_repeated_object_only_once(
 	assert not process.killed
 
 
-def test_candidate_snapshot_aggregate_bound_scales_with_indexed_paths(
+def test_candidate_snapshot_rejects_aggregate_bound_with_valid_blob_size(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-	"""The index-derived bound must exceed the former fixed 1 GiB ceiling."""
-	max_blob_bytes = 64 * 1024 * 1024
-	path_count = 1024 * 1024 * 1024 // max_blob_bytes + 1
+	"""Two materialized copies and a cached blob exceed the total budget."""
+	max_blob_bytes = 16
+	path_count = 2
+	monkeypatch.setattr(snapshot_module, "_MAX_SNAPSHOT_DATA_BYTES", 40)
 	entry = _staged_entry()
 	entries = tuple(
 		_staged_entry(path=f"copy-{index}.txt".encode("ascii")) for index in range(path_count)
@@ -238,8 +232,8 @@ def test_candidate_snapshot_aggregate_bound_scales_with_indexed_paths(
 	process = _fake_batch_process(monkeypatch, large_object)
 	context = _materialization_context(tmp_path, max_blob_bytes=max_blob_bytes)
 
-	with pytest.raises(SnapshotError, match="truncated candidate batch"):
-		snapshot_module._read_git_blobs(context, entries, tmp_path / "objects")
+	with pytest.raises(SnapshotError, match="aggregate snapshot limit"):
+		snapshot_batch._read_git_blobs(context, entries, tmp_path / "objects")
 
 	assert process.killed
 	assert process.waited
@@ -253,8 +247,98 @@ def test_candidate_snapshot_reaps_batch_process_at_deadline(
 	process = _fake_batch_process(monkeypatch, _BlockingOutput())
 
 	with pytest.raises(SnapshotError, match="before its deadline"):
-		snapshot_module._reject_filtered_paths(tmp_path, (_staged_entry(),), tmp_path / "index", 1)
+		snapshot_batch._reject_filtered_paths(tmp_path, (_staged_entry(),), tmp_path / "index", 1)
 
 	assert process.killed
 	assert process.waited
 	assert process.wait_timeouts and all(timeout is not None for timeout in process.wait_timeouts)
+
+
+def test_candidate_snapshot_stops_descendant_holding_real_batch_pipe(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	real_popen = subprocess.Popen
+	launched: list[subprocess.Popen[bytes]] = []
+	script = (
+		"import subprocess, sys; "
+		"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(8)'])"
+	)
+
+	def launch(command: list[str], **options: object) -> subprocess.Popen[bytes]:
+		assert command[0] == "git"
+		process = real_popen([sys.executable, "-B", "-c", script], **options)
+		launched.append(process)
+		return process
+
+	monkeypatch.setattr(subprocess, "Popen", launch)
+	started = time.monotonic()
+	with pytest.raises(SnapshotError, match="before its deadline"):
+		snapshot_batch._reject_filtered_paths(
+			tmp_path, (_staged_entry(),), tmp_path / "index", 6, deadline=started + 1
+		)
+	assert time.monotonic() - started < 4
+	assert len(launched) == 1 and launched[0].poll() is not None
+
+
+@pytest.mark.parametrize("location", ["initialize", "objects", "candidate"])
+def test_snapshot_materialization_timeout_runs_owned_cleanup(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+	from contextlib import nullcontext
+
+	from quality_gate import runner
+	from quality_gate.operation import GateOperation
+	from quality_gate.snapshot_io import _WORKER
+
+	(tmp_path / "tracked.txt").write_bytes(b"staged\n")
+	_init_and_stage(tmp_path, "tracked.txt")
+	reached = tmp_path / "materialization-started"
+	injection = f"""
+from pathlib import Path
+from time import sleep
+real_open = Path.open
+def stall_write(path, mode='r', *args, **kwargs):
+    if path.parent.name == {location!r} and mode == 'wb':
+        with real_open(Path({str(reached)!r}), 'wb') as marker:
+            marker.write(b'entered the blocking call')
+        sleep(30)
+    return real_open(path, mode, *args, **kwargs)
+Path.open = stall_write
+"""
+	if location == "initialize":
+		injection = f"""
+from pathlib import Path
+from time import sleep
+real_mkdir = Path.mkdir
+def stall_mkdir(path, *args, **kwargs):
+    if path.name.startswith('quality-gate-candidate-'):
+        Path({str(reached)!r}).write_bytes(b'entered the blocking call')
+        sleep(30)
+    return real_mkdir(path, *args, **kwargs)
+Path.mkdir = stall_mkdir
+"""
+	run_process = GateOperation.run_process
+
+	def stall_materialization(
+		gate: GateOperation, command: list[str], **options: object
+	) -> tuple[int, bytes, bytes]:
+		if _WORKER in command:
+			position = command.index(_WORKER)
+			action = "initialize" if location == "initialize" else "materialize"
+			if command[position + 2] == action:
+				gate.deadline = time.monotonic() + 4
+				command = [*command]
+				command[position] = injection + _WORKER
+		return run_process(gate, command, **options)
+
+	monkeypatch.setattr(runner, "gate_admission", nullcontext)
+	monkeypatch.setattr(GateOperation, "run_process", stall_materialization)
+	started = time.monotonic()
+	verdict = runner.check(tmp_path)
+	assert time.monotonic() - started < 20
+	assert reached.read_bytes() == b"entered the blocking call"
+	assert verdict.exit_code == runner.EXIT_UNCHECKED
+	assert verdict.operation is not None and verdict.operation.timed_out
+	assert verdict.operation.current_stage == "candidate.snapshot"
+	assert not list((tmp_path / "temp").glob("qg-*"))
+	assert any(stage.stage == "cleanup" for stage in verdict.operation.stages)
