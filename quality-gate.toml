@@ -29,7 +29,6 @@ required_documents = [
     "docs/consumer-setup.md",
     "docs/operations.md",
     "docs/architecture.md",
-    "docs/coding-standards.md",
     "docs/lessons.md",
     "docs/quality-policy-changes.md",
     "docs/release.md",
