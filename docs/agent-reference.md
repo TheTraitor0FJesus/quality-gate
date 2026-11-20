@@ -6,7 +6,6 @@ place and uses pointers here instead of copying configuration rules.
 ## Authority map
 
 - [Architecture map](architecture.md) is the route through modules and execution flows.
-- [Coding standards](coding-standards.md) is the review standard for implementation changes.
 - [Quality policy change guide](quality-policy-changes.md) applies to the runner, shared tools,
   manifest contract, and reusable workflow.
 - [Lesson format](lessons.md) is the source of truth for escaped-defect lessons.
