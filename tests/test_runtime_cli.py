@@ -144,7 +144,8 @@ def _prepare_runtime(root: Path, cache: Path, component_name: str = "app") -> Pa
 
 @pytest.fixture
 def short_runtime_cache(tmp_path: Path) -> Iterator[Path]:
-	cache = tmp_path / "runtime-cache"
+	cache_key = hashlib.sha256(str(tmp_path).encode()).hexdigest()[:12]
+	cache = tmp_path.parents[2] / f"r{cache_key}"
 	cache.mkdir()
 	yield cache
 	shutil.rmtree(cache)

@@ -143,15 +143,26 @@ def test_provider_verification_budgets_fit_the_50_minute_ci_job() -> None:
 	assert "timeout-minutes: 50" in WORKFLOW.read_text(encoding="utf-8")
 
 
-def test_dependabot_updates_pinned_actions_weekly_without_auto_merge() -> None:
-	"""Verify Dependabot proposes weekly GitHub Actions updates without merging them."""
+def test_dependabot_groups_monthly_version_updates_separately_from_security() -> None:
+	"""Keep routine update volume bounded without grouping security fixes."""
 
 	dependabot = DEPENDABOT.read_text(encoding="utf-8")
 
 	assert "version: 2" in dependabot
 	assert "package-ecosystem: github-actions" in dependabot
 	assert 'directory: "/"' in dependabot
-	assert "interval: weekly" in dependabot
+	entries = dependabot.split("  - package-ecosystem: ")[1:]
+	assert entries
+	for entry in entries:
+		assert "interval: monthly" in entry
+		assert "open-pull-requests-limit: 2" in entry
+		assert "routine-updates:" in entry
+		assert "update-types: [minor, patch]" in entry
+		assert "major-updates:" in entry
+		assert "update-types: [major]" in entry
+		assert entry.count("applies-to: version-updates") == 2
+	assert "ignore:" not in dependabot
+	assert "applies-to: security-updates" not in dependabot
 	assert "auto-merge" not in dependabot.casefold()
 
 

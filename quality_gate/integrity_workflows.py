@@ -30,6 +30,8 @@ def _workflow_paths(root: Path) -> list[Path]:
 
 
 def _dependabot_app_findings(workflow: _Workflow, is_quality_gate_provider: bool) -> list[Finding]:
+	if is_quality_gate_provider and _approved_protected_auto_merge_workflow(workflow):
+		return []
 	if workflow.path == _DEPENDABOT_DECISION_PATH or (
 		"pull_request_target" in workflow.events
 		and "QUALITY_GATE_ROLLOUT_APP_PRIVATE_KEY" in workflow.source
@@ -108,7 +110,9 @@ def _workflow_permission_findings(
 ) -> list[Finding]:
 	findings: list[Finding] = []
 	metadata_review = _approved_dependabot_review_workflow(workflow)
-	dependabot_auto_merge = _approved_dependabot_auto_merge_workflow(workflow)
+	dependabot_auto_merge = _approved_dependabot_auto_merge_workflow(
+		workflow, is_quality_gate_provider
+	)
 	if not workflow.permissions:
 		findings.append(
 			_workflow_finding(
@@ -240,6 +244,20 @@ def _approved_dependabot_review_workflow(workflow: _Workflow) -> bool:
 
 _DEPENDABOT_AUTO_MERGE_WORKFLOW_PATH = ".github/workflows/dependabot-auto-merge.yml"
 
+# templates/dependabot-auto-merge.yml is activated only after policy qualification.
+_DEPENDABOT_PROTECTED_AUTO_MERGE_FINGERPRINT = (
+	"44922c20773f2ee596606882268feec2b6e650aed48e208d6415bea7bdc6b08a"
+)
+
+
+def _approved_protected_auto_merge_workflow(workflow: _Workflow) -> bool:
+	normalized_source = workflow.source.replace("\r\n", "\n").rstrip("\n")
+	return workflow.path == _DEPENDABOT_AUTO_MERGE_WORKFLOW_PATH and (
+		hashlib.sha256(normalized_source.encode("utf-8")).hexdigest()
+		== _DEPENDABOT_PROTECTED_AUTO_MERGE_FINGERPRINT
+	)
+
+
 _DEPENDABOT_AUTO_MERGE_WORKFLOW = """name: Dependabot patch auto-merge
 
 on:
@@ -299,11 +317,14 @@ jobs:
 """
 
 
-def _approved_dependabot_auto_merge_workflow(workflow: _Workflow) -> bool:
-	"""Allow only the exact Dependabot patch auto-merge workflow template."""
+def _approved_dependabot_auto_merge_workflow(
+	workflow: _Workflow, is_quality_gate_provider: bool = False
+) -> bool:
+	"""Retain the legacy route and approve the provider's protected replacement."""
 	normalized_source = workflow.source.replace("\r\n", "\n")
 	return workflow.path == _DEPENDABOT_AUTO_MERGE_WORKFLOW_PATH and (
 		normalized_source == _DEPENDABOT_AUTO_MERGE_WORKFLOW
+		or (is_quality_gate_provider and _approved_protected_auto_merge_workflow(workflow))
 	)
 
 

@@ -25,7 +25,6 @@ required_documents = [
     ".release/version.toml",
     ".release/notes.md",
     ".release/publisher.toml",
-    ".coderabbit.yaml",
     "README.md",
     "docs/consumer-setup.md",
     "docs/operations.md",
