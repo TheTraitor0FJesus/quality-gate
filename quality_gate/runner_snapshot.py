@@ -317,6 +317,7 @@ def check(
 	verbose: bool = False,
 	base: str | None = None,
 	head: str | None = None,
+	profile: bool = False,
 ) -> _runner.Verdict:
 	"""Run the complete quality contract against the exact staged candidate."""
 	verdict = _runner._run_snapshot(
@@ -325,8 +326,9 @@ def check(
 		base=base,
 		head=head,
 		mode="check",
+		profile=profile,
 	)
-	_runner.emit(_runner.render(verdict, verbose=verbose))
+	_runner.emit(_runner.render(verdict, verbose=verbose, profile=profile))
 	return verdict
 
 
@@ -529,7 +531,10 @@ def _run_snapshot_operation(
 
 
 def _record_admission_failure(
-	operation: _runner.GateOperation | None, error: _runner.AdmissionError
+	operation: _runner.GateOperation | None,
+	error: _runner.AdmissionError,
+	*,
+	wait_ms: int | None,
 ) -> _runner.Verdict:
 	quality_error = _runner.QualityGateError(
 		str(error),
@@ -546,7 +551,7 @@ def _record_admission_failure(
 			_runner._error_result(quality_error), scope="machine-local Gate admission"
 		)
 		return operation.verdict()
-	return _runner.Verdict((_runner._error_result(quality_error),))
+	return _runner.Verdict((_runner._error_result(quality_error),), admission_wait_ms=wait_ms)
 
 
 def _run_snapshot(
@@ -557,14 +562,20 @@ def _run_snapshot(
 	head: str | None = None,
 	mode: Literal["check", "audit", "product"] = "check",
 	policy_release: str | None = None,
+	profile: bool = False,
 ) -> _runner.Verdict:
 	"""Run one candidate snapshot and convert snapshot failures to a verdict."""
 	_runner._progress("this check may take a long time; wait for completion without polling.")
 	operation: _runner.GateOperation | None = None
+	local = not _runner.running_in_ci()
+	queued_at = _runner.time.monotonic()
 	try:
-		admission = _runner.nullcontext() if _runner.running_in_ci() else _runner.gate_admission()
+		admission = _runner.gate_admission() if local else _runner.nullcontext()
 		with admission:
-			operation = _runner.GateOperation(actual_root or _runner.Path.cwd(), mode)
+			wait_ms = int((_runner.time.monotonic() - queued_at) * 1000) if local else None
+			operation = _runner.GateOperation(
+				actual_root or _runner.Path.cwd(), mode, profile=profile, admission_wait_ms=wait_ms
+			)
 			with operation:
 				_runner._run_snapshot_operation(
 					operation,
@@ -576,7 +587,12 @@ def _run_snapshot(
 					policy_release=policy_release,
 				)
 	except _runner.AdmissionError as error:
-		return _runner._record_admission_failure(operation, error)
+		wait_ms = (
+			int((_runner.time.monotonic() - queued_at) * 1000)
+			if local and operation is None
+			else None
+		)
+		return _runner._record_admission_failure(operation, error, wait_ms=wait_ms)
 	if operation is None:
 		raise RuntimeError("Gate operation was not initialized")
 	return operation.verdict()
@@ -596,7 +612,7 @@ def bootstrap_check(
 		head=head,
 		policy_release=policy_release,
 	)
-	_runner.emit(_runner.render(verdict))
+	_runner.emit(_runner.render(verdict, telemetry=True))
 	return verdict
 
 
@@ -607,7 +623,7 @@ def audit(root: _runner.Path | None = None, *, verbose: bool = False) -> _runner
 		verbose=verbose,
 		mode="audit",
 	)
-	_runner.emit(_runner.render(verdict, verbose=verbose))
+	_runner.emit(_runner.render(verdict, verbose=verbose, telemetry=True))
 	return verdict
 
 
@@ -624,7 +640,7 @@ def bootstrap_audit(
 		mode="audit",
 		policy_release=policy_release,
 	)
-	_runner.emit(_runner.render(verdict, verbose=verbose))
+	_runner.emit(_runner.render(verdict, verbose=verbose, telemetry=True))
 	return verdict
 
 
@@ -635,5 +651,5 @@ def bootstrap_product_audit(
 	verdict = _runner._run_snapshot(
 		root, verbose=verbose, mode="product", policy_release=policy_release
 	)
-	_runner.emit(_runner.render(verdict, verbose=verbose))
+	_runner.emit(_runner.render(verdict, verbose=verbose, telemetry=True))
 	return verdict

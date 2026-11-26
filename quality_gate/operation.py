@@ -49,6 +49,7 @@ from .operation_support import (
 
 if TYPE_CHECKING:
 	from .native_cache import NativeToolCacheSelection
+	from .runner_pytest import PytestObservation
 
 OPERATION_CLEANUP_SECONDS = 120
 MAX_CLEANUP_INVENTORY_BYTES = 64 * 1024
@@ -69,6 +70,7 @@ class _StageObservation:
 	process_started: bool
 	check: bool = False
 	cache_selection: NativeToolCacheSelection | None = None
+	command_ms: int | None = None
 
 
 class OperationTimeoutError(RuntimeError):
@@ -89,6 +91,8 @@ class GateOperation:
 		*,
 		timeout_seconds: float = DEFAULT_GATE_TIMEOUT_SECONDS,
 		cleanup_seconds: float = OPERATION_CLEANUP_SECONDS,
+		profile: bool = False,
+		admission_wait_ms: int | None = None,
 	) -> None:
 		self.started = time.monotonic()
 		if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -97,6 +101,8 @@ class GateOperation:
 			raise ValueError("operation cleanup budget must be non-negative and finite")
 		self.root = root.resolve()
 		self.mode = mode
+		self.profile = profile
+		self.admission_wait_ms = admission_wait_ms
 		self.operation_id = uuid.uuid4().hex
 		self.deadline = self.started + timeout_seconds
 		self.cleanup_seconds = cleanup_seconds
@@ -106,6 +112,7 @@ class GateOperation:
 		self.results: list[CheckResult] = []
 		self.stages: list[StageTiming] = []
 		self.check_timings: dict[str, StageTiming] = {}
+		self.pytest_observations: dict[str, PytestObservation] = {}
 		self.complete = True
 		self.timed_out = False
 		self.current_stage: str | None = None
@@ -230,6 +237,7 @@ class GateOperation:
 				tool_cache=f"native-{selection.storage}"
 				if selection is not None
 				else "not-measured",
+				command_ms=observation.command_ms,
 			)
 			if check:
 				self.check_timings[name] = timing
@@ -422,6 +430,7 @@ class GateOperation:
 		check_execution: bool = True,
 	) -> tuple[int, bytes, bytes]:
 		remaining = self.remaining(timeout_seconds or self.command_timeout_seconds)
+		started = time.monotonic() if self.profile else None
 		try:
 			return supervise_process(
 				command,
@@ -438,6 +447,10 @@ class GateOperation:
 		except EditError:
 			self.remaining()
 			raise
+		finally:
+			if started is not None and self._active_stages:
+				observation = self._active_stages[-1]
+				observation.command_ms = (observation.command_ms or 0) + self._elapsed(started)
 
 	def _mark_process_started(self, *, check_execution: bool = True) -> None:
 		for observation in self._active_stages:
@@ -554,7 +567,7 @@ class GateOperation:
 			operation=OperationTelemetry(
 				operation_id=self.operation_id,
 				operation=self.mode,
-				profile=self.mode,
+				profile="manual" if self.profile else self.mode,
 				candidate=self.candidate,
 				elapsed_ms=max(0, int((self._finished - self.started) * 1000)),
 				stages=tuple(self.stages),
@@ -563,5 +576,6 @@ class GateOperation:
 				last_completed_stage=self.last_completed_stage,
 				timed_out=self.timed_out,
 				scope=self.scope,
+				admission_wait_ms=self.admission_wait_ms,
 			),
 		)

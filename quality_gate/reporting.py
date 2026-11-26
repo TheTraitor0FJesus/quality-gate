@@ -22,16 +22,24 @@ def _finding_count(count: int) -> str:
 	return f"{count} {unit}"
 
 
-def render(verdict: Verdict, *, verbose: bool = False) -> str:
+def render(
+	verdict: Verdict, *, verbose: bool = False, profile: bool = False, telemetry: bool = False
+) -> str:
 	"""Render concise outcomes or the complete deterministic check listing."""
 
 	output = _render_verbose(verdict) if verbose else _render_compact(verdict)
-	telemetry = _render_telemetry(verdict)
-	return "\n".join((output, *telemetry))
+	details = _render_telemetry(verdict, profile=profile) if profile or telemetry else []
+	return "\n".join((output, *details))
 
 
 def _telemetry_text(value: str, secrets: tuple[str, ...] = ()) -> str:
 	return redact(value, secrets).replace("\r", "\\r").replace("\n", "\\n")[:MAX_TELEMETRY_TEXT]
+
+
+def _pytest_totals(result: CheckResult) -> str | None:
+	if result.check_id.endswith(".pytest") and result.summary.startswith("pytest totals:"):
+		return result.summary.partition(":")[2].strip()
+	return None
 
 
 def _timing_line(
@@ -41,6 +49,7 @@ def _timing_line(
 	*,
 	outcome: str | None = None,
 	test_totals: str | None = None,
+	profile: bool = False,
 ) -> str:
 	values = [
 		f"elapsed_ms={timing.elapsed_ms}",
@@ -60,6 +69,8 @@ def _timing_line(
 	):
 		if value is not None:
 			values.append(f"{name}={value}")
+	if profile and timing.command_ms is not None:
+		values.append(f"command_ms={timing.command_ms}")
 	if timing.original_operation_id is not None:
 		values.append(
 			f"original_operation={_telemetry_text(timing.original_operation_id, secrets)}"
@@ -69,10 +80,11 @@ def _timing_line(
 	return f"  {_telemetry_text(label, secrets)}: {'; '.join(values)}"
 
 
-def _render_telemetry(verdict: Verdict) -> list[str]:
+def _render_telemetry(verdict: Verdict, *, profile: bool) -> list[str]:
 	lines: list[str] = []
 	operation = verdict.operation
 	if operation is not None:
+		wait = operation.admission_wait_ms
 		secrets = tuple(secret for result in verdict.results for secret in result._secrets)
 		lines.extend(
 			(
@@ -94,25 +106,43 @@ def _render_telemetry(verdict: Verdict) -> list[str]:
 				f"{_telemetry_text(operation.last_completed_stage or 'none', secrets)}",
 			)
 		)
-		lines.extend(_timing_line(timing.stage, timing, secrets) for timing in operation.stages)
+		if profile:
+			lines.append(f"  admission_wait_ms={wait if wait is not None else 'not-measured'}")
+		lines.extend(
+			_timing_line(timing.stage, timing, secrets, profile=profile)
+			for timing in operation.stages
+		)
+	elif profile and verdict.admission_wait_ms is not None:
+		lines.append(
+			f"Admission: admission_wait_ms={verdict.admission_wait_ms}. Verification did not start."
+		)
+	elif profile:
+		lines.append("Operation timings: unavailable")
 	checks = tuple(result for result in verdict.results if result.telemetry is not None)
 	if checks:
 		lines.append("Check timings:")
 		for result in sorted(checks, key=lambda item: item.check_id):
 			if result.telemetry is None:
 				continue
-			test_totals = None
-			if result.check_id.endswith(".pytest") and result.summary.startswith("pytest totals:"):
-				test_totals = result.summary.partition(":")[2].strip()
 			lines.append(
 				_timing_line(
 					result.check_id,
 					result.telemetry,
 					result._secrets,
-					outcome=result.status.value,
-					test_totals=test_totals,
+					outcome=(
+						result.profile_outcome
+						if profile and result.profile_outcome
+						else result.status
+					).value,
+					test_totals=_pytest_totals(result),
+					profile=profile,
 				)
 			)
+			if profile and result.check_id.endswith(".pytest"):
+				lines.extend(
+					f"    {_telemetry_text(detail, result._secrets)}"
+					for detail in result.profile_details or ("pytest durations unavailable",)
+				)
 	return lines
 
 
@@ -131,6 +161,11 @@ def _render_compact(verdict: Verdict) -> str:
 		results
 	)
 	lines.append(_render_summary(results, report_only))
+	lines.extend(
+		f"{result.check_id}: {result.status.value} - {redact(result.summary, result._secrets)}"
+		for result in results
+		if result.status is Status.PASSED and _pytest_totals(result) is not None
+	)
 	lines.extend(_render_blocker_summaries(blockers))
 	diagnostics, omitted_total, checks_with_omissions = _render_diagnostics(blockers)
 	if diagnostics:

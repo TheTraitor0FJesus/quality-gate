@@ -181,7 +181,7 @@ def test_edit_evidence_is_reused_by_staged_gate(
 	assert "reused" in reused_format.telemetry.reason
 	format_line = next(
 		line
-		for line in render(unchanged).splitlines()
+		for line in render(unchanged, profile=True).splitlines()
 		if "python.component_1.format: elapsed_ms=" in line
 	)
 	assert "disposition=reused" in format_line

@@ -366,7 +366,7 @@ def _execute_commands(
 									deadline, min(timeout, component_timeout)
 								),
 							)
-					if output and check_id.endswith((".coverage_report", ".pytest")):
+					if output and check_id.endswith(".coverage_report"):
 						run_outputs[check_id] = output
 				except (_runner.NativeToolCacheError, _runner.QualityGateError) as error:
 					run_errors.append(_runner._command_error(check_id, error))
@@ -398,28 +398,31 @@ def _command_results(
 	run_outputs: dict[str, str],
 ) -> list[_runner.CheckResult]:
 	results: list[_runner.CheckResult] = []
+	operation = _runner.current_operation()
 	for check_id in executed:
 		errors = [error for error in run_errors if error.check_id == check_id]
 		is_coverage_collection = check_id.endswith(".coverage")
 		is_coverage_report = check_id.endswith(".coverage_report")
 		is_coverage = is_coverage_collection or is_coverage_report
-		status = _runner.Status.PASSED
-		if errors and not is_coverage:
-			status = (
+		command_outcome = _runner.Status.PASSED
+		if errors:
+			command_outcome = (
 				_runner.Status.UNCHECKED
 				if any(error.exit_code == _runner.EXIT_UNCHECKED for error in errors)
 				else _runner.Status.FAILED
 			)
-		if is_coverage:
-			status = _runner.Status.PASSED
+		status = _runner.Status.PASSED if is_coverage else command_outcome
 		command_output = run_outputs.get(check_id, "")
 		summary = "check passed" if status is _runner.Status.PASSED else "check requires attention"
 		recovery_action = "restore verification and fix the reported finding, then retry"
-		if check_id.endswith(".pytest"):
-			pytest_output = "\n".join((command_output, *(str(error) for error in errors)))
-			pytest_totals = _runner._pytest_outcome_summary(pytest_output)
-			if pytest_totals is not None:
-				summary = f"pytest totals: {pytest_totals}"
+		profile_details: tuple[str, ...] = ()
+		messages = tuple(str(error) for error in errors)
+		if check_id.endswith(".pytest") and operation is not None:
+			observation = operation.pytest_observations.get(check_id)
+			if observation is not None:
+				if observation.totals is not None:
+					summary = f"pytest totals: {observation.totals}"
+				profile_details = observation.durations
 		if is_coverage_collection:
 			summary = "coverage collection completed"
 		if is_coverage_report:
@@ -437,9 +440,13 @@ def _command_results(
 				check_id=check_id,
 				status=status,
 				summary=summary,
+				profile_details=profile_details,
+				profile_outcome=command_outcome if errors and is_coverage else None,
 				findings=()
 				if is_coverage
-				else tuple(_runner.Finding(message=_runner.redact(str(error))) for error in errors),
+				else tuple(
+					_runner.Finding(message=_runner.redact(message)) for message in messages
+				),
 				recovery_action=None if is_coverage else recovery_action if errors else None,
 			)
 		)
