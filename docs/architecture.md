@@ -26,6 +26,5 @@ Use this map to find subsystem owners and follow cross-component routes. Code an
 
 ## Related guidance
 
-- [Coding standards](coding-standards.md) for implementation conventions.
 - [Quality policy changes](quality-policy-changes.md) for changes to shared quality behavior.
 - [Lessons](lessons.md) for the lesson format and maintenance rules.

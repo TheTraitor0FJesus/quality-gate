@@ -4,12 +4,9 @@ Python 3.11+ CLI providing a shared quality contract for local Git hooks and Git
 
 ## Project map
 
-`quality_gate/` contains the CLI, runner, release machinery, and shared `policy/`; `tests/` contains tests; `templates/` contains consumer configuration; `.github/workflows/` contains CI; `docs/` contains project guidance and release contracts.
-
 At the start of a task, from the Quality Gate repository root, run `quality-gate --help` once.
 Before first using a command, read its `--help`. When applicable, locate existing Python
-environments with `quality-gate --root <repository> runtimes --json`. Existing verification and
-authorization rules still apply.
+environments with `quality-gate --root <repository> runtimes --json`.
 
 ## Agent skills
 
@@ -25,8 +22,8 @@ Update [the architecture map](docs/architecture.md) when code changes make its n
 
 Before changing the runner, a shared tool policy, the manifest contract, or the reusable CI workflow, read [the quality policy change guide](docs/quality-policy-changes.md). Consumers select an immutable policy release and a pinned reusable-workflow SHA; activation requires an explicit consumer update, as described in [consumer setup](docs/consumer-setup.md).
 
-This repository's commit hook runs the pinned released Quality Gate against staged changes. See
-[operations guidance](docs/operations.md) for recovery and verification routes.
+For commit-hook recovery or verification, read [operations guidance](docs/operations.md).
+The hook runs the pinned released Quality Gate against staged changes.
 
 ## Release and public contract changes
 

@@ -1,56 +1,143 @@
-name: Dependabot patch auto-merge
+name: Dependabot protected auto-merge
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: dependabot-auto-merge-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  enable-patch-auto-merge:
+  enable-auto-merge:
     if: >-
       github.event.pull_request.user.login == 'dependabot[bot]' &&
-      github.event.pull_request.base.ref == 'main' &&
-      github.event.pull_request.draft == false
+      github.event.pull_request.user.type == 'Bot' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
-      - name: Read Dependabot update metadata
+      - name: Create a repository-scoped automation token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.QUALITY_GATE_ROLLOUT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.QUALITY_GATE_ROLLOUT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Reset prior authorization and capture the current candidate
+        id: candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          pull="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER")"
+          jq --exit-status --arg repo "$GH_REPO" --arg sha "$EXPECTED_HEAD" '
+            .state == "open" and .user.login == "dependabot[bot]" and .user.type == "Bot"
+            and .head.repo.full_name == $repo and .base.repo.full_name == $repo
+            and .head.sha == $sha
+          ' <<< "$pull" > /dev/null
+          node="$(jq -r .node_id <<< "$pull")"
+          if jq --exit-status '.auto_merge != null' <<< "$pull" > /dev/null; then
+            gh api graphql -f query='mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { pullRequest { id } } }' \
+              -f id="$node" > /dev/null
+          fi
+          if jq --exit-status '.draft == false and .base.ref == "main"' <<< "$pull" > /dev/null; then
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+            echo "node=$node" >> "$GITHUB_OUTPUT"
+          else
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read verified Dependabot metadata
         id: metadata
+        if: steps.candidate.outputs.eligible == 'true'
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
-          alert-lookup: true
-          github-token: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
+          github-token: ${{ github.token }}
 
-      - name: Check every grouped update for security alerts
-        id: security
+      - name: Classify the complete update set
+        id: qualification
+        if: steps.candidate.outputs.eligible == 'true'
+        shell: bash
         env:
           UPDATED_DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
         run: |
+          set -euo pipefail
           if jq --exit-status '
-            type == "array"
-            and length > 0
-            and all(.[]; type == "object" and has("ghsaId") and .ghsaId == "")
+            type == "array" and length > 0
+            and all(.[];
+              type == "object"
+              and (.dependencyName | type == "string" and length > 0)
+              and (.updateType == "version-update:semver-minor" or .updateType == "version-update:semver-patch")
+            )
           ' <<< "$UPDATED_DEPENDENCIES" > /dev/null; then
-            echo "security-free=true" >> "$GITHUB_OUTPUT"
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
           else
-            echo "security-free=false" >> "$GITHUB_OUTPUT"
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Major, mixed or unclassified updates require a human decision."
           fi
 
-      - name: Enable auto-merge for patch version updates
-        if: >-
-          steps.metadata.outputs.update-type == 'version-update:semver-patch' &&
-          steps.security.outputs.security-free == 'true'
+      - name: Enable protected auto-merge for the verified head
+        if: steps.qualification.outputs.eligible == 'true'
+        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
-          PULL_REQUEST_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto --squash "$PULL_REQUEST_URL"
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_NODE: ${{ steps.candidate.outputs.node }}
+        run: |
+          set -euo pipefail
+          rules="$(gh api "repos/$GH_REPO/rules/branches/main")"
+          jq --exit-status '
+            type == "array" and any(.[];
+              .type == "required_status_checks"
+              and .parameters.strict_required_status_checks_policy == true
+              and any(.parameters.required_status_checks[]; .context == "Quality Gate")
+            )
+          ' <<< "$rules" > /dev/null
+          pull="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER")"
+          jq --exit-status --arg repo "$GH_REPO" --arg sha "$EXPECTED_HEAD" --arg node "$EXPECTED_NODE" '
+            .node_id == $node and .state == "open" and .draft == false
+            and .user.login == "dependabot[bot]" and .user.type == "Bot"
+            and .head.repo.full_name == $repo and .base.repo.full_name == $repo
+            and .base.ref == "main" and .head.sha == $sha
+          ' <<< "$pull" > /dev/null
+          gh api graphql \
+            -f query='mutation($id: ID!, $sha: GitObjectID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $sha, mergeMethod: SQUASH}) { pullRequest { id } } }' \
+            -f id="$EXPECTED_NODE" -f sha="$EXPECTED_HEAD"
+
+      - name: Request owner review for manual updates
+        if: always() && steps.candidate.outputs.eligible == 'true' && steps.qualification.outputs.eligible != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          REVIEWER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          pull="$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER")"
+          jq --exit-status --arg sha "$EXPECTED_HEAD" '
+            .state == "open" and .draft == false and .base.ref == "main" and .head.sha == $sha
+          ' <<< "$pull" > /dev/null
+          if ! jq --exit-status --arg owner "$REVIEWER" 'any(.requested_reviewers[]; .login == $owner)' <<< "$pull" > /dev/null; then
+            gh api --method POST "repos/$GH_REPO/pulls/$PR_NUMBER/requested_reviewers" \
+              -f "reviewers[]=$REVIEWER" --silent
+          fi
