@@ -254,6 +254,13 @@ def _run_ready_python_component_checks(
 		python_executable,
 	)
 	commands = _run_ruff_with_evidence(results, context, python_executable, environment, commands)
+	if context.deferred_tests is not None:
+		context.deferred_tests.extend(
+			command
+			for command in commands
+			if command[0].endswith((".pytest", ".coverage", ".coverage_report"))
+		)
+		commands = [command for command in commands if command not in context.deferred_tests]
 	return _runner._execute_commands(
 		context.root,
 		environment,
@@ -349,9 +356,14 @@ def _run_python_checks(
 		environment = _runner._safe_environment(temporary_path)
 		environment["QUALITY_GATE_POLICY_ROOT"] = str(prepared.policy_root)
 		temporary_root = _runner.Path(temporary_path)
-		run_errors: list[_runner.QualityGateError] = []
-		executed: list[str] = []
-		run_outputs: dict[str, str] = {}
+		operation = _runner.current_operation()
+		defer_tests = (
+			operation is not None
+			and operation.mode == "check"
+			and not operation.profile
+			and not _runner.running_in_ci()
+		)
+		contexts: list[_runner._PythonCheckContext] = []
 		for component_index, component in enumerate(components, start=1):
 			context = _runner._PythonCheckContext(
 				actual_root,
@@ -361,7 +373,9 @@ def _run_python_checks(
 				component_index,
 				temporary_root / f"deptry-{component_index}.json",
 				deadline,
+				deferred_tests=[] if defer_tests else None,
 			)
+			contexts.append(context)
 			component_executed, component_errors, component_outputs = (
 				_runner._run_python_component_checks(
 					results,
@@ -369,10 +383,36 @@ def _run_python_checks(
 					environment,
 				)
 			)
-			executed.extend(component_executed)
-			run_errors.extend(component_errors)
-			run_outputs.update(component_outputs)
-	results.extend(_runner._command_results(executed, run_errors, run_outputs))
+			results.extend(
+				_runner._command_results(component_executed, component_errors, component_outputs)
+			)
+		# Complete every component's prerequisites before admitting any test process.
+		observed = operation.results if operation is not None else results
+		blocked = _runner.Verdict(tuple(observed)).exit_code != 0
+		for context in contexts:
+			commands = context.deferred_tests
+			if not commands:
+				continue
+			if blocked:
+				for check_id, _command, _timeout in commands:
+					results.append_not_run(
+						check_id,
+						results.scope_for(check_id),
+						"mandatory pre-test checks did not pass; test execution was not started",
+					)
+				continue
+			executed, errors, outputs = _runner._execute_commands(
+				actual_root,
+				environment,
+				commands,
+				context.component.timeout_seconds,
+				deadline,
+				prepared=prepared,
+				component=context.component,
+				component_index=context.component_index,
+				manifest=manifest,
+			)
+			results.extend(_runner._command_results(executed, errors, outputs))
 	_runner._append_not_applicable_python_checks(results, components, prepared)
 	return results
 

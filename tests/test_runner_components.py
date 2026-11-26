@@ -243,7 +243,7 @@ def test_not_applicable_component_tests_are_reported(
 	assert tests.status is runner.Status.NOT_APPLICABLE
 
 
-def test_pytest_collection_failure_is_failed(
+def test_profile_keeps_pytest_collection_unchecked_after_prerequisite_failures(
 	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -277,7 +277,7 @@ def test_pytest_collection_failure_is_failed(
 
 	monkeypatch.setattr(runner, "run", fail_collection)
 
-	verdict = runner.check(root)
+	verdict = runner.check(root, profile=True)
 
 	pytest_result = next(
 		result for result in verdict.results if result.check_id == "python.component_1.pytest"

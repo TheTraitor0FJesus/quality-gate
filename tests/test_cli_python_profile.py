@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from test_cli_python_contract import (
 	EXIT_UNCHECKED,
+	_coverage_release_manifest,
 	_disposable_repository,
 	_git,
 	_invoke,
@@ -107,12 +108,15 @@ def test_profile_reports_wait_when_admission_times_out(
 
 
 @pytest.mark.parametrize("profile", [False, True])
-def test_profile_reports_one_pytest_run_after_lint_failure(
+@pytest.mark.parametrize("ci", [False, True])
+def test_profile_runs_pytest_after_lint_failure_only_when_requested(
 	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
 	capsys: pytest.CaptureFixture[str],
 	profile: bool,
+	ci: bool,
 ) -> None:
+	monkeypatch.setattr(runner, "running_in_ci", lambda: ci)
 	root = _disposable_repository(tmp_path, "valid")
 	manifest = root / "quality-gate.toml"
 	manifest.write_text(
@@ -140,11 +144,16 @@ def test_profile_reports_one_pytest_run_after_lint_failure(
 	_patch_runtime(monkeypatch, root, seen_commands, tool_output)
 	exit_code, output = _invoke(root, monkeypatch, capsys, profile=profile)
 
-	assert exit_code == 1, output
+	assert exit_code == (1 if profile or ci else EXIT_UNCHECKED), output
 	assert "python.component_1.ruff: failed" in output
-	assert sum("pytest" in command for command in seen_commands) == 1
+	assert sum("pytest" in command for command in seen_commands) == int(profile or ci)
+	if not profile and not ci:
+		assert "python.component_1.pytest: unchecked" in output
+		assert "mandatory pre-test checks did not pass" in output
 	assert ("Check timings:" in output) is profile
 	assert ("admission_wait_ms=" in output) is profile
+	if profile and ci:
+		assert "admission_wait_ms=not-measured" in output
 
 
 @pytest.mark.parametrize(
@@ -237,7 +246,7 @@ def test_gate_keeps_partial_pytest_collection_unchecked(
 			"@pytest.hookimpl(hookwrapper=True)\n"
 			"def pytest_runtest_makereport(item, call):\n"
 			"    report = (yield).get_result()\n"
-			"    if '𐐀' in item.name:\n"
+			"    if '\U00010400' in item.name:\n"
 			"        base = {'setup': 0.25, 'call': 1.25, 'teardown': 0.50}[call.when]\n"
 			"        report.duration = base + int(item.name.split('_')[1]) / 100\n"
 			"    else:\n"
@@ -384,3 +393,95 @@ def _patch_real_pytest(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
 		return ""
 
 	_patch_runtime(monkeypatch, root, [], run_pytest)
+
+
+@pytest.mark.parametrize("failure", ["none", "lint", "documents", "pytest", "timeout", "runtime"])
+def test_local_gate_completes_prerequisites_before_tests_and_retains_failures(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+	failure: str,
+) -> None:
+	monkeypatch.setattr(runner, "running_in_ci", lambda: False)
+	root = _disposable_repository(tmp_path, "multi-component")
+	manifest = root / "quality-gate.toml"
+	source = manifest.read_text(encoding="utf-8")
+	for component in ("app1", "app2"):
+		source = source.replace("test_paths = []", f'test_paths = ["{component}/tests"]', 1)
+		folder = root / component / "tests"
+		folder.mkdir(parents=True)
+		(folder / "test_app.py").write_text("def test_app(): pass\n", encoding="utf-8")
+	source = source.replace("tests_applicable = false", "tests_applicable = true")
+	source = source.replace(
+		'tests_reason = "Fixture checks per-component runtime reporting."\n', ""
+	)
+	if failure == "documents":
+		source = source.replace(
+			'required_documents = ["quality-gate.toml"]',
+			'required_documents = ["quality-gate.toml", "missing.md"]',
+		)
+	manifest.write_text(source, encoding="utf-8")
+	assert _git(root, "add", ".").returncode == 0
+	# Unstaged files cannot repair the staged document finding or change tests.
+	(root / "missing.md").write_text("unstaged repair", encoding="utf-8")
+	seen: list[list[str]] = []
+
+	def output(command: list[str], _root: Path, _env: dict[str, str], _timeout: float) -> str:
+		if "pytest" in command:
+			assert sum("mypy" in item for item in seen) == 2
+			if "app1" in str(command) and failure in {"pytest", "timeout"}:
+				raise runner.QualityGateError(
+					"test failure or timeout", exit_code=2 if failure == "timeout" else 1
+				)
+		if failure == "lint" and "ruff" in command and "check" in command and "app2" in command:
+			raise runner.QualityGateError("second component lint failed", exit_code=1)
+		return ""
+
+	_patch_runtime(monkeypatch, root, seen, output)
+	if failure == "runtime":
+		prepare = runner.prepare
+
+		def unavailable(*args: object, **kwargs: object) -> object:
+			prepared = prepare(*args, **kwargs)
+			prepared.runtimes[1].current = False
+			prepared.runtimes[1].reason = "test runtime unavailable"
+			return prepared
+
+		monkeypatch.setattr(runner, "prepare", unavailable)
+	exit_code, report = _invoke(root, monkeypatch, capsys, verbose=True)
+	assert exit_code == (0 if failure == "none" else 1 if failure == "pytest" else 2), report
+	blocked = failure in {"lint", "documents", "runtime"}
+	assert sum("pytest" in command for command in seen) == (0 if blocked else 2)
+	assert "secrets.candidate: passed" in report
+	assert "python.component_1.format: passed" in report
+	if blocked:
+		assert "python.component_1.pytest: unchecked" in report
+		assert "mandatory pre-test checks did not pass" in report
+	elif failure in {"pytest", "timeout"}:
+		assert "python.component_2.pytest: passed" in report
+
+
+def test_early_rejection_does_not_report_unexecuted_coverage_as_passed(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+) -> None:
+	monkeypatch.setattr(runner, "running_in_ci", lambda: False)
+	root = _disposable_repository(tmp_path, "python-tests")
+	(root / "app").mkdir(exist_ok=True)
+	(root / "app" / "module.py").write_text("", encoding="utf-8")
+	assert _git(root, "add", ".").returncode == 0
+	seen: list[list[str]] = []
+
+	def fail_lint(command: list[str], _root: Path, _env: dict[str, str], _timeout: float) -> str:
+		if "ruff" in command and "check" in command:
+			raise runner.QualityGateError("lint finding", exit_code=1)
+		return ""
+
+	_patch_runtime(monkeypatch, root, seen, fail_lint, _coverage_release_manifest())
+	exit_code, report = _invoke(root, monkeypatch, capsys, verbose=True)
+	assert exit_code == 2, report
+	assert not any("pytest" in command or "coverage" in command for command in seen)
+	assert "python.component_1.coverage: unchecked" in report
+	assert "python.component_1.coverage_report: unchecked" in report
+	assert "mandatory pre-test checks did not pass" in report
