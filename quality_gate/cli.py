@@ -30,6 +30,9 @@ def parser() -> argparse.ArgumentParser:
 	check_parser.add_argument(
 		"--verbose", action="store_true", help="Show all check statuses and redacted findings."
 	)
+	check_parser.add_argument(
+		"--profile", action="store_true", help="Report timings for this staged check."
+	)
 	check_parser.add_argument("--base", help="Verified base Git reference for CI range scanning.")
 	check_parser.add_argument(
 		"--head", help="Verified head Git reference for CI range scanning. Defaults to HEAD."
@@ -194,6 +197,7 @@ def _dispatch(arguments: argparse.Namespace) -> int:
 		verbose=arguments.verbose,
 		base=arguments.base,
 		head=arguments.head,
+		profile=arguments.profile,
 	)
 	return verdict.exit_code
 

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from quality_gate import runner
 from quality_gate.contracts import (
 	MAX_FINDINGS_PER_CHECK,
 	MAX_FINDINGS_TOTAL,
@@ -28,6 +31,65 @@ EXPECTED_DISPLAYED_FINDINGS = MAX_FINDINGS_TOTAL
 EXPECTED_AVAILABLE_FINDINGS = MAX_FINDINGS_PER_CHECK + SINGLE_FINDING_COUNT
 
 
+def test_detailed_timings_require_explicit_profile() -> None:
+	result = CheckResult(
+		"python.component_1.pytest",
+		Status.PASSED,
+		"pytest totals: 2 passed",
+		telemetry=StageTiming("python.component_1.pytest", 42, "tests", "executed"),
+	)
+	verdict = Verdict((result,))
+	assert "Check timings:" not in render(verdict)
+	assert "elapsed_ms=42" in render(verdict, profile=True)
+
+
+@pytest.mark.parametrize(
+	("command", "options"),
+	[
+		("audit", {}),
+		("audit", {"verbose": True}),
+		("bootstrap_check", {"policy_release": "v4.9.0"}),
+		("bootstrap_audit", {"policy_release": "v4.9.0", "verbose": True}),
+		("bootstrap_product_audit", {"policy_release": "v4.9.0", "verbose": True}),
+	],
+)
+def test_audit_and_bootstrap_retain_operation_report(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+	command: str,
+	options: dict[str, object],
+) -> None:
+	timing = StageTiming("python.component_1.pytest", 42, "tests", "executed", command_ms=39)
+	result = CheckResult(
+		"python.component_1.pytest", Status.PASSED, "check passed", telemetry=timing
+	)
+	operation = OperationTelemetry(
+		operation_id="audit-operation",
+		operation=command,
+		profile="audit",
+		candidate="index-digest",
+		elapsed_ms=42,
+		stages=(timing,),
+		complete=True,
+		last_completed_stage=timing.stage,
+		admission_wait_ms=11,
+	)
+	verdict = Verdict((result,), operation=operation)
+	monkeypatch.setattr(runner, "_run_snapshot", lambda *_args, **_kwargs: verdict)
+
+	getattr(runner, command)(tmp_path, **options)
+
+	output = capsys.readouterr().out
+	assert "Operation: id=audit-operation" in output
+	assert "complete=true" in output
+	assert "last_completed_stage=python.component_1.pytest" in output
+	assert "Check timings:" in output
+	assert "command_ms=" not in output
+	assert "admission_wait_ms=" not in output
+	assert "pytest durations unavailable" not in output
+
+
 @pytest.mark.parametrize("verbose", [False, True])
 def test_report_separates_reuse_lookup_from_original_execution(verbose: bool) -> None:
 	result = CheckResult(
@@ -45,7 +107,7 @@ def test_report_separates_reuse_lookup_from_original_execution(verbose: bool) ->
 			original_operation_id="prior-operation",
 		),
 	)
-	output = render(Verdict((result,)), verbose=verbose)
+	output = render(Verdict((result,)), verbose=verbose, profile=True)
 	assert "disposition=reused" in output
 	assert "scope=quality_gate" in output
 	assert "elapsed_ms=17" in output
@@ -77,7 +139,7 @@ def test_incomplete_operation_retains_findings_and_blocks_green_aggregate() -> N
 		last_completed_stage="python.component_1.mypy",
 	)
 	verdict = Verdict((result,), operation=operation)
-	output = render(verdict)
+	output = render(verdict, profile=True)
 	assert verdict.exit_code == EXPECTED_UNCHECKED_EXIT
 	assert "python.component_1.mypy: failed - incompatible return type" in output
 	assert "expected int" in output
@@ -96,8 +158,11 @@ def test_compact_report_includes_pytest_terminal_totals_after_status_summary() -
 		"pytest totals: 2 passed, 1 skipped",
 		telemetry=StageTiming("python.component_1.pytest", 42, "quality_gate/tests", "executed"),
 	)
-	output = render(Verdict((result,)))
+	output = render(Verdict((result,)), profile=True)
 
+	ordinary = render(Verdict((result,)))
+	assert "python.component_1.pytest: passed - pytest totals: 2 passed, 1 skipped" in ordinary
+	assert "Check timings:" not in ordinary
 	assert output.index("Observed results: 1 passed") < output.index("Check timings:")
 	assert "outcome=passed" in output
 	assert "test_totals=2 passed, 1 skipped" in output
@@ -110,7 +175,7 @@ def test_verbose_report_preserves_pytest_status_line_before_telemetry() -> None:
 		"pytest totals: 2 passed, 1 skipped",
 		telemetry=StageTiming("python.component_1.pytest", 42, "quality_gate/tests", "executed"),
 	)
-	output = render(Verdict((result,)), verbose=True)
+	output = render(Verdict((result,)), verbose=True, profile=True)
 
 	status_line = "python.component_1.pytest: passed - pytest totals: 2 passed, 1 skipped"
 	assert output.index(status_line) < output.index("Check timings:")
@@ -132,7 +197,7 @@ def test_timing_metadata_uses_the_existing_secret_redaction() -> None:
 			reason="native cache synthetic-private-value",
 		),
 	)
-	output = render(Verdict((result,)))
+	output = render(Verdict((result,)), profile=True)
 	assert "synthetic-private-value" not in output
 	assert "reason=native cache" in output
 

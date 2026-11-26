@@ -1,14 +1,15 @@
-"""Manifest and verdict data models and safe output redaction."""
+"""Manifest and verdict data models."""
 
 from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 from typing import Literal
+
+from .output_redaction import redact as redact
 
 MAX_TELEMETRY_TEXT = 512
 _CHECK_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
@@ -140,6 +141,7 @@ class StageTiming:
 	original_elapsed_ms: int | None = None
 	original_operation_id: str | None = None
 	tool_cache: str = "not-measured"
+	command_ms: int | None = None
 
 	def __post_init__(self) -> None:
 		_telemetry_duration(self.elapsed_ms, required=True)
@@ -147,6 +149,7 @@ class StageTiming:
 			self.lookup_ms,
 			self.validation_ms,
 			self.original_elapsed_ms,
+			self.command_ms,
 		):
 			_telemetry_duration(duration)
 		if self.disposition not in {"executed", "reused", "not-run"}:
@@ -183,9 +186,11 @@ class OperationTelemetry:
 	last_completed_stage: str | None = None
 	timed_out: bool = False
 	scope: str = "staged"
+	admission_wait_ms: int | None = None
 
 	def __post_init__(self) -> None:
 		_telemetry_duration(self.elapsed_ms, required=True)
+		_telemetry_duration(self.admission_wait_ms)
 		for value in (
 			self.operation_id,
 			self.operation,
@@ -214,6 +219,8 @@ class CheckResult:
 	_secrets: tuple[str, ...] = field(default=(), repr=False, compare=False)
 	omitted_findings: int | None = 0
 	telemetry: StageTiming | None = field(default=None, compare=False)
+	profile_details: tuple[str, ...] = field(default=(), repr=False, compare=False)
+	profile_outcome: Status | None = field(default=None, compare=False)
 
 	def __post_init__(self) -> None:
 		if not _CHECK_ID.fullmatch(self.check_id):
@@ -251,8 +258,10 @@ class CheckResult:
 class Verdict:
 	results: tuple[CheckResult, ...]
 	operation: OperationTelemetry | None = field(default=None, compare=False)
+	admission_wait_ms: int | None = field(default=None, compare=False)
 
 	def __post_init__(self) -> None:
+		_telemetry_duration(self.admission_wait_ms)
 		ids = [result.check_id for result in self.results]
 		if len(set(ids)) != len(ids):
 			raise ValueError("check ids must be unique within a verdict")
@@ -269,18 +278,3 @@ class Verdict:
 
 def fingerprint_secret(value: str) -> str:
 	return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def redact(text: str, secrets: Iterable[str] = ()) -> str:
-	result = text
-	tokens = {secret for secret in secrets if secret}
-	for secret in tuple(tokens):
-		tokens.update(secret[:length] for length in range(8, len(secret) + 1))
-	for token in sorted(tokens, key=len, reverse=True):
-		result = result.replace(token, "<REDACTED>")
-	for pattern in (
-		r"(?i)(?:ghp_|github_pat_|sk-|xox[baprs]-)[A-Za-z0-9_-]{8,}",
-		r"(?i)(?:password|passwd|token|secret|api[_-]?key)\s*[=:]\s*[^\s,;]+",
-	):
-		result = re.sub(pattern, "<REDACTED>", result)
-	return result

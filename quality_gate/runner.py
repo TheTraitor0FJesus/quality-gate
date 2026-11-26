@@ -210,9 +210,6 @@ from .runner_process import (
 	_has_pinned_coverage as _has_pinned_coverage,
 )
 from .runner_process import (
-	_pytest_outcome_summary as _pytest_outcome_summary,
-)
-from .runner_process import (
 	_remaining as _remaining,
 )
 from .runner_process import (
@@ -458,15 +455,6 @@ MAX_DEPTRY_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_DEPTRY_TEXT_CHARS = 1000
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 1.0
 CHECK_ID_COMPONENT_PARTS = 3
-_PYTEST_SUMMARY_COUNT = re.compile(
-	(
-		r"\b(?P<count>\d+)\s+"
-		r"(?P<outcome>passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?)\b"
-	),
-	re.IGNORECASE,
-)
-_PYTEST_SUMMARY_DURATION = re.compile(r"\bin\s+\d+(?:\.\d+)?s\b", re.IGNORECASE)
-_PYTEST_NO_TESTS = re.compile(r"\bno tests ran\b", re.IGNORECASE)
 BIOME_POLICY = "biome.toml"
 BIOME_CONFIG = "biome.json"
 BIOME_MAX_FILE_BYTES = 5 * 1024 * 1024

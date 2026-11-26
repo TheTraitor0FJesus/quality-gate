@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import subprocess
 import sys
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from runner_operation_fixtures import (
@@ -23,10 +24,14 @@ from test_runner import (
 	_fake_candidate_snapshot,
 )
 
-from quality_gate import runner, runner_subprocess
+from quality_gate import operation, runner, runner_subprocess
 from quality_gate.admission import AdmissionError
 from quality_gate.distribution import ExternalTool, ReleaseFile, ReleaseManifest
 from quality_gate.launcher import PreparedEnvironment
+from quality_gate.reporting import render
+
+if TYPE_CHECKING:
+	from collections.abc import Iterator
 
 
 def test_load_components_accepts_python_component() -> None:
@@ -169,9 +174,10 @@ def test_load_components_accepts_repository_without_python() -> None:
 
 
 def test_check_skips_python_tools_without_components(
+	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-	root = FIXTURES / "no-python"
+	root = shutil.copytree(FIXTURES / "no-python", tmp_path / "repository")
 	calls: list[tuple[list[str], dict[str, str]]] = []
 
 	def fake_run(
@@ -284,9 +290,11 @@ exclude = []
 	assert "outside or traverses" in result.findings[0].message
 
 
-def test_check_sets_a_writable_temporary_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_check_sets_a_writable_temporary_directory(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
 	monkeypatch.setattr(runner, "gate_admission", lambda: nullcontext())
-	root = FIXTURES / "valid"
+	root = shutil.copytree(FIXTURES / "valid", tmp_path / "repository")
 	calls: list[tuple[list[str], dict[str, str]]] = []
 	expected_call_count = 3
 
@@ -346,6 +354,47 @@ def test_safe_environment_isolated_from_user_python_state(
 	assert "GITHUB_ACTIONS" not in environment
 	assert "QUALITY_GATE_ADMISSION_ROOT" not in environment
 	assert "RAYON_NUM_THREADS" not in environment
+
+
+def test_profile_separates_queue_and_sums_commands_in_one_stage(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	now = 10.0
+	clock = SimpleNamespace(monotonic=lambda: now)
+	monkeypatch.setattr(runner, "time", clock)
+	monkeypatch.setattr(operation, "time", clock)
+	monkeypatch.setattr(runner, "running_in_ci", lambda: False)
+
+	@contextmanager
+	def admit() -> Iterator[None]:
+		nonlocal now
+		now += 1.0
+		yield
+
+	def command(command: list[str], **_kwargs: object) -> tuple[int, bytes, bytes]:
+		nonlocal now
+		now += {"first": 0.25, "second": 0.5}[command[0]]
+		return 0, b"", b""
+
+	def run_checks(gate: operation.GateOperation, root: Path, **_kwargs: object) -> None:
+		nonlocal now
+		check_id = "python.component_1.ruff"
+		with gate.stage(check_id, "app", check=True):
+			now += 0.125
+			runner.run(["first"], root, {})
+			runner.run(["second"], root, {})
+			now += 0.125
+		gate.record_result(runner.CheckResult(check_id, runner.Status.PASSED, "check passed"))
+
+	monkeypatch.setattr(runner, "gate_admission", admit)
+	monkeypatch.setattr(operation, "supervise_process", command)
+	monkeypatch.setattr(runner, "_run_snapshot_operation", run_checks)
+	output = render(runner.check(tmp_path, profile=True), profile=True)
+
+	assert "  admission_wait_ms=1000\n" in output
+	assert "  elapsed_ms=1000; complete=true" in output
+	assert "python.component_1.ruff: elapsed_ms=1000;" in output
+	assert "outcome=passed; command_ms=750" in output
 
 
 def test_expired_admission_returns_before_snapshot_construction(

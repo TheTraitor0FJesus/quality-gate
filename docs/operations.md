@@ -12,6 +12,7 @@ The manifest and current immutable release determine which checks and tools are 
 | `quality-gate setup` | Prepare the selected policy and declared Python runtimes. Run it after selecting a release or changing Python components. |
 | `quality-gate --root <repository> runtimes --json` | Inspect existing Python runtimes when the installed engine supports this command. See [Runtime inventory](runtimes.md). |
 | `quality-gate check` | Check the exact staged candidate, as the normal local commit hook does. |
+| `quality-gate check --profile` | Check the staged candidate and show timings for this run. |
 | `quality-gate audit` | Run the complete onboarding audit, including all implemented domains, a full reachable-history secret scan, and lesson completion. |
 | `quality-gate version` | Print the installed engine package version. It does not report the policy release selected in `quality-gate.toml`. |
 
@@ -42,3 +43,23 @@ default is 120 seconds. Zero makes one immediate attempt. GitHub Actions skips t
 uses its job deadline. To cap Ruff's worker threads during a full Gate run, set
 `QUALITY_GATE_RUFF_THREADS` from 1 through 64; the default is 4. The standalone `format` command
 does not use this thread setting.
+
+## Profile a staged check
+
+Run `quality-gate check --profile` from the repository root after staging the candidate. Use
+an engine that lists the flag in `quality-gate check --help` and the runtime selected by the
+staged manifest. The report shows local admission wait separately from elapsed time after
+admission. If admission fails, the profile shows the wait and indicates that verification
+did not start. Elapsed time includes cleanup. The value `command_ms` measures time spent
+supervising subprocess calls within a stage. Stage timings can overlap because some
+stages contain others.
+
+The profile shows up to ten of the slowest entries per phase (setup, call and teardown)
+from the same pytest run. It labels them by test path and name with parameter values
+removed. The ordinary report shows pytest's outcome totals when available. For a failed run, the
+Gate masks secrets before limiting failure details. It includes captured output for
+failed tests according to pytest's capture settings and gives the reason for pytest
+usage errors and interruptions when available. The profile marks phase timings
+unavailable when pytest cannot provide them. It shows report-only coverage failures
+in the timing outcome while preserving the Gate verdict. The normal check and commit
+hook omit detailed timings.

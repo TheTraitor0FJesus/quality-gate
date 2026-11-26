@@ -88,40 +88,6 @@ def test_unmeasured_deptry_scope_uses_repository_relative_dependency_paths() -> 
 	assert results.scope_for("python.component_1.deptry") == ("app; dependencies=pyproject.toml")
 
 
-@pytest.mark.parametrize(
-	("output", "expected"),
-	(
-		("================ 12 passed, 2 skipped in 4.25s ================", "12 passed, 2 skipped"),
-		("1 failed, 1 error, 3 passed in 0.02s", "1 failed, 1 error, 3 passed"),
-		("no tests ran in 0.01s", "0 tests ran"),
-		("pytest output had no terminal summary", None),
-	),
-)
-def test_pytest_outcome_summary_reports_only_terminal_counts(
-	output: str, expected: str | None
-) -> None:
-	assert runner._pytest_outcome_summary(output) == expected
-
-
-def test_pytest_totals_are_added_without_changing_check_outcome() -> None:
-	check_id = "python.component_1.pytest"
-	passed = runner._command_results([check_id], [], {check_id: "2 passed, 1 skipped in 0.02s"})[0]
-	failed_error = runner.QualityGateError(
-		"pytest failed: 1 failed, 2 passed in 0.02s",
-		check_id=check_id,
-		exit_code=1,
-		recovery_action="fix failed tests",
-	)
-	failed = runner._command_results([check_id], [failed_error], {})[0]
-
-	assert passed.check_id == check_id
-	assert passed.status is runner.Status.PASSED
-	assert passed.summary == "pytest totals: 2 passed, 1 skipped"
-	assert failed.check_id == check_id
-	assert failed.status is runner.Status.FAILED
-	assert failed.summary == "pytest totals: 1 failed, 2 passed"
-
-
 def test_snapshot_uses_operation_deadline_cleanup_and_candidate_identity(
 	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -240,7 +206,7 @@ def test_operation_cache_selection_is_reported_without_skipping_tool(
 	assert result.telemetry.lookup_ms == 12
 	assert result.telemetry.tool_cache == f"native-{storage}"
 	assert result.telemetry.reason == (reason or "")
-	report = runner.render(gate.verdict())
+	report = runner.render(gate.verdict(), profile=True)
 	assert "lookup_ms=12" in report and f"tool_cache=native-{storage}" in report
 
 

@@ -299,13 +299,14 @@ def test_cli_reports_timeout_as_unchecked_without_a_failed_verdict(
 	_seen_commands: list[list[str]] = []
 	_patch_runtime(monkeypatch, root, _seen_commands, time_out)
 
-	result, output = _invoke(root, monkeypatch, capsys)
+	result, output = _invoke(root, monkeypatch, capsys, profile=True)
 
 	assert result == EXIT_UNCHECKED
 	assert "manifest.documents: failed" in output
 	assert "docs/missing.md" in output
 	assert "python.component_1.pytest: unchecked" in output
 	assert "python.component_1.pytest: failed" not in output
+	assert "pytest durations unavailable" in output
 
 
 @pytest.mark.parametrize("command", ["check", "audit"])
@@ -383,8 +384,12 @@ def test_cli_uses_a_sanitized_environment_and_redacts_secret_output(
 	assert secret not in output
 
 
+@pytest.mark.parametrize("profile", [False, True])
 def test_cli_prints_report_only_coverage_when_provider_is_pinned(
-	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+	profile: bool,
 ) -> None:
 	root = _disposable_repository(tmp_path, "python-tests")
 	release_manifest = _coverage_release_manifest()
@@ -402,7 +407,7 @@ def test_cli_prints_report_only_coverage_when_provider_is_pinned(
 
 	_patch_runtime(monkeypatch, root, [], coverage_report, release_manifest)
 
-	result, output = _invoke(root, monkeypatch, capsys)
+	result, output = _invoke(root, monkeypatch, capsys, profile=profile)
 
 	assert result == 0
 	assert "coverage report: TOTAL 10 1 90%" in output
@@ -410,10 +415,21 @@ def test_cli_prints_report_only_coverage_when_provider_is_pinned(
 	assert "python.component_1.coverage_report: passed" not in output
 	assert secret not in output
 	assert "threshold" not in output.casefold()
+	if profile:
+		assert any(
+			line.startswith("  python.component_1.coverage_report: ") and "outcome=passed" in line
+			for line in output.partition("Check timings:")[2].splitlines()
+		)
 
 
+@pytest.mark.parametrize("profile", [False, True])
+@pytest.mark.parametrize("command_exit", [1, EXIT_UNCHECKED])
 def test_cli_does_not_enforce_report_only_coverage_failures(
-	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
+	profile: bool,
+	command_exit: int,
 ) -> None:
 	root = _disposable_repository(tmp_path, "python-tests")
 	release_manifest = _coverage_release_manifest()
@@ -427,16 +443,25 @@ def test_cli_does_not_enforce_report_only_coverage_failures(
 		if "coverage" in command:
 			raise runner.QualityGateError(
 				"coverage provider failed",
+				exit_code=command_exit,
 				recovery_action="inspect the optional coverage report",
 			)
 
 	_patch_runtime(monkeypatch, root, [], coverage_failure, release_manifest)
 
-	result, output = _invoke(root, monkeypatch, capsys)
+	result, output = _invoke(root, monkeypatch, capsys, profile=profile)
 
 	assert result == 0
 	assert "coverage report unavailable; report-only: coverage provider failed" in output
 	assert "python.component_1.coverage_report: passed" not in output
+	if profile:
+		timings = output.partition("Check timings:")[2].splitlines()
+		outcome = "unchecked" if command_exit == EXIT_UNCHECKED else "failed"
+		for check in ("coverage", "coverage_report"):
+			assert any(
+				line.startswith(f"  python.component_1.{check}: ") and f"outcome={outcome}" in line
+				for line in timings
+			), output
 
 
 @pytest.mark.parametrize("separator", ["/", "\\"])

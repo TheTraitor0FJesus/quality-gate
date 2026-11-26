@@ -145,10 +145,13 @@ def _invoke(
 	capsys: pytest.CaptureFixture[str],
 	*,
 	verbose: bool = False,
+	profile: bool = False,
 ) -> tuple[int, str]:
 	arguments = ["quality-gate", "--root", str(root), "check"]
 	if verbose:
 		arguments.append("--verbose")
+	if profile:
+		arguments.append("--profile")
 	monkeypatch.setattr(sys, "argv", arguments)
 	result = main()
 	return result, capsys.readouterr().out

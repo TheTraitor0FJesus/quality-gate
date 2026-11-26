@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
 import time
 from contextlib import nullcontext
@@ -102,8 +103,10 @@ def test_ruff_worker_override_is_validated_and_applied_only_to_ruff(
 			runner._ruff_environment({})
 
 
-def test_missing_external_tool_is_unchecked(monkeypatch: pytest.MonkeyPatch) -> None:
-	root = FIXTURES / "valid"
+def test_missing_external_tool_is_unchecked(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	root = shutil.copytree(FIXTURES / "valid", tmp_path / "repository")
 	missing_tool = root / "missing-ruff"
 	prepared = SimpleNamespace(
 		policy_root=runner.POLICY_DIR.parent.parent,
@@ -161,8 +164,10 @@ def test_format_uses_only_explicit_paths(monkeypatch: pytest.MonkeyPatch) -> Non
 	assert "RAYON_NUM_THREADS" not in environments[0]
 
 
-def test_policy_access_error_is_unchecked(monkeypatch: pytest.MonkeyPatch) -> None:
-	root = FIXTURES / "valid"
+def test_policy_access_error_is_unchecked(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+	root = shutil.copytree(FIXTURES / "valid", tmp_path / "repository")
 	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
 
 	def fail_prepare(*args: object, **kwargs: object) -> None:
@@ -212,9 +217,10 @@ def test_workspace_failure_reports_only_the_unavailable_workspace(
 
 
 def test_not_applicable_component_tests_are_reported(
+	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-	root = FIXTURES / "valid"
+	root = shutil.copytree(FIXTURES / "valid", tmp_path / "repository")
 	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
 	monkeypatch.setattr(
 		runner,
@@ -238,9 +244,10 @@ def test_not_applicable_component_tests_are_reported(
 
 
 def test_pytest_collection_failure_is_failed(
+	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-	root = FIXTURES / "python-tests"
+	root = shutil.copytree(FIXTURES / "python-tests", tmp_path / "repository")
 	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
 	monkeypatch.setattr(
 		runner,
@@ -287,9 +294,10 @@ def test_pytest_collection_failure_is_failed(
 
 
 def test_missing_test_path_is_unchecked_without_hiding_other_checks(
+	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-	root = FIXTURES / "missing-test-path"
+	root = shutil.copytree(FIXTURES / "missing-test-path", tmp_path / "repository")
 	monkeypatch.setattr(runner, "gate_admission", lambda: nullcontext())
 	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
 	monkeypatch.setattr(
@@ -318,9 +326,11 @@ def test_missing_test_path_is_unchecked_without_hiding_other_checks(
 
 
 def test_component_runtime_failure_does_not_hide_other_components(
+	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
+	capsys: pytest.CaptureFixture[str],
 ) -> None:
-	root = FIXTURES / "multi-component"
+	root = shutil.copytree(FIXTURES / "multi-component", tmp_path / "repository")
 	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
 	monkeypatch.setattr(
 		runner,
@@ -338,8 +348,10 @@ def test_component_runtime_failure_does_not_hide_other_components(
 		runner, "temporary_directory", lambda root: nullcontext("test-temporary-directory")
 	)
 
-	verdict = runner.check(root)
+	verdict = runner.check(root, profile=True)
 
+	assert verdict.exit_code == 2
+	assert "component runtime is unavailable" in capsys.readouterr().out
 	assert any(
 		result.check_id == "python.component_1.runtime" and result.status is runner.Status.UNCHECKED
 		for result in verdict.results
