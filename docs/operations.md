@@ -46,6 +46,21 @@ does not use this thread setting.
 
 ## Profile a staged check
 
+An ordinary local `check` completes repository, security and web checks, then
+dependency hygiene, Ruff lint/format and mypy for every Python component before
+starting any pytest or report-only coverage command. A blocking prerequisite
+prevents those test commands from starting. All completed findings remain in the
+report. Prevented tests use the existing `unchecked` status with a reason and
+`not-run` timing disposition. Consequently, a failed prerequisite with applicable
+unexecuted tests returns exit `2`, rather than exit `1` for findings alone.
+
+Once the test stage starts, a component test failure does not stop the remaining
+test commands. The shared deadline, interruption and process cleanup still apply.
+The local four-Gate admission limit and sequential child execution are unchanged.
+CI, `audit`, product verification and explicit `check --profile` retain the full
+diagnostic pass after a prerequisite finding. No successful commit can omit an
+applicable mandatory check.
+
 Run `quality-gate check --profile` from the repository root after staging the candidate. Use
 an engine that lists the flag in `quality-gate check --help` and the runtime selected by the
 staged manifest. The report shows local admission wait separately from elapsed time after

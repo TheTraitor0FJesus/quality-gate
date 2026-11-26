@@ -594,6 +594,7 @@ class _PythonCheckContext:
 	component_index: int
 	report_path: Path
 	deadline: float
+	deferred_tests: list[tuple[str, list[str], int]] | None = None
 
 	def dependency_result(self, python_executable: Path | None = None) -> CheckResult:
 		return _dependency_hygiene_result(
