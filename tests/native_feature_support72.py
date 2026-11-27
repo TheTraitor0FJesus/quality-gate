@@ -23,6 +23,7 @@ import quality_gate.native_cache as native_cache_module
 from quality_gate import operation as operation_module
 from quality_gate import runner
 from quality_gate.contracts import CheckResult, Status
+from quality_gate.evidence_identity import EngineIdentity
 from quality_gate.edit_protocol import EditError
 from quality_gate.file_lock import open_locked_file
 from quality_gate.launcher import PreparedEnvironment, prepare
@@ -41,6 +42,19 @@ MEASUREMENT_EXPECTED_TOOL_RUNS = (MEASUREMENT_WARM_RUNS + 2) * 2
 MEASUREMENT_SOURCE_MTIME_NS = 1_700_000_000_000_000_000
 
 
+def short_native_cache_root(
+	tmp_path: Path,
+	label: str = "cache",
+	*,
+	cache_temp_root: Path,
+) -> Path:
+	"""Keep subprocess caches short and inside the fixture-owned temporary root."""
+	session_root = cache_temp_root
+	test_path = tmp_path.as_posix()
+	token = hashlib.sha256(f"{test_path}:{label}".encode("utf-8")).hexdigest()[:8]
+	return session_root / f"nc-{token}"
+
+
 @pytest.fixture(autouse=True)
 def use_long_windows_staging_limit_for_test_sandbox(
 	monkeypatch: pytest.MonkeyPatch,
@@ -57,7 +71,7 @@ def _identity(
 ) -> NativeToolCacheIdentity:
 	return NativeToolCacheIdentity(
 		repository="C:/repositories/quality-gate",
-		engine_version="4.2.0",
+		engine=EngineIdentity("source", "4.2.0", "a" * 64),
 		runtime_fingerprint=runtime_fingerprint,
 		tool=tool,
 		tool_version="0.16.4" if tool == "ruff" else "2.3.1",

@@ -21,6 +21,7 @@ from runner_operation_fixtures import (
 from test_runner import FIXTURES, _fake_candidate_snapshot
 
 from quality_gate import native_cache as native_cache_module, runner
+from quality_gate import runner_python_tools as python_tools_module
 from quality_gate import operation as operation_module
 from quality_gate.distribution import ExternalTool, ReleaseManifest
 from quality_gate.launcher import PreparedEnvironment
@@ -286,6 +287,82 @@ def test_native_cache_selection_reuses_snapshot_independent_path_and_still_runs_
 	assert observed[0][0] == Path(observed[0][1]) / "_s" / "c"
 	assert observed[0][1] == observed[1][1]
 	assert observed[0][1].startswith(str(prepared.cache_root))
+
+
+def test_unconfirmed_engine_identity_executes_with_private_native_cache(
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	policy_root = tmp_path / "policy"
+	configuration = policy_root / "quality_gate" / "policy" / "ruff.toml"
+	configuration.parent.mkdir(parents=True)
+	configuration.write_text('[lint]\nselect = ["F"]\n', encoding="utf-8")
+	prepared = SimpleNamespace(
+		policy_root=policy_root,
+		cache_root=tmp_path / "provider-cache",
+		release_manifest=ReleaseManifest(
+			"v4.2.0",
+			(),
+			(ExternalTool("ruff", "0.16.4", "tools/ruff.exe", "a" * 64),),
+		),
+		runtime_identities=(
+			RuntimeIdentity(
+				repository="C:/repositories/example",
+				policy_release="v4.2.0",
+				component="python",
+				python_version="3.11",
+				component_contract={"path": "src"},
+				dependency_inputs=(),
+			),
+		),
+	)
+	snapshot_root = tmp_path / "snapshot"
+	source_root = snapshot_root / "src"
+	source_root.mkdir(parents=True)
+	(source_root / "module.py").write_text("def check() -> None: ...\n", encoding="utf-8")
+	component = runner.PythonComponent(source_root, None, None, True)
+	private_cache = tmp_path / "private-cache"
+	commands = [
+		(
+			"python.component_1.ruff",
+			["ruff", "check", "--config", str(configuration), "src"],
+			10,
+		)
+	]
+	observed: list[tuple[Path, str]] = []
+
+	def inspect_invocation(
+		_command: list[str],
+		root: Path,
+		environment: dict[str, str],
+		*,
+		timeout: float | None = None,
+	) -> str:
+		assert timeout is not None and timeout > 0
+		observed.append((root, environment["RUFF_CACHE_DIR"]))
+		return ""
+
+	monkeypatch.setattr(
+		python_tools_module,
+		"engine_identity",
+		lambda *_args, **_kwargs: None,
+		raising=False,
+	)
+	monkeypatch.setattr(runner, "run", inspect_invocation)
+	executed, errors, _outputs = runner._execute_commands(
+		snapshot_root,
+		runner._safe_environment(str(private_cache)),
+		commands,
+		10,
+		time.monotonic() + 30,
+		prepared=prepared,
+		component=component,
+		component_index=1,
+	)
+
+	assert executed == ["python.component_1.ruff"]
+	assert errors == []
+	assert observed == [(snapshot_root, str(private_cache))]
 
 
 def test_native_cache_selection_reuses_namespace_across_git_worktrees(
