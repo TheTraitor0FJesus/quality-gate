@@ -55,6 +55,7 @@ from native_feature_cases72_3 import (
 )
 
 from native_feature_cases72_4 import (
+	test_short_cache_roots_are_session_local as test_short_cache_roots_are_session_local,
 	test_pinned_native_tools_reuse_native_entries_across_snapshots as test_pinned_native_tools_reuse_native_entries_across_snapshots,
 	test_pinned_native_cache_invalidation_matches_clean_cache as test_pinned_native_cache_invalidation_matches_clean_cache,
 )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 from . import runner as _runner
+from .verification_evidence import engine_identity
 
 
 def _component_commands(
@@ -124,6 +125,9 @@ def _native_cache_identity(
 	if tool_configuration is None:
 		return None
 	tool_name, configuration_name, _environment_key = tool_configuration
+	engine = engine_identity(_runner.Path(__file__).parent, version=_runner.__version__)
+	if engine is None:
+		return None
 
 	release_manifest = getattr(prepared, "release_manifest", None)
 	tools = getattr(release_manifest, "tools", ())
@@ -163,7 +167,7 @@ def _native_cache_identity(
 
 	return _runner.NativeToolCacheIdentity(
 		repository=repository_identity,
-		engine_version=_runner.__version__,
+		engine=engine,
 		runtime_fingerprint=_runner.runtime_fingerprint(cache_runtime_identity),
 		tool=tool_name,
 		tool_version=tool.version,

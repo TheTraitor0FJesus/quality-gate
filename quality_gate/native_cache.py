@@ -27,6 +27,7 @@ from . import native_cache_methods1 as _methods1
 from . import native_cache_methods2 as _methods2
 from . import native_cache_methods3 as _methods3
 from .edit_protocol import EditError as EditError
+from .evidence_identity import EngineIdentity
 from .file_lock import FileLockUnavailableError as FileLockUnavailableError
 from .file_lock import locked_file as locked_file
 from .file_lock import open_locked_file as open_locked_file
@@ -244,7 +245,7 @@ class NativeToolCacheIdentity:
 	"""Inputs that make a tool's on-disk cache safe to share between runs."""
 
 	repository: str
-	engine_version: str
+	engine: EngineIdentity
 	runtime_fingerprint: str
 	tool: Literal["ruff", "mypy"]
 	tool_version: str

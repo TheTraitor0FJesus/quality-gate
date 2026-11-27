@@ -202,13 +202,28 @@ def _cache_identity_from_request(value: object) -> _native.NativeToolCacheIdenti
 		raise _native.NativeToolCacheError("unsafe-cache-action")
 	decoded = dict(value)
 	sequence_fields = {"effective_options", "import_roots"}
+	engine = decoded["engine"]
+	if (
+		not isinstance(engine, dict)
+		or set(engine) != {"form", "version", "digest"}
+		or not all(isinstance(item, str) for item in engine.values())
+	):
+		raise _native.NativeToolCacheError("unsafe-cache-action")
+	try:
+		decoded["engine"] = _native.EngineIdentity(**engine)
+	except (TypeError, ValueError) as error:
+		raise _native.NativeToolCacheError("unsafe-cache-action") from error
 	for name in sequence_fields:
 		items = decoded[name]
 		if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
 			raise _native.NativeToolCacheError("unsafe-cache-action")
 		decoded[name] = tuple(items)
 	if any(
-		(not isinstance(item, str) for name, item in decoded.items() if name not in sequence_fields)
+		(
+			not isinstance(item, str)
+			for name, item in decoded.items()
+			if name not in sequence_fields and name != "engine"
+		)
 	):
 		raise _native.NativeToolCacheError("unsafe-cache-action")
 	if decoded["tool"] not in {"ruff", "mypy"}:

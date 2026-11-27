@@ -35,6 +35,18 @@ def pytest_configure(config: pytest.Config) -> None:
 	_configure_short_basetemp(config, Path(__file__).resolve().parent, windows=os.name == "nt")
 
 
+@pytest.fixture
+def native_cache_temp_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+	"""Allocate a short, unique cache root inside pytest's managed session."""
+	root = tmp_path_factory.mktemp("n")
+	if os.name != "nt" or str(root).startswith("\\\\?\\"):
+		return root
+	# Keep the physical directory in basetemp while allowing native tools long paths.
+	if str(root).startswith("\\\\"):
+		return Path("\\\\?\\UNC\\" + str(root)[2:])
+	return Path("\\\\?\\" + str(root))
+
+
 _RELEASE_CANDIDATE_PATH = pytest.StashKey[Path]()
 
 

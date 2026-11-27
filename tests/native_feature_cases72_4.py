@@ -144,6 +144,9 @@ from native_feature_support72 import (
 	shutil as shutil,
 )
 from native_feature_support72 import (
+	short_native_cache_root as short_native_cache_root,
+)
+from native_feature_support72 import (
 	stat as stat,
 )
 from native_feature_support72 import (
@@ -160,8 +163,27 @@ from native_feature_support72 import (
 )
 
 
+def test_short_cache_roots_are_session_local(
+	tmp_path: Path,
+	tmp_path_factory: pytest.TempPathFactory,
+	native_cache_temp_root: Path,
+) -> None:
+	"""The real fixture and its cache leaves belong to pytest's session."""
+	assert native_cache_temp_root.is_dir()
+	assert native_cache_temp_root.parent.samefile(tmp_path_factory.getbasetemp())
+	assert not tuple(native_cache_temp_root.iterdir())
+	cache = short_native_cache_root(tmp_path, "clean", cache_temp_root=native_cache_temp_root)
+	reuse = short_native_cache_root(tmp_path, "reuse", cache_temp_root=native_cache_temp_root)
+	assert cache.parent == reuse.parent == native_cache_temp_root
+	assert cache != reuse
+	cache.mkdir()
+	(cache / "payload").write_text("cache", encoding="utf-8")
+	assert cache.parent.parent.samefile(tmp_path_factory.getbasetemp())
+
+
 def test_pinned_native_tools_reuse_native_entries_across_snapshots(
 	tmp_path: Path,
+	native_cache_temp_root: Path,
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 	"""Prove warm native entries are read while both tools execute again."""
@@ -174,7 +196,14 @@ def test_pinned_native_tools_reuse_native_entries_across_snapshots(
 	python = prepared.runtimes[0].python
 	if python is None:
 		pytest.fail("the selected pinned component runtime is not ready")
-	prepared = replace(prepared, cache_root=tmp_path / "provider-cache")
+	prepared = replace(
+		prepared,
+		cache_root=short_native_cache_root(
+			tmp_path,
+			"reuse",
+			cache_temp_root=native_cache_temp_root,
+		),
+	)
 	delegate = runner.run
 
 	class _CacheReadProbeRecorder(_NativeToolRunRecorder):
@@ -212,7 +241,7 @@ def test_pinned_native_tools_reuse_native_entries_across_snapshots(
 	warm_findings = _execute_measured_snapshot(
 		tmp_path, prepared, base_recorder, commands, "snapshot-warm", source
 	)
-	assert cold_findings == warm_findings == []
+	assert cold_findings == warm_findings == [], (cold_findings, warm_findings)
 	assert [row["tool"] for row in base_recorder.observed] == [
 		"ruff",
 		"mypy",
@@ -230,6 +259,7 @@ def test_pinned_native_tools_reuse_native_entries_across_snapshots(
 
 def test_pinned_native_cache_invalidation_matches_clean_cache(
 	tmp_path: Path,
+	native_cache_temp_root: Path,
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 	"""Changed imported stubs and policy inputs match fresh native-cache findings."""
@@ -240,7 +270,14 @@ def test_pinned_native_cache_invalidation_matches_clean_cache(
 	python = prepared.runtimes[0].python
 	if python is None:
 		pytest.fail("the selected pinned component runtime is not ready")
-	base_prepared = replace(prepared, cache_root=tmp_path / "provider-cache")
+	base_prepared = replace(
+		prepared,
+		cache_root=short_native_cache_root(
+			tmp_path,
+			"invalidate",
+			cache_temp_root=native_cache_temp_root,
+		),
+	)
 	recorder = _NativeToolRunRecorder(runner.run)
 	monkeypatch.setattr(runner, "run", recorder)
 	base_commands = _mypy_tool_command_templates(base_prepared, python)
@@ -325,7 +362,14 @@ def test_pinned_native_cache_invalidation_matches_clean_cache(
 	diagnostic = changed_stub_errors[0][2].casefold()
 	assert "expression is of type" in diagnostic
 	assert "int" in diagnostic and "str" in diagnostic
-	clean_stub_prepared = replace(prepared, cache_root=tmp_path / "clean-stub-cache")
+	clean_stub_prepared = replace(
+		prepared,
+		cache_root=short_native_cache_root(
+			tmp_path,
+			"clean-stub",
+			cache_temp_root=native_cache_temp_root,
+		),
+	)
 	clean_stub_errors = _execute_measured_snapshot(
 		tmp_path,
 		clean_stub_prepared,
@@ -377,7 +421,12 @@ def test_pinned_native_cache_invalidation_matches_clean_cache(
 		mtime_overrides_ns=changed_snapshot_mtimes,
 	)
 	clean_config_prepared = replace(
-		changed_config_prepared, cache_root=tmp_path / "clean-config-cache"
+		changed_config_prepared,
+		cache_root=short_native_cache_root(
+			tmp_path,
+			"clean-config",
+			cache_temp_root=native_cache_temp_root,
+		),
 	)
 	clean_config_errors = _execute_measured_snapshot(
 		tmp_path,
@@ -454,7 +503,11 @@ def test_pinned_native_cache_invalidation_matches_clean_cache(
 
 	clean_dependency_after = replace(
 		dependency_after,
-		cache_root=tmp_path / "clean-dependency-cache",
+		cache_root=short_native_cache_root(
+			tmp_path,
+			"clean-dependency",
+			cache_temp_root=native_cache_temp_root,
+		),
 	)
 	clean_dependency_errors = _execute_measured_snapshot(
 		tmp_path,

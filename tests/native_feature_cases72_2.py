@@ -33,6 +33,7 @@ from native_feature_support72 import (
 	Literal as Literal,
 )
 from native_feature_support72 import (
+	EngineIdentity as EngineIdentity,
 	NativeToolCache as NativeToolCache,
 )
 from native_feature_support72 import (
@@ -486,7 +487,7 @@ def test_native_cache_namespace_changes_with_tool_and_compatibility_inputs(
 	identities = (
 		base,
 		replace(base, repository="C:/repositories/other-checkout"),
-		replace(base, engine_version="4.3.0"),
+		replace(base, engine=EngineIdentity("source", "4.2.0", "b" * 64)),
 		replace(base, tool="mypy", tool_version="2.3.1", tool_digest="b" * 64),
 		replace(base, runtime_fingerprint="runtime-b"),
 		replace(base, tool_version="0.17.0"),
