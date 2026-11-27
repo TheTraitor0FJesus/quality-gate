@@ -163,36 +163,22 @@ from native_feature_support72 import (
 )
 
 
-def test_short_cache_roots_are_session_local() -> None:
-	"""Short cache roots stay inside each supported pytest session directory."""
-	temp_root = Path("repo") / "temp"
-	pytest_session = temp_root / "p-session"
-	pytest_tmp_path = pytest_session / "b" / "test_native_cache"
-	runner_session = temp_root / "tr-run"
-	runner_tmp_path = runner_session / "quality-gate" / "pytest" / "test_native_cache"
-	explicit_temp_root = temp_root / "shared" / "pytest-base"
-	explicit_tmp_path = explicit_temp_root / "test_native_cache"
-	pytest_cache = short_native_cache_root(
-		pytest_tmp_path,
-		"clean",
-		cache_temp_root=pytest_session / "b",
-	)
-	runner_cache = short_native_cache_root(
-		runner_tmp_path,
-		"clean",
-		cache_temp_root=runner_session / "quality-gate" / "pytest",
-	)
-	explicit_cache = short_native_cache_root(
-		explicit_tmp_path, "clean", cache_temp_root=explicit_temp_root
-	)
-
-	assert pytest_cache.parent == pytest_session / "b"
-	assert runner_cache.parent == runner_session / "quality-gate" / "pytest"
-	assert explicit_cache.parent == explicit_temp_root
-	assert pytest_cache != runner_cache
-	assert pytest_cache != short_native_cache_root(
-		pytest_tmp_path, "reuse", cache_temp_root=pytest_session / "b"
-	)
+def test_short_cache_roots_are_session_local(
+	tmp_path: Path,
+	tmp_path_factory: pytest.TempPathFactory,
+	native_cache_temp_root: Path,
+) -> None:
+	"""The real fixture and its cache leaves belong to pytest's session."""
+	assert native_cache_temp_root.is_dir()
+	assert native_cache_temp_root.parent.samefile(tmp_path_factory.getbasetemp())
+	assert not tuple(native_cache_temp_root.iterdir())
+	cache = short_native_cache_root(tmp_path, "clean", cache_temp_root=native_cache_temp_root)
+	reuse = short_native_cache_root(tmp_path, "reuse", cache_temp_root=native_cache_temp_root)
+	assert cache.parent == reuse.parent == native_cache_temp_root
+	assert cache != reuse
+	cache.mkdir()
+	(cache / "payload").write_text("cache", encoding="utf-8")
+	assert cache.parent.parent.samefile(tmp_path_factory.getbasetemp())
 
 
 def test_pinned_native_tools_reuse_native_entries_across_snapshots(
@@ -255,7 +241,7 @@ def test_pinned_native_tools_reuse_native_entries_across_snapshots(
 	warm_findings = _execute_measured_snapshot(
 		tmp_path, prepared, base_recorder, commands, "snapshot-warm", source
 	)
-	assert cold_findings == warm_findings == []
+	assert cold_findings == warm_findings == [], (cold_findings, warm_findings)
 	assert [row["tool"] for row in base_recorder.observed] == [
 		"ruff",
 		"mypy",

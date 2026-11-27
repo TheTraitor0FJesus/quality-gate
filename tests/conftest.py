@@ -6,7 +6,6 @@ import os
 import shutil
 import tempfile
 from collections import Counter
-from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,12 +36,15 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.fixture
-def native_cache_temp_root() -> Iterator[Path]:
-	"""Own a short, unique repository-local cache root for one test."""
-	temp_root = Path(__file__).resolve().parents[1] / "temp"
-	temp_root.mkdir(exist_ok=True)
-	with tempfile.TemporaryDirectory(prefix="nc-", dir=temp_root) as root:
-		yield Path(root)
+def native_cache_temp_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+	"""Allocate a short, unique cache root inside pytest's managed session."""
+	root = tmp_path_factory.mktemp("n")
+	if os.name != "nt" or str(root).startswith("\\\\?\\"):
+		return root
+	# Keep the physical directory in basetemp while allowing native tools long paths.
+	if str(root).startswith("\\\\"):
+		return Path("\\\\?\\UNC\\" + str(root)[2:])
+	return Path("\\\\?\\" + str(root))
 
 
 _RELEASE_CANDIDATE_PATH = pytest.StashKey[Path]()
