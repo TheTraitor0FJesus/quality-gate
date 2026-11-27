@@ -46,20 +46,11 @@ does not use this thread setting.
 
 ## Profile a staged check
 
-An ordinary local `check` completes repository, security and web checks, then
-dependency hygiene, Ruff lint/format and mypy for every Python component before
-starting any pytest or report-only coverage command. A blocking prerequisite
-prevents those test commands from starting. All completed findings remain in the
-report. Prevented tests use the existing `unchecked` status with a reason and
-`not-run` timing disposition. Consequently, a failed prerequisite with applicable
-unexecuted tests returns exit `2`, rather than exit `1` for findings alone.
-
-Once the test stage starts, a component test failure does not stop the remaining
-test commands. The shared deadline, interruption and process cleanup still apply.
-The local four-Gate admission limit and sequential child execution are unchanged.
-CI, `audit`, product verification and explicit `check --profile` retain the full
-diagnostic pass after a prerequisite finding. No successful commit can omit an
-applicable mandatory check.
+The v5 engine runs quality checks only. `check`, `check --profile`, `audit` and the native
+commit hook never execute pytest or Coverage. They retain dependency analysis of the declared
+test paths and check runtime readiness. A successful Gate is evidence of code quality checks;
+it does not establish that tests passed. Run behavior tests through the independent test runner.
+The shared CI and release routes are described in [independent testing](testing.md).
 
 Run `quality-gate check --profile` from the repository root after staging the candidate. Use
 an engine that lists the flag in `quality-gate check --help` and the runtime selected by the
@@ -69,12 +60,6 @@ did not start. Elapsed time includes cleanup. The value `command_ms` measures ti
 supervising subprocess calls within a stage. Stage timings can overlap because some
 stages contain others.
 
-The profile shows up to ten of the slowest entries per phase (setup, call and teardown)
-from the same pytest run. It labels them by test path and name with parameter values
-removed. The ordinary report shows pytest's outcome totals when available. For a failed run, the
-Gate masks secrets before limiting failure details. It includes captured output for
-failed tests according to pytest's capture settings and gives the reason for pytest
-usage errors and interruptions when available. The profile marks phase timings
-unavailable when pytest cannot provide them. It shows report-only coverage failures
-in the timing outcome while preserving the Gate verdict. The normal check and commit
-hook omit detailed timings.
+The profile reports the quality checks executed in this operation. The normal check and commit
+hook omit detailed timings. Pytest outcome totals, test phase timings and Coverage reports belong
+to the separate test execution result.

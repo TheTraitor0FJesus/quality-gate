@@ -106,7 +106,7 @@ def _run_release_build(*, pull_request: bool = False) -> None:
 			component.tests_applicable and "tests" in component.test_paths
 			for component in manifest.python
 		):
-			raise SystemExit("release: installed-artifact Gate must cover the complete tests directory")
+			raise SystemExit("release: independent full pytest must cover the complete tests directory")
 	subprocess_timeout = load_release_timeout(root, "subprocess_seconds")
 	if pull_request:
 		_require_clean_checkout(root, subprocess_timeout, os.environ["SOURCE_SHA"])

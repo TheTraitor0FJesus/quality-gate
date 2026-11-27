@@ -170,6 +170,19 @@ def _artifact(root: Path, version: str = "2.0.0", *, valid_wheel: bool = True) -
 				"    return SimpleNamespace(exit_code=0)\n",
 			)
 			archive.writestr(
+				"quality_gate/pytest_ci.py",
+				"import argparse\n"
+				"from ._probe import record\n"
+				"parser = argparse.ArgumentParser()\n"
+				"parser.add_argument('--root')\n"
+				"parser.add_argument('--source-sha')\n"
+				"parser.add_argument('--policy-release')\n"
+				"parser.add_argument('--output')\n"
+				"args = parser.parse_args()\n"
+				"if len(args.source_sha) != 40: raise SystemExit(2)\n"
+				"record('pytest', args.policy_release, args.root)\n",
+			)
+			archive.writestr(
 				f"{package}/METADATA",
 				f"Metadata-Version: 2.1\nName: quality-gate\nVersion: {version}\n",
 			)
@@ -384,6 +397,7 @@ def test_release_controller_executes_the_verified_wheel(
 	assert marker.read_text(encoding="utf-8").splitlines() == [
 		"setup v2.0.0",
 		"audit v2.0.0",
+		"pytest v2.0.0",
 	]
 
 
@@ -404,6 +418,7 @@ def test_release_controller_audits_with_candidate_policy_when_source_pin_is_prev
 	assert marker.read_text(encoding="utf-8").splitlines() == [
 		"setup v2.2.0",
 		"audit v2.2.0",
+		"pytest v2.2.0",
 	]
 
 
@@ -425,6 +440,7 @@ def test_release_controller_binds_candidate_to_product_version_not_policy_pin(
 	[
 		("setup", ["setup v2.0.0"], "runtime setup failed"),
 		("audit", ["setup v2.0.0", "audit v2.0.0"], "audit failed"),
+		("pytest", ["setup v2.0.0", "audit v2.0.0", "pytest v2.0.0"], "full pytest failed"),
 	],
 )
 def test_release_controller_rejects_a_failed_artifact_stage(
@@ -445,7 +461,7 @@ def test_release_controller_rejects_a_failed_artifact_stage(
 		verify_release_candidate(tmp_path, _artifact(tmp_path))
 
 	assert marker.read_text(encoding="utf-8").splitlines() == expected_calls
-	assert ("release artifact audit diagnostic" in capfd.readouterr().out) == (stage == "audit")
+	assert ("release artifact audit diagnostic" in capfd.readouterr().out) == (stage != "setup")
 
 
 def test_release_controller_rejects_an_unlearned_lesson(tmp_path: Path) -> None:

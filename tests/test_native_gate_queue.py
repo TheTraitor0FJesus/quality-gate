@@ -39,6 +39,9 @@ _NATIVE_BRIDGE_NAME = "native_quality_gate.py"
 def _native_bridge_path() -> Path:
 	configured_root = os.environ.get("CODEX_HOME")
 	settings_root = Path(configured_root) if configured_root else Path.home() / ".codex"
+	active_bridge = settings_root / "hooks" / "_shared" / _NATIVE_BRIDGE_NAME
+	if active_bridge.is_file():
+		return active_bridge
 	return settings_root / "MY-SETTINGS" / "hooks" / _NATIVE_BRIDGE_NAME
 
 
@@ -200,6 +203,8 @@ def _prepare_native_fixture(
 	project_root: Path,
 	bridge: ModuleType,
 	monkeypatch: pytest.MonkeyPatch,
+	*,
+	gate_timeout_seconds: int = _GATE_TIMEOUT_SECONDS,
 ) -> tuple[Path, Path, Path, int]:
 	assert _NATIVE_DEFAULT_GATE_TIMEOUT_SECONDS == DEFAULT_GATE_TIMEOUT_SECONDS
 	assert _NATIVE_DEFAULT_QUEUE_TIMEOUT_SECONDS == admission.DEFAULT_QUEUE_TIMEOUT_SECONDS
@@ -216,7 +221,7 @@ domains = ["repository"]
 required_documents = ["quality-gate.toml"]
 
 [repository.defaults]
-gate_timeout_seconds = {_GATE_TIMEOUT_SECONDS}
+gate_timeout_seconds = {gate_timeout_seconds}
 """.encode()
 	try:
 		selected_release_wheel = bridge._release_wheel(release_version)
@@ -249,8 +254,8 @@ gate_timeout_seconds = {_GATE_TIMEOUT_SECONDS}
 	assert actual_staged_manifest == staged_manifest
 	assert actual_staged_manifest is not None
 	working_manifest = staged_manifest.replace(
-		f"gate_timeout_seconds = {_GATE_TIMEOUT_SECONDS}".encode("ascii"),
-		f"gate_timeout_seconds = {_GATE_TIMEOUT_SECONDS + _QUEUE_TIMEOUT_SECONDS + 1}".encode(
+		f"gate_timeout_seconds = {gate_timeout_seconds}".encode("ascii"),
+		f"gate_timeout_seconds = {gate_timeout_seconds + _QUEUE_TIMEOUT_SECONDS + 1}".encode(
 			"ascii"
 		),
 	)
@@ -277,7 +282,7 @@ gate_timeout_seconds = {_GATE_TIMEOUT_SECONDS}
 	outer_timeout = commit_gate_timeout_seconds(actual_staged_manifest)
 	assert (
 		outer_timeout
-		== _GATE_TIMEOUT_SECONDS + _QUEUE_TIMEOUT_SECONDS + OPERATION_CLEANUP_SECONDS
+		== gate_timeout_seconds + _QUEUE_TIMEOUT_SECONDS + OPERATION_CLEANUP_SECONDS
 	)
 	return repository, staged_manifest_path, queue_root, outer_timeout
 
@@ -446,7 +451,7 @@ def test_proposed_native_wrapper_waits_and_continues_through_verified_candidate_
 	bridge, _ = _load_native_bridge()
 	project_root = Path(__file__).resolve().parents[1]
 	repository, staged_path, queue_root, outer_timeout = _prepare_native_fixture(
-		tmp_path, project_root, bridge, monkeypatch
+		tmp_path, project_root, bridge, monkeypatch, gate_timeout_seconds=30
 	)
 	holder_environment = os.environ.copy()
 	holder_environment["PYTHONPATH"] = str(project_root)
@@ -477,6 +482,8 @@ def test_proposed_native_wrapper_preserves_nested_ci_context(
 	# Missing Git metadata exposes snapshot entry without running repository checks.
 	repository = tmp_path / "ci-empty-repository"
 	repository.mkdir()
+	(repository / "quality-gate.toml").write_bytes(staged_path.read_bytes())
+	monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
 	holder_environment = os.environ.copy()
 	holder_environment["PYTHONPATH"] = str(project_root)
 	with _occupied_slots(queue_root, project_root, holder_environment):

@@ -232,19 +232,6 @@ def _run_ready_python_component_checks(
 ) -> tuple[list[str], list[_runner.QualityGateError], dict[str, str]]:
 	results.append(context.dependency_result(python_executable))
 	component = context.component
-	prefix = f"python.component_{context.component_index}"
-	if component.tests is not None and not component.test_paths:
-		test_paths = tuple(
-			path.relative_to(context.root).as_posix()
-			for path in (*component.test_paths, *component.missing_test_paths)
-		)
-		component_scope = component.path.relative_to(context.root).as_posix()
-		test_scope = f"{component_scope}; tests={','.join(test_paths)}"
-		reason = "no declared test path is available"
-		results.append_not_run(f"{prefix}.pytest", test_scope, reason)
-		if _runner._has_pinned_coverage(context.prepared):
-			results.append_not_run(f"{prefix}.coverage", test_scope, reason)
-			results.append_not_run(f"{prefix}.coverage_report", test_scope, reason)
 	commands = _runner._component_commands(
 		context.root,
 		context.manifest,
@@ -254,13 +241,6 @@ def _run_ready_python_component_checks(
 		python_executable,
 	)
 	commands = _run_ruff_with_evidence(results, context, python_executable, environment, commands)
-	if context.deferred_tests is not None:
-		context.deferred_tests.extend(
-			command
-			for command in commands
-			if command[0].endswith((".pytest", ".coverage", ".coverage_report"))
-		)
-		commands = [command for command in commands if command not in context.deferred_tests]
 	return _runner._execute_commands(
 		context.root,
 		environment,
@@ -301,8 +281,6 @@ def _append_not_applicable_python_checks(
 	prepared: _runner.PreparedEnvironment,
 ) -> None:
 	for component_index, component in enumerate(components, start=1):
-		tests_not_applicable = component.tests is None
-		has_coverage = _runner._has_pinned_coverage(prepared)
 		if not component.typecheck:
 			results.append(
 				_runner.CheckResult(
@@ -310,34 +288,6 @@ def _append_not_applicable_python_checks(
 					status=_runner.Status.NOT_APPLICABLE,
 					summary="typing is explicitly disabled by the component contract",
 					recovery_action="enable typecheck when component typing is required",
-				)
-			)
-		if tests_not_applicable:
-			results.append(
-				_runner.CheckResult(
-					check_id=f"python.component_{component_index}.pytest",
-					status=_runner.Status.NOT_APPLICABLE,
-					summary="tests are explicitly not applicable",
-					recovery_action="declare test paths if tests apply",
-				)
-			)
-		if tests_not_applicable or not has_coverage:
-			summary = (
-				"coverage is not applicable without tests"
-				if tests_not_applicable and has_coverage
-				else "coverage provider is not in the pinned policy inventory"
-			)
-			recovery_action = (
-				"declare test paths before collecting report-only coverage"
-				if tests_not_applicable and has_coverage
-				else "add a pinned coverage provider only when report-only coverage is required"
-			)
-			results.append(
-				_runner.CheckResult(
-					check_id=f"python.component_{component_index}.coverage",
-					status=_runner.Status.NOT_APPLICABLE,
-					summary=summary,
-					recovery_action=recovery_action,
 				)
 			)
 
@@ -356,14 +306,6 @@ def _run_python_checks(
 		environment = _runner._safe_environment(temporary_path)
 		environment["QUALITY_GATE_POLICY_ROOT"] = str(prepared.policy_root)
 		temporary_root = _runner.Path(temporary_path)
-		operation = _runner.current_operation()
-		defer_tests = (
-			operation is not None
-			and operation.mode == "check"
-			and not operation.profile
-			and not _runner.running_in_ci()
-		)
-		contexts: list[_runner._PythonCheckContext] = []
 		for component_index, component in enumerate(components, start=1):
 			context = _runner._PythonCheckContext(
 				actual_root,
@@ -373,9 +315,7 @@ def _run_python_checks(
 				component_index,
 				temporary_root / f"deptry-{component_index}.json",
 				deadline,
-				deferred_tests=[] if defer_tests else None,
 			)
-			contexts.append(context)
 			component_executed, component_errors, component_outputs = (
 				_runner._run_python_component_checks(
 					results,
@@ -386,33 +326,6 @@ def _run_python_checks(
 			results.extend(
 				_runner._command_results(component_executed, component_errors, component_outputs)
 			)
-		# Complete every component's prerequisites before admitting any test process.
-		observed = operation.results if operation is not None else results
-		blocked = _runner.Verdict(tuple(observed)).exit_code != 0
-		for context in contexts:
-			commands = context.deferred_tests
-			if not commands:
-				continue
-			if blocked:
-				for check_id, _command, _timeout in commands:
-					results.append_not_run(
-						check_id,
-						results.scope_for(check_id),
-						"mandatory pre-test checks did not pass; test execution was not started",
-					)
-				continue
-			executed, errors, outputs = _runner._execute_commands(
-				actual_root,
-				environment,
-				commands,
-				context.component.timeout_seconds,
-				deadline,
-				prepared=prepared,
-				component=context.component,
-				component_index=context.component_index,
-				manifest=manifest,
-			)
-			results.extend(_runner._command_results(executed, errors, outputs))
 	_runner._append_not_applicable_python_checks(results, components, prepared)
 	return results
 

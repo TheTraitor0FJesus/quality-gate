@@ -13,7 +13,6 @@ import pytest
 from cli_feature_support72 import (
 	EXIT_UNCHECKED,
 	REPOSITORY,
-	_coverage_release_manifest,
 	_declare_dependency_input,
 	_disposable_repository,
 	_git,
@@ -235,36 +234,6 @@ def test_cli_reports_explicitly_not_applicable_tests_without_blocking(
 	assert "python.component_1.pytest: not_applicable" not in output
 
 
-def test_cli_reports_pytest_collection_failure_as_unchecked(
-	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-	root = _disposable_repository(tmp_path, "python-tests")
-	seen_commands: list[list[str]] = []
-
-	def fail_collection(
-		command: list[str],
-		_command_root: Path,
-		_environment: dict[str, str],
-		_timeout: float,
-	) -> None:
-		if "pytest" in command:
-			raise runner.QualityGateError(
-				"ERROR collecting tests\\test_app.py: token=CLI_COLLECTION_SECRET",
-				exit_code=EXIT_UNCHECKED,
-				recovery_action="restore a collectable pytest suite",
-			)
-
-	_patch_runtime(monkeypatch, root, seen_commands, fail_collection)
-
-	result, output = _invoke(root, monkeypatch, capsys)
-
-	assert result == EXIT_UNCHECKED
-	assert "python.component_1.pytest: unchecked" in output
-	assert "CLI_COLLECTION_SECRET" not in output
-	assert "Traceback" not in output
-	assert any(
-		part.replace("\\", "/") == "tests/extra" for command in seen_commands for part in command
-	)
 
 
 def test_cli_reports_timeout_as_unchecked_without_a_failed_verdict(
@@ -289,11 +258,11 @@ def test_cli_reports_timeout_as_unchecked_without_a_failed_verdict(
 		_environment: dict[str, str],
 		_timeout: float,
 	) -> None:
-		if "pytest" in command:
+		if "ruff" in command:
 			raise runner.QualityGateError(
-				"pytest timed out after 1 seconds",
+				"ruff timed out after 1 seconds",
 				exit_code=EXIT_UNCHECKED,
-				recovery_action="inspect the test suite and retry within the time budget",
+				recovery_action="inspect Ruff and retry within the time budget",
 			)
 
 	_seen_commands: list[list[str]] = []
@@ -304,9 +273,8 @@ def test_cli_reports_timeout_as_unchecked_without_a_failed_verdict(
 	assert result == EXIT_UNCHECKED
 	assert "manifest.documents: failed" in output
 	assert "docs/missing.md" in output
-	assert "python.component_1.pytest: unchecked" in output
-	assert "python.component_1.pytest: failed" not in output
-	assert "pytest durations unavailable" in output
+	assert "python.component_1.ruff: unchecked" in output
+	assert "python.component_1.ruff: failed" not in output
 
 
 @pytest.mark.parametrize("command", ["check", "audit"])
@@ -384,84 +352,8 @@ def test_cli_uses_a_sanitized_environment_and_redacts_secret_output(
 	assert secret not in output
 
 
-@pytest.mark.parametrize("profile", [False, True])
-def test_cli_prints_report_only_coverage_when_provider_is_pinned(
-	tmp_path: Path,
-	monkeypatch: pytest.MonkeyPatch,
-	capsys: pytest.CaptureFixture[str],
-	profile: bool,
-) -> None:
-	root = _disposable_repository(tmp_path, "python-tests")
-	release_manifest = _coverage_release_manifest()
-	secret = "CLI_COVERAGE_SECRET"
-
-	def coverage_report(
-		command: list[str],
-		_command_root: Path,
-		_environment: dict[str, str],
-		_timeout: float,
-	) -> str | None:
-		if "coverage" in command and "report" in command:
-			return f"Name Stmts Miss Cover\nTOTAL 10 1 90% token={secret}\n"
-		return None
-
-	_patch_runtime(monkeypatch, root, [], coverage_report, release_manifest)
-
-	result, output = _invoke(root, monkeypatch, capsys, profile=profile)
-
-	assert result == 0
-	assert "coverage report: TOTAL 10 1 90%" in output
-	assert "Report-only: python.component_1.coverage_report" in output
-	assert "python.component_1.coverage_report: passed" not in output
-	assert secret not in output
-	assert "threshold" not in output.casefold()
-	if profile:
-		assert any(
-			line.startswith("  python.component_1.coverage_report: ") and "outcome=passed" in line
-			for line in output.partition("Check timings:")[2].splitlines()
-		)
 
 
-@pytest.mark.parametrize("profile", [False, True])
-@pytest.mark.parametrize("command_exit", [1, EXIT_UNCHECKED])
-def test_cli_does_not_enforce_report_only_coverage_failures(
-	tmp_path: Path,
-	monkeypatch: pytest.MonkeyPatch,
-	capsys: pytest.CaptureFixture[str],
-	profile: bool,
-	command_exit: int,
-) -> None:
-	root = _disposable_repository(tmp_path, "python-tests")
-	release_manifest = _coverage_release_manifest()
-
-	def coverage_failure(
-		command: list[str],
-		_command_root: Path,
-		_environment: dict[str, str],
-		_timeout: float,
-	) -> None:
-		if "coverage" in command:
-			raise runner.QualityGateError(
-				"coverage provider failed",
-				exit_code=command_exit,
-				recovery_action="inspect the optional coverage report",
-			)
-
-	_patch_runtime(monkeypatch, root, [], coverage_failure, release_manifest)
-
-	result, output = _invoke(root, monkeypatch, capsys, profile=profile)
-
-	assert result == 0
-	assert "coverage report unavailable; report-only: coverage provider failed" in output
-	assert "python.component_1.coverage_report: passed" not in output
-	if profile:
-		timings = output.partition("Check timings:")[2].splitlines()
-		outcome = "unchecked" if command_exit == EXIT_UNCHECKED else "failed"
-		for check in ("coverage", "coverage_report"):
-			assert any(
-				line.startswith(f"  python.component_1.{check}: ") and f"outcome={outcome}" in line
-				for line in timings
-			), output
 
 
 @pytest.mark.parametrize("separator", ["/", "\\"])
@@ -480,7 +372,7 @@ def test_cli_keeps_paths_portable_and_output_compact_across_platforms(
 		_environment: dict[str, str],
 		_timeout: float,
 	) -> None:
-		if "pytest" in command:
+		if "ruff" in command:
 			raise runner.QualityGateError(
 				f"C:{separator}repo{separator}tests{separator}test_app.py:1: token=CLI_PATH_SECRET",
 				exit_code=EXIT_UNCHECKED,
@@ -494,7 +386,4 @@ def test_cli_keeps_paths_portable_and_output_compact_across_platforms(
 	assert result == EXIT_UNCHECKED
 	assert "CLI_PATH_SECRET" not in output
 	assert "tests/test_app.py" in output.replace("\\", "/")
-	assert any(
-		part.replace("\\", "/") == "tests/extra" for command in seen_commands for part in command
-	)
 	assert output.count("Quality Gate:") == 1

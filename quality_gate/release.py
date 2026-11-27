@@ -448,6 +448,34 @@ def _execute_artifact_gate(
 		deadline=deadline,
 		stage="audit",
 	)
+	try:
+		source_sha = subprocess.check_output(
+			["git", "rev-parse", "HEAD"],
+			cwd=root,
+			text=True,
+			timeout=max(deadline - time.monotonic(), 0.1),
+		).strip()
+	except (OSError, subprocess.SubprocessError) as error:
+		raise ReleaseControllerError("release test source identity is unavailable") from error
+	_run_release_command(
+		[
+			str(python),
+			"-m",
+			"quality_gate.pytest_ci",
+			"--root",
+			str(root),
+			"--policy-release",
+			release_manifest.version,
+			"--source-sha",
+			source_sha,
+			"--output",
+			str(workspace / "pytest-evidence"),
+		],
+		cwd=gate_root,
+		environment=environment,
+		deadline=deadline,
+		stage="full pytest",
+	)
 
 
 def verify_release_candidate(

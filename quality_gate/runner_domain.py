@@ -30,9 +30,6 @@ def _python_component_check_scope(
 		missing_paths = tuple(path for path in component.test_paths if not (root / path).exists())
 		if 0 <= missing_index < len(missing_paths):
 			return missing_paths[missing_index]
-	if suffix in {"pytest", "coverage", "coverage_report"}:
-		test_paths = tuple(path for path in component.test_paths if (root / path).exists())
-		return f"{component.path}; tests={','.join(test_paths)}"
 	if suffix == "deptry":
 		return f"{component.path}; dependencies={','.join(component.dependency_inputs)}"
 	return component.path
@@ -98,27 +95,6 @@ def _planned_python_check_scopes(
 		)
 		if component.typecheck:
 			checks.append((f"{prefix}.mypy", component_scope))
-		declared_test_paths = tuple(
-			path.relative_to(root).as_posix()
-			for path in (*component.test_paths, *component.missing_test_paths)
-		)
-		if component.tests is not None:
-			checks.append(
-				(
-					f"{prefix}.pytest",
-					f"{component_scope}; tests={','.join(declared_test_paths)}",
-				)
-			)
-		test_scope = component_scope
-		if component.tests is not None:
-			test_scope = f"{component_scope}; tests={','.join(declared_test_paths)}"
-		checks.append((f"{prefix}.coverage", test_scope))
-		if (
-			prepared is not None
-			and component.tests is not None
-			and _runner._has_pinned_coverage(prepared)
-		):
-			checks.append((f"{prefix}.coverage_report", test_scope))
 	return checks
 
 

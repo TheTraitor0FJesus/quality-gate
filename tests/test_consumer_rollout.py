@@ -68,6 +68,27 @@ def test_workflow_pin_updates_gate_helpers_and_preserves_other_workflows() -> No
 		)
 
 
+@pytest.mark.parametrize("trigger", ["", "    types: [opened, synchronize, reopened]\n", "    types: [opened, synchronize, reopened, edited]\n"])
+def test_v5_rollout_keeps_retargeted_prs_reachable_without_duplicate_events(trigger: str) -> None:
+	workflow = (
+		"on:\n  pull_request:\n" + trigger + "    branches: [main]\n  push:\n    branches: [main]\n"
+		f"jobs:\n  quality-gate:\n    uses: {PROVIDER}/.github/workflows/quality.yml@main\n"
+		"    with:\n      runner-os: windows-latest\n"
+	)
+	updated = update_workflow_references(workflow, PROVIDER, PROVIDER_SHA, "5.0.0")
+	assert "types: [opened, synchronize, reopened, edited]" in updated
+	assert updated.count("edited") == 1
+	assert "branches: [main]" in updated
+	assert "runner-os: windows-latest" in updated
+	assert update_workflow_references(updated, PROVIDER, PROVIDER_SHA, "5.0.0") == updated
+
+
+def test_v5_rollout_rejects_unhandled_event_syntax_instead_of_silently_missing_tests() -> None:
+	workflow = f"on: [pull_request, push]\njobs:\n  quality-gate:\n    uses: {PROVIDER}/.github/workflows/quality.yml@main\n"
+	with pytest.raises(RolloutError, match="block-style pull_request"):
+		update_workflow_references(workflow, PROVIDER, PROVIDER_SHA, "5.0.0")
+
+
 def test_newer_release_refreshes_same_open_pull_request_without_touching_main() -> None:
 	client = _fake_client()
 	main_sha = client.refs["main"]

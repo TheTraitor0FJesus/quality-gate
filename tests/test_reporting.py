@@ -33,10 +33,10 @@ EXPECTED_AVAILABLE_FINDINGS = MAX_FINDINGS_PER_CHECK + SINGLE_FINDING_COUNT
 
 def test_detailed_timings_require_explicit_profile() -> None:
 	result = CheckResult(
-		"python.component_1.pytest",
+		"python.component_1.ruff",
 		Status.PASSED,
-		"pytest totals: 2 passed",
-		telemetry=StageTiming("python.component_1.pytest", 42, "tests", "executed"),
+		"check passed",
+		telemetry=StageTiming("python.component_1.ruff", 42, "tests", "executed"),
 	)
 	verdict = Verdict((result,))
 	assert "Check timings:" not in render(verdict)
@@ -60,9 +60,9 @@ def test_audit_and_bootstrap_retain_operation_report(
 	command: str,
 	options: dict[str, object],
 ) -> None:
-	timing = StageTiming("python.component_1.pytest", 42, "tests", "executed", command_ms=39)
+	timing = StageTiming("python.component_1.ruff", 42, "tests", "executed", command_ms=39)
 	result = CheckResult(
-		"python.component_1.pytest", Status.PASSED, "check passed", telemetry=timing
+		"python.component_1.ruff", Status.PASSED, "check passed", telemetry=timing
 	)
 	operation = OperationTelemetry(
 		operation_id="audit-operation",
@@ -83,7 +83,7 @@ def test_audit_and_bootstrap_retain_operation_report(
 	output = capsys.readouterr().out
 	assert "Operation: id=audit-operation" in output
 	assert "complete=true" in output
-	assert "last_completed_stage=python.component_1.pytest" in output
+	assert "last_completed_stage=python.component_1.ruff" in output
 	assert "Check timings:" in output
 	assert "command_ms=" not in output
 	assert "admission_wait_ms=" not in output
@@ -151,36 +151,20 @@ def test_incomplete_operation_retains_findings_and_blocks_green_aggregate() -> N
 	assert "outcome=failed" in output
 
 
-def test_compact_report_includes_pytest_terminal_totals_after_status_summary() -> None:
+
+
+def test_verbose_report_preserves_status_line_before_telemetry() -> None:
 	result = CheckResult(
-		"python.component_1.pytest",
+		"python.component_1.ruff",
 		Status.PASSED,
-		"pytest totals: 2 passed, 1 skipped",
-		telemetry=StageTiming("python.component_1.pytest", 42, "quality_gate/tests", "executed"),
-	)
-	output = render(Verdict((result,)), profile=True)
-
-	ordinary = render(Verdict((result,)))
-	assert "python.component_1.pytest: passed - pytest totals: 2 passed, 1 skipped" in ordinary
-	assert "Check timings:" not in ordinary
-	assert output.index("Observed results: 1 passed") < output.index("Check timings:")
-	assert "outcome=passed" in output
-	assert "test_totals=2 passed, 1 skipped" in output
-
-
-def test_verbose_report_preserves_pytest_status_line_before_telemetry() -> None:
-	result = CheckResult(
-		"python.component_1.pytest",
-		Status.PASSED,
-		"pytest totals: 2 passed, 1 skipped",
-		telemetry=StageTiming("python.component_1.pytest", 42, "quality_gate/tests", "executed"),
+		"check passed",
+		telemetry=StageTiming("python.component_1.ruff", 42, "quality_gate/tests", "executed"),
 	)
 	output = render(Verdict((result,)), verbose=True, profile=True)
 
-	status_line = "python.component_1.pytest: passed - pytest totals: 2 passed, 1 skipped"
+	status_line = "python.component_1.ruff: passed - check passed"
 	assert output.index(status_line) < output.index("Check timings:")
 	assert "outcome=passed" in output
-	assert "test_totals=2 passed, 1 skipped" in output
 
 
 def test_timing_metadata_uses_the_existing_secret_redaction() -> None:
@@ -245,9 +229,9 @@ def test_default_report_summarizes_observed_outcomes_and_retains_report_only_inf
 		(
 			CheckResult("core.pass", Status.PASSED, "check passed"),
 			CheckResult(
-				"python.coverage_report",
+				"python.report",
 				Status.PASSED,
-				"coverage report: TOTAL 10 1 90%",
+				"report-only: diagnostic",
 			),
 			CheckResult(
 				"python.deptry",
@@ -270,12 +254,12 @@ def test_default_report_summarizes_observed_outcomes_and_retains_report_only_inf
 	assert output.splitlines()[0] == "Quality Gate: 0"
 	assert "Observed results: 1 passed, 1 waived, 1 not applicable, 1 report-only result" in output
 	assert "core.pass: passed" not in output
-	assert "python.coverage_report: passed" not in output
+	assert "python.report: passed" not in output
 	assert "python.deptry: waived" not in output
 	assert "python.tests: not_applicable" not in output
-	assert "Report-only: python.coverage_report - coverage report: TOTAL 10 1 90%" in output
+	assert "Report-only: python.report - report-only: diagnostic" in output
 	assert "core.pass: passed" in verbose
-	assert "python.coverage_report: passed" in verbose
+	assert "python.report: passed" in verbose
 	assert "python.deptry: waived" in verbose
 	assert "python.tests: not_applicable" in verbose
 
@@ -510,9 +494,9 @@ def test_report_preserves_status_counts_and_exit_precedence() -> None:
 			waiver_target="config.env",
 		),
 		CheckResult(
-			"status.coverage_report",
+			"status.report",
 			Status.PASSED,
-			"coverage report: TOTAL 10 1 90%",
+			"report-only: diagnostic",
 		),
 		_failed_result("status.failed", SINGLE_FINDING_COUNT),
 		CheckResult(
@@ -537,7 +521,7 @@ def test_report_preserves_status_counts_and_exit_precedence() -> None:
 	assert "status.unchecked: unchecked - verification unavailable" in output
 	assert "recovery: recover status.failed" in output
 	assert "recovery: restore verification" in output
-	assert "Report-only: status.coverage_report - coverage report: TOTAL 10 1 90%" in output
+	assert "Report-only: status.report - report-only: diagnostic" in output
 	assert "status.passed: passed" not in output
 	assert "status.not_applicable: not_applicable" not in output
 	assert "status.waived: waived" not in output
@@ -547,7 +531,7 @@ def test_report_preserves_status_counts_and_exit_precedence() -> None:
 		("status.unchecked", Status.UNCHECKED),
 		("status.not_applicable", Status.NOT_APPLICABLE),
 		("status.waived", Status.WAIVED),
-		("status.coverage_report", Status.PASSED),
+		("status.report", Status.PASSED),
 	):
 		assert f"{check_id}: {status.value} -" in verbose
 

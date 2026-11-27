@@ -36,9 +36,11 @@ the candidate release.
 Read [read-only product verification](product-verification.md) before wiring PR product checks.
 Content and transport verification have separate evidence requirements.
 
-The installed-artifact Gate owns the full test run. It uses the candidate policy and its bundled
-tools, a prepared component runtime, and the source snapshot whose Python component declares
-`test_paths = ["tests"]`. Pytest's `pythonpath = ["."]` selects that snapshot's source. A successful
+After the installed-artifact audit, `quality_gate.release` invokes the installed candidate wheel's
+`quality_gate.pytest_ci` module independently. It uses the candidate policy and its bundled
+tools, a prepared component runtime, and the clean source snapshot whose Python component declares
+`test_paths = ["tests"]`. The verifier binds evidence to the exact Git HEAD and rejects source changes during testing.
+Pytest's `pythonpath = ["."]` selects that snapshot's source. A successful
 PR check does not replace this merged-source verification. The build rejects a manifest without
 the Python domain or an applicable component covering the complete `tests` directory before it
 starts building. Narrowing the manifest cannot silently remove release regression coverage.
@@ -52,7 +54,7 @@ claim a second full regression pass under that interpreter or the older policy.
 
 | Obligation | Required verification |
 | --- | --- |
-| Archive integrity, candidate version, installed engine and complete tests | Adapter `runtime-check` and the installed-artifact Gate |
+| Archive integrity, candidate version, installed engine and complete tests | Adapter `runtime-check`, installed-artifact audit and independent full pytest |
 | Source manifest's published policy and component runtime availability | Candidate and pinned-policy sync, `setup`, then `doctor` |
 | Exact merged source and both supported platforms | Existing Windows and Linux product jobs |
 | Publication evidence after successful required commands | Release build failure propagation and final evidence write |

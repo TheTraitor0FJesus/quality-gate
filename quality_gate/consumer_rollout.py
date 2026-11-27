@@ -135,7 +135,39 @@ def update_workflow_references(content: str, provider: str, provider_sha: str, v
 	updated, count = pattern.subn(replace_reference, content)
 	if count != all_references:
 		raise RolloutError("a Quality Gate workflow reference has an unsupported format")
+	if int(_version(version).split(".")[0]) >= 5 and re.search(
+		re.escape(provider) + r"/\.github/workflows/quality\.yml@", updated, re.IGNORECASE
+	):
+		updated = _include_retarget_event(updated)
 	return updated
+
+
+def _include_retarget_event(content: str) -> str:
+	"""Preserve caller filters while making default-target PR retargets observable."""
+	match = re.search(
+		r"(?m)^  pull_request:[ \t]*(?:#[^\r\n]*)?\r?\n(?P<body>(?:[ ]{4,}[^\n]*\n?|[ \t]*\r?\n)*)",
+		content,
+	)
+	if match is None:
+		raise RolloutError("v5 Quality Gate caller requires a block-style pull_request trigger")
+	body = match["body"]
+	newline = "\r\n" if "\r\n" in content else "\n"
+	types = re.search(r"(?m)^    types:[ \t]*\[([^\]\r\n]*)\]([ \t]*(?:#[^\r\n]*)?)(\r?)$", body)
+	if types is not None:
+		values = [value.strip().strip("\"'") for value in types[1].split(",") if value.strip()]
+		if "edited" in values:
+			return content
+		values.append("edited")
+		body = (
+			body[: types.start()]
+			+ f"    types: [{', '.join(values)}]{types[2]}{types[3]}"
+			+ body[types.end() :]
+		)
+	elif re.search(r"(?m)^    types:", body):
+		raise RolloutError("v5 Quality Gate caller types require an inline activity list")
+	else:
+		body = f"    types: [opened, synchronize, reopened, edited]{newline}" + body
+	return content[: match.start("body")] + body + content[match.end("body") :]
 
 
 def _workflow_reference_pattern(provider: str) -> re.Pattern[str]:
