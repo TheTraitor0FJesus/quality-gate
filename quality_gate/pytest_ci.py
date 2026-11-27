@@ -38,7 +38,8 @@ def _public_report(path: Path, target: Path) -> ET.Element:
 		data = stream.read(MAX_JUNIT_BYTES + 1)
 	if len(data) > MAX_JUNIT_BYTES:
 		raise ValueError("JUnit exceeds its evidence limit")
-	parser = ET.XMLParser(target=_JUnitBuilder())
+	# The bounded input uses a builder that rejects every DTD before entity expansion.
+	parser = ET.XMLParser(target=_JUnitBuilder())  # noqa: S314
 	parser.feed(data)
 	root = parser.close()
 	for element in root.iter():
@@ -172,8 +173,16 @@ def _run_component(
 	]
 	item.update(arguments=command, junit=junit.name, exit_code=None)
 	environment = dict(os.environ)
-	for key in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
+	for key in (
+		"PYTHONHOME",
+		"PYTHONPATH",
+		"VIRTUAL_ENV",
+		"GITHUB_EVENT_PATH",
+		"GITHUB_BASE_REF",
+		"GITHUB_SHA",
+	):
 		environment.pop(key, None)
+	environment["QUALITY_GATE_POLICY_ROOT"] = str(prepared.policy_root)
 	end = min(deadline, time.monotonic() + component.timeout_seconds)
 	try:
 		private = root / "temp"

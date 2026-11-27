@@ -29,6 +29,7 @@ def _candidate(tmp_path: Path, source: str) -> tuple[SimpleNamespace, str]:
 	return SimpleNamespace(
 		root=root,
 		manifest=load_manifest(root),
+		policy_root=tmp_path / "selected-policy",
 		release_manifest=SimpleNamespace(version="v4.9.0"),
 		runtimes=(RuntimeInspection(Path(sys.prefix), Path(sys.executable), True),),
 	), _git(root, "rev-parse", "HEAD").stdout.strip()
@@ -173,3 +174,40 @@ def test_interrupted_raw_report_never_enters_public_evidence(tmp_path: Path, mon
 	assert result["status"] == "error"
 	assert not list(output.glob("*.xml"))
 	assert not list((prepared.root / "temp").glob("junit-*"))
+
+
+def test_pytest_receives_selected_policy_without_parent_pr_history(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	from quality_gate.pytest_ci import run_tests
+
+	policy_root = tmp_path / "selected-policy"
+	prepared, sha = _candidate(tmp_path, f'''import os
+def test_environment():
+    assert os.environ["QUALITY_GATE_POLICY_ROOT"] == {str(policy_root)!r}
+    assert not {{"GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "GITHUB_SHA"}} & os.environ.keys()
+''')
+	monkeypatch.setenv("QUALITY_GATE_POLICY_ROOT", str(tmp_path / "unrelated-policy"))
+	for key in ("GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "GITHUB_SHA"):
+		monkeypatch.setenv(key, "unrelated-parent-pr")
+	result = run_tests(prepared, tmp_path / "evidence", source_sha=sha)
+	assert result["status"] == "passed", result
+	assert result["components"][0]["totals"]["tests"] == 1
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
+@pytest.mark.parametrize("entity", ['"expanded"', 'SYSTEM "file:///unreadable"'])
+def test_junit_document_types_are_rejected_before_entity_expansion(
+	tmp_path: Path, encoding: str, entity: str,
+) -> None:
+	from quality_gate.pytest_ci import _public_report
+
+	raw = tmp_path / "raw.xml"
+	raw.write_bytes((
+		f'<!DOCTYPE testsuites [<!ENTITY payload {entity}>]>'
+		'<testsuites><testsuite name="&payload;"/></testsuites>'
+	).encode(encoding))
+	public = tmp_path / "public.xml"
+	with pytest.raises(ValueError, match="document types are forbidden"):
+		_public_report(raw, public)
+	assert not public.exists()

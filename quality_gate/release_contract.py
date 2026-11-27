@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 UNIFIED_RELEASE = "v5.0.0"
 UNIFIED_RELEASE_PACKAGE_VERSION = "5.0.0"
+QUALITY_ONLY_ENGINE_MAJOR = 5
 UNIFIED_RELEASE_PACKAGE_VERSIONS = {
 	"v2.0.5": "2.0.5",
 	"v2.0.6": "2.0.6",

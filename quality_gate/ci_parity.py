@@ -17,6 +17,7 @@ from typing import Any
 
 from .contracts import load_manifest
 from .distribution import PolicyCache, ReleaseManifest, load_release_manifest
+from .release_contract import QUALITY_ONLY_ENGINE_MAJOR
 from .temp_workspace import temporary_workspace
 
 RESULT_LINE = re.compile(
@@ -54,7 +55,7 @@ def expected_statuses(engine_version: str) -> dict[str, str]:
 	if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", engine_version) is None:
 		raise RuntimeError("parity engine version is unavailable")
 	statuses = dict(EXPECTED_PARITY_STATUSES)
-	if int(engine_version.split(".")[0]) < 5:
+	if int(engine_version.split(".")[0]) < QUALITY_ONLY_ENGINE_MAJOR:
 		statuses.update(
 			{"python.component_1.pytest": "passed", "python.component_1.coverage": "not_applicable"}
 		)

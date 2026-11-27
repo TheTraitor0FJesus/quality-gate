@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 
 from .publication import PublicationError
 from .publication_github import GitHubCLI
+from .release_contract import QUALITY_ONLY_ENGINE_MAJOR
 from .release_rollout import (
 	LOGGER,
 	GitHub,
@@ -135,7 +136,7 @@ def update_workflow_references(content: str, provider: str, provider_sha: str, v
 	updated, count = pattern.subn(replace_reference, content)
 	if count != all_references:
 		raise RolloutError("a Quality Gate workflow reference has an unsupported format")
-	if int(_version(version).split(".")[0]) >= 5 and re.search(
+	if int(_version(version).split(".")[0]) >= QUALITY_ONLY_ENGINE_MAJOR and re.search(
 		re.escape(provider) + r"/\.github/workflows/quality\.yml@", updated, re.IGNORECASE
 	):
 		updated = _include_retarget_event(updated)

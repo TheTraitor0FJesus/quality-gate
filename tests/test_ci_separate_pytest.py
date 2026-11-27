@@ -93,3 +93,38 @@ def test_parity_expectations_follow_executing_engine_not_the_policy_pin(version:
 	assert checks["secrets.history"] == "failed"
 	assert ("python.component_1.pytest" in checks) is (version != "5.0.0")
 	assert ("python.component_1.coverage" in checks) is (version != "5.0.0")
+
+
+def test_bootstrap_cli_keeps_snapshot_cleanup_under_gate_ownership(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+	from cli_feature_support72 import _disposable_repository, _git
+	from scripts import release_adapter
+	from quality_gate.contracts import load_manifest
+	from quality_gate.distribution import PolicyCache, verify_release
+
+	configured = os.environ.get("QUALITY_GATE_POLICY_ROOT")
+	policy_root = (
+		Path(configured) if configured
+		else PolicyCache().select(load_manifest(ROOT).policy_release)
+	)
+	policy = verify_release(policy_root)
+	cache_parent = tmp_path / "prepared-cache"
+	PolicyCache(cache_parent / "quality-gate").sync(policy_root)
+	cache_variable = "LOCALAPPDATA" if os.name == "nt" else "XDG_CACHE_HOME"
+	monkeypatch.setenv(cache_variable, str(cache_parent))
+
+	root = _disposable_repository(tmp_path, "valid")
+	manifest = root / "quality-gate.toml"
+	manifest.write_text(
+		manifest.read_text(encoding="utf-8").split("[[python]]")[0]
+		.replace('["repository", "python"]', '["repository"]'),
+		encoding="utf-8",
+	)
+	assert _git(root, "add", ".").returncode == 0
+	monkeypatch.setattr(release_adapter, "_root", lambda: root)
+	for key in ("GITHUB_EVENT_PATH", "GITHUB_BASE_REF", "GITHUB_SHA"):
+		monkeypatch.delenv(key, raising=False)
+	code = release_adapter.main(["bootstrap-check", "--policy-release", policy.version])
+	output = capsys.readouterr().out
+	assert code == 0, output
