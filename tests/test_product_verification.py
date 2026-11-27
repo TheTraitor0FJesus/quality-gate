@@ -161,28 +161,67 @@ def _proof(platform: str) -> dict:
 		"upload_log": {
 			"job_id": job_id,
 			"step_number": 4,
-			"text": f"Artifact ID: {artifact_id}\nSHA256 digest of uploaded artifact zip is {digest}\n",
+			"text": (
+				f"Artifact ID: {artifact_id}\n"
+				f"SHA256 digest of uploaded artifact zip is {digest}\n"
+			),
 		},
 	}
 
 
-def test_transport_accepts_read_only_fork_run() -> None:
+@pytest.mark.parametrize(
+	"created_at",
+	["2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z", "2026-01-01T00:02:00Z"],
+	ids=["job-start", "during-job", "job-end"],
+)
+def test_transport_accepts_read_only_fork_run(created_at: str) -> None:
 	from quality_gate.product_verification import verify_transport
 
 	results = [_result("linux"), _result("windows")]
 	for result in results:
 		result["evidence"] = "run/123/attempt/1"
+	proofs = [_proof("linux"), _proof("windows")]
+	proofs[1]["artifact"]["created_at"] = created_at
 	assert (
 		verify_transport(
 			_request(),
 			results,
-			[_proof("linux"), _proof("windows")],
+			proofs,
 			run_id=123,
 			attempt=1,
 			workflow=".github/workflows/quality.yml",
 		)["status"]
 		== "transport-verified"
 	)
+
+
+@pytest.mark.parametrize(
+	"created_at",
+	[
+		"2025-12-31T23:59:59Z",
+		"2026-01-01T00:02:01Z",
+		"2026-01-01T00:01:00",
+		"not-a-timestamp",
+	],
+	ids=["before-job", "after-job", "missing-timezone", "malformed"],
+)
+def test_transport_rejects_artifact_outside_job_time_contract(created_at: str) -> None:
+	from quality_gate.product_verification import verify_transport
+
+	results = [_result("linux"), _result("windows")]
+	for result in results:
+		result["evidence"] = "run/123/attempt/1"
+	proofs = [_proof("linux"), _proof("windows")]
+	proofs[1]["artifact"]["created_at"] = created_at
+	with pytest.raises(VerificationError, match="artifact creation time mismatch"):
+		verify_transport(
+			_request(),
+			results,
+			proofs,
+			run_id=123,
+			attempt=1,
+			workflow=".github/workflows/quality.yml",
+		)
 
 
 @pytest.mark.parametrize("mutation", ["missing", "failed", "wrong-head", "duplicate", "receipt"])

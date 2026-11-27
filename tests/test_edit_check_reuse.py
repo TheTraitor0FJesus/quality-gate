@@ -19,10 +19,10 @@ from test_edit_check import (
 	request,
 )
 
+from quality_gate import __version__
 from quality_gate.distribution import PolicyCache
 from quality_gate.distribution import verify_release as verify_release_cache
 from quality_gate.edit_policy import ruff_artifact, tool_path
-from quality_gate.edit_protocol import SUPPORTED_POLICIES as EDIT_SUPPORTED_POLICIES
 
 pytest_plugins = ("test_edit_check",)
 
@@ -115,11 +115,18 @@ def test_nested_package_import_order_matches_full_tree(
 	assert digest(engine_wheel.read_bytes()) == wheel_hash
 
 
-def test_policy_selection_change_requires_fresh_ruff(tmp_path: Path, wheel_cache: Path) -> None:
-	(tmp_path / "example.py").write_bytes(b"import os\nvalue = os.name\n")
-	for policy in sorted(EDIT_SUPPORTED_POLICIES):
+def test_policy_selection_change_requires_fresh_ruff(tmp_path: Path) -> None:
+	# The wheel compatibility matrix covers every pin; two distinct policies prove invalidation.
+	policies = ("v2.4.2", f"v{__version__}")
+	cache = tmp_path / "cache"
+	for policy in policies:
+		prepare_edit_cache(cache, policy)
+	project = tmp_path / "project"
+	project.mkdir()
+	(project / "example.py").write_bytes(b"import os\nvalue = os.name\n")
+	for policy in policies:
 		for expected_processes in (FRESH_PROCESSES, REUSED_PROCESSES):
-			payload = request(tmp_path, wheel_cache, "example.py")
+			payload = request(project, cache, "example.py")
 			payload["baseline"]["policy_release"] = policy
 			exit_code, result = invoke(payload)
 			assert exit_code == 0, result
@@ -189,9 +196,12 @@ def test_corrupt_reuse_cannot_supply_a_clean_verdict(
 	path.write_bytes(b"value = missing_name\n")
 	exit_code, first = invoke(request(tmp_path, edit_cache, "example.py"))
 	assert exit_code == 1, first
-	cache = tmp_path.parent / f"{tmp_path.name}-user-cache" / "quality-gate/verification-evidence-v1"
+	cache = (
+		tmp_path.parent / f"{tmp_path.name}-user-cache" / "quality-gate/verification-evidence-v1"
+	)
 	record = next(
-		item for item in cache.glob("*.json")
+		item
+		for item in cache.glob("*.json")
 		if json.loads(item.read_bytes())["payload"]["scope"].get("check") == "edit.batch.v1"
 	)
 	if failure == "record":
@@ -204,7 +214,9 @@ def test_corrupt_reuse_cannot_supply_a_clean_verdict(
 	elif failure == "truncated":
 		record.write_bytes(b'{"payload":')
 	elif failure == "oversized":
-		record.write_bytes(b"x" * (300 * 1024))
+		# Keep JSON and its authenticated payload valid: only the read limit must reject it.
+		content = record.read_bytes()
+		record.write_bytes(content + b" " * (320 * 1024 + 1 - len(content)))
 	elif failure == "key":
 		(cache / "key").write_bytes(b"changed key")
 	elif failure == "locked":

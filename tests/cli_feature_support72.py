@@ -8,8 +8,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tomllib
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,7 +17,6 @@ from quality_gate import runner
 from quality_gate.cli import main
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import ExternalTool, ReleaseFile, ReleaseManifest
-from quality_gate.temp_workspace import TemporaryWorkspaceError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -151,10 +148,13 @@ def _invoke(
 	capsys: pytest.CaptureFixture[str],
 	*,
 	verbose: bool = False,
+	profile: bool = False,
 ) -> tuple[int, str]:
 	arguments = ["quality-gate", "--root", str(root), "check"]
 	if verbose:
 		arguments.append("--verbose")
+	if profile:
+		arguments.append("--profile")
 	monkeypatch.setattr(sys, "argv", arguments)
 	result = main()
 	return result, capsys.readouterr().out
@@ -214,39 +214,3 @@ def _deptry_issue(code: str, module: str, path: str, line: int | None) -> dict[s
 		"module": module,
 		"location": {"file": path, "line": line, "column": 0},
 	}
-
-
-__all__ = [
-	"EXIT_UNCHECKED",
-	"EXPECTED_MULTI_COMPONENT_RUFF_CHECKS",
-	"ExternalTool",
-	"FIXTURES",
-	"Path",
-	"REPOSITORY",
-	"ReleaseFile",
-	"ReleaseManifest",
-	"SimpleNamespace",
-	"TemporaryWorkspaceError",
-	"VALID_WORKFLOW",
-	"_coverage_release_manifest",
-	"_declare_dependency_input",
-	"_deptry_issue",
-	"_disposable_repository",
-	"_git",
-	"_invoke",
-	"_make_writable",
-	"_patch_deptry_process",
-	"_patch_runtime",
-	"json",
-	"load_manifest",
-	"main",
-	"nullcontext",
-	"os",
-	"pytest",
-	"runner",
-	"shutil",
-	"stat",
-	"subprocess",
-	"sys",
-	"tomllib",
-]

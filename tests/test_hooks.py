@@ -10,7 +10,6 @@ import pytest
 
 from quality_gate.contracts import ValidationError
 from quality_gate.hook_setup import HookIntegrationError, install_hooks
-from quality_gate.operation import OPERATION_CLEANUP_SECONDS
 from quality_gate.hooks import (
 	HookInputError,
 	PushRef,
@@ -21,6 +20,7 @@ from quality_gate.hooks import (
 	read_push_refs,
 	run_commit_gate,
 )
+from quality_gate.operation import OPERATION_CLEANUP_SECONDS
 
 UNCHECKED_EXIT = 2
 
@@ -340,7 +340,9 @@ def test_pre_push_reports_invalid_input_as_unchecked(
 	assert "PUSH UNCHECKED" in capsys.readouterr().err
 
 
-def test_pre_push_reports_unknown_remote_head_as_unchecked(tmp_path: Path) -> None:
+def test_pre_push_reports_unknown_remote_head_as_unchecked(
+	tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
 	import subprocess
 
 	subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
@@ -352,6 +354,7 @@ def test_pre_push_reports_unknown_remote_head_as_unchecked(tmp_path: Path) -> No
 		)
 		== UNCHECKED_EXIT
 	)
+	assert "the remote default branch is unknown" in capsys.readouterr().err
 
 
 def test_pre_push_rejects_unavailable_outgoing_history(
@@ -388,7 +391,9 @@ def test_pre_push_allows_nondefault_deletion_without_outgoing_history(tmp_path: 
 		_push_record(local_ref="(delete)"),
 	],
 )
-def test_pre_push_rejects_inconsistent_zero_refs(tmp_path: Path, record: str) -> None:
+def test_pre_push_rejects_inconsistent_zero_refs(
+	tmp_path: Path, record: str, capsys: pytest.CaptureFixture[str]
+) -> None:
 	subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
 	subprocess.run(
 		["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
@@ -397,6 +402,7 @@ def test_pre_push_rejects_inconsistent_zero_refs(tmp_path: Path, record: str) ->
 		capture_output=True,
 	)
 	assert pre_push(tmp_path, "origin", record) == UNCHECKED_EXIT
+	assert "inconsistent ref and object IDs" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

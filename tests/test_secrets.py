@@ -195,6 +195,8 @@ def test_history_requires_an_unambiguous_base(tmp_path: Path) -> None:
 	result = secret_history_result(tmp_path, _manifest(tmp_path), prepared, base="missing")
 
 	assert result.status.value == "unchecked"
+	assert result.check_id == "secrets.history"
+	assert result.summary == "base-to-head history is unavailable or ambiguous"
 
 
 def test_history_finding_contains_commit_location_without_secret(

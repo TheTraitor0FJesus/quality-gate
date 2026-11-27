@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_cli_python_contract import (
+from cli_feature_support72 import (
 	EXIT_UNCHECKED,
 	REPOSITORY,
 	_coverage_release_manifest,

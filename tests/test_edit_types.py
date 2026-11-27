@@ -27,6 +27,8 @@ from quality_gate.path_safety import is_link_or_reparse
 from quality_gate.release_contract import UNIFIED_RELEASE, UNIFIED_RELEASE_PACKAGE_VERSION
 from quality_gate.runtime import RuntimeManager, runtime_fingerprint, runtime_identity
 
+pytest_plugins = ("test_edit_check",)
+
 REPOSITORY = Path(__file__).resolve().parents[1]
 BACKGROUND_SCHEMA = 2
 MEASUREMENT_CASES = 4
@@ -59,7 +61,7 @@ STANDARD_MANAGED_RUNTIME_PTH = {
 }
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def typing_policy() -> Path:
 	configured = os.environ.get("QUALITY_GATE_POLICY_ROOT")
 	root = Path(configured) if configured else default_cache_root() / "releases/v2.4.2"
@@ -68,7 +70,7 @@ def typing_policy() -> Path:
 	return root
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def typing_environment(typing_policy: Path) -> Iterator[Path]:
 	"""Share immutable offline tool installation; each mutable project gets its own copy."""
 	with tempfile.TemporaryDirectory(prefix="typing-tools-") as directory:
@@ -110,43 +112,13 @@ def typing_environment(typing_policy: Path) -> Iterator[Path]:
 		yield root
 
 
-@pytest.fixture(scope="module")
-def candidate_engine_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
-	root = tmp_path_factory.mktemp("candidate-engine-wheel")
-	source = root / "source"
-	source.mkdir()
-	shutil.copy2(REPOSITORY / "pyproject.toml", source)
-	shutil.copytree(
-		REPOSITORY / "quality_gate",
-		source / "quality_gate",
-		ignore=shutil.ignore_patterns("__pycache__"),
-	)
-	build_python = Path(sys.base_prefix) / ("python.exe" if os.name == "nt" else "bin/python3")
-	completed = subprocess.run(
-		[
-			str(build_python),
-			"-B",
-			"-m",
-			"pip",
-			"wheel",
-			"--no-deps",
-			"--no-build-isolation",
-			"--no-cache-dir",
-			"--wheel-dir",
-			str(root),
-			str(source),
-		],
-		capture_output=True,
-		check=False,
-		timeout=45,
-	)
-	assert completed.returncode == 0, completed.stdout + completed.stderr
-	wheels = list(root.glob("quality_gate-*.whl"))
-	assert len(wheels) == 1
-	with zipfile.ZipFile(wheels[0]) as archive:
+@pytest.fixture(scope="session")
+def candidate_engine_wheel(engine_wheel: Path) -> Path:
+	"""Validate and reuse the immutable wheel built by the edit-check fixture."""
+	with zipfile.ZipFile(engine_wheel) as archive:
 		version_source = archive.read("quality_gate/__init__.py").decode("utf-8")
-	assert f'__version__ = "{wheels[0].name.split("-")[1]}"' in version_source
-	return wheels[0]
+	assert f'__version__ = "{engine_wheel.name.split("-")[1]}"' in version_source
+	return engine_wheel
 
 
 @pytest.fixture(scope="module")

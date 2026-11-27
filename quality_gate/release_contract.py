@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-UNIFIED_RELEASE = "v4.9.0"
-UNIFIED_RELEASE_PACKAGE_VERSION = "4.9.0"
+UNIFIED_RELEASE = "v5.0.0"
+UNIFIED_RELEASE_PACKAGE_VERSION = "5.0.0"
 UNIFIED_RELEASE_PACKAGE_VERSIONS = {
 	"v2.0.5": "2.0.5",
 	"v2.0.6": "2.0.6",
@@ -33,6 +33,7 @@ UNIFIED_RELEASE_PACKAGE_VERSIONS = {
 	"v4.7.0": "4.7.0",
 	"v4.8.0": "4.8.0",
 	"v4.9.0": "4.9.0",
+	"v5.0.0": "5.0.0",
 }
 WHEEL_IDENTITY_PARTS = 3
 UNIFIED_RELEASE_TOOLS = {

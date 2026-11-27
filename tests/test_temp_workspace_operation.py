@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 import threading
 import time
 from ctypes import wintypes
@@ -10,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_temp_workspace import _start_workspace_script, _wait_for_workspace_marker
 
 import quality_gate.temp_workspace as temp_workspace
 import quality_gate.workspace_windows as workspace_windows
@@ -20,29 +19,6 @@ from quality_gate.temp_workspace import (
 	cleanup_handed_off_workspace,
 	temporary_workspace,
 )
-
-
-def _start_workspace_script(
-	script: str, environment: dict[str, str], *arguments: str
-) -> subprocess.Popen[bytes]:
-	return subprocess.Popen(
-		[sys.executable, "-c", script, *arguments],
-		cwd=Path(__file__).resolve().parents[1],
-		env=environment,
-		stdout=subprocess.PIPE,
-		stderr=subprocess.PIPE,
-	)
-
-
-def _wait_for_workspace_marker(
-	marker: Path, process: subprocess.Popen[bytes], timeout_seconds: float = 30
-) -> None:
-	deadline = time.monotonic() + timeout_seconds
-	while not marker.exists() and time.monotonic() < deadline:
-		if process.poll() is not None:
-			break
-		time.sleep(0.01)
-	assert marker.exists(), f"process did not reach marker {marker.name}"
 
 
 def test_temporary_workspace_handoff_is_reclaimed_by_the_verified_owner(
@@ -66,6 +42,7 @@ def test_temporary_workspace_handoff_is_reclaimed_by_the_verified_owner(
 	cleanup_handed_off_workspace(*transferred[0])
 	assert not workspace.exists()
 	assert foreign.read_text(encoding="utf-8") == "keep"
+
 
 def test_temporary_workspace_handoff_failure_does_not_delete_locally(
 	tmp_path: Path,
