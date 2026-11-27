@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from test_cli_python_contract import _disposable_repository, _git, _invoke
+from cli_feature_support72 import _disposable_repository, _git, _invoke
 from test_cli_python_profile import _patch_real_pytest
 
 

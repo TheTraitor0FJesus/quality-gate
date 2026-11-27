@@ -1,58 +1,16 @@
 from __future__ import annotations
 
-import hashlib
-import io
-import json
 import sys
-import tarfile
-from collections.abc import Sequence
 from threading import Thread
 from typing import BinaryIO
 
 import pytest
+from test_publication_writer import SOURCE, TARGET, _archive
 
 from quality_gate import publication_command, publication_github, publication_process
 from quality_gate.publication import MissingResourceError, PublicationError
 from quality_gate.publication_github import BoundedCommand
 from quality_gate.publication_writer import preflight_image_archive
-
-SOURCE = "a" * 40
-LAYER = b"layer-data"
-DIFF_ID = "sha256:" + hashlib.sha256(LAYER).hexdigest()
-TARGET = "ghcr.io/owner/project:v2.4.1"
-
-
-def _archive(
-	*,
-	revision: str = SOURCE,
-	filename: str = "layer/layer.tar",
-	extra_entries: Sequence[tuple[tarfile.TarInfo, bytes | None]] = (),
-) -> bytes:
-	manifest = [
-		{
-			"Config": "config.json",
-			"RepoTags": ["source/image:v1"],
-			"Layers": [filename],
-		}
-	]
-	config = {
-		"config": {"Labels": {"org.opencontainers.image.revision": revision}},
-		"rootfs": {"type": "layers", "diff_ids": [DIFF_ID]},
-	}
-	files = {
-		"manifest.json": json.dumps(manifest).encode(),
-		"config.json": json.dumps(config).encode(),
-		filename: LAYER,
-	}
-	output = io.BytesIO()
-	with tarfile.open(fileobj=output, mode="w") as archive:
-		for name, content in files.items():
-			member = tarfile.TarInfo(name)
-			member.size = len(content)
-			archive.addfile(member, io.BytesIO(content))
-		for member, content in extra_entries:
-			archive.addfile(member, io.BytesIO(content) if content is not None else None)
-	return output.getvalue()
 
 
 @pytest.mark.parametrize(

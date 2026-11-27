@@ -1,8 +1,7 @@
-"""Public secret candidate and working-tree scanner contract with real Gitleaks."""
+"""Failure contracts for the public working-tree secret scanner."""
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import os
@@ -15,88 +14,20 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from test_edit_secrets import (
+	EXIT_UNCHECKED,
+	SYNTHETIC,
+	digest,
+	invoke,
+	invoke_worker,
+	manifest_text,
+	payload,
+)
+from test_edit_secrets import (
+	policy_root as policy_root,
+)
 
-from quality_gate.distribution import default_cache_root, verify_release
-
-REPOSITORY = Path(__file__).resolve().parents[1]
-SYNTHETIC = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
-SCANNER_PROCESS_COUNT = 3
-INPUT_PAIR_COUNT = 2
-EXIT_UNCHECKED = 2
-
-
-def digest(content: bytes) -> str:
-	return hashlib.sha256(content).hexdigest()
-
-
-@pytest.fixture(scope="module")
-def policy_root() -> Path:
-	"""Reuse immutable scanner infrastructure, including inside the staged Gate."""
-	configured = os.environ.get("QUALITY_GATE_POLICY_ROOT")
-	root = Path(configured) if configured else default_cache_root() / "releases/v2.4.2"
-	assert root.is_dir(), "Prepare the published release before running scanner integration."
-	verify_release(root)
-	return root
-
-
-def manifest_text(version: str, waiver: str = "") -> str:
-	return (
-		("" if waiver else "waivers = []\n")
-		+ f'''[quality]
-schema = 2
-policy_release = "{version}"
-[repository]
-name = "secret-fixture"
-domains = ["repository"]
-required_documents = ["AGENTS.md"]
-'''
-		+ waiver
-	)
-
-
-def payload(root: Path, policy: Path, *paths: str) -> dict[str, Any]:
-	return {
-		"schema": 1,
-		"root": str(root),
-		"files": [{"path": path, "sha256": digest((root / path).read_bytes())} for path in paths],
-		"deadline_unix_ms": int(time.time() * 1000) + 10_000,
-		"cache_dir": str(policy.parent.parent),
-		"baseline": {"policy_release": policy.name},
-	}
-
-
-def invoke(request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-	completed = subprocess.run(
-		[sys.executable, "-B", "-m", "quality_gate.cli", "edit-secrets"],
-		cwd=REPOSITORY,
-		input=json.dumps(request).encode(),
-		capture_output=True,
-		timeout=13,
-		check=False,
-	)
-	assert completed.stderr == b"", "Public scanner transport leaked stderr."
-	assert SYNTHETIC.encode() not in completed.stdout, "Public scanner leaked source."
-	return completed.returncode, json.loads(completed.stdout)
-
-
-def invoke_worker(request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-	"""Exercise the public worker with real scanner IO; CLI transport has separate cases."""
-	from quality_gate.edit_worker import main
-	from quality_gate.temp_workspace import temporary_workspace
-
-	stdout = io.BytesIO()
-	with temporary_workspace(Path(request["root"])) as directory:
-		with pytest.MonkeyPatch.context() as patch:
-			patch.setattr(
-				sys, "stdin", SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))
-			)
-			patch.setattr(sys, "stdout", SimpleNamespace(buffer=stdout))
-			with pytest.raises(SystemExit) as exited:
-				main(Path(directory), secrets=True)
-	code = exited.value.code
-	assert type(code) is int
-	assert SYNTHETIC.encode() not in stdout.getvalue(), "Worker leaked source."
-	return code, json.loads(stdout.getvalue())
+from quality_gate.distribution import verify_release
 
 
 @pytest.mark.parametrize("kind", ["fingerprint", "target", "expired", "legacy_digest"])

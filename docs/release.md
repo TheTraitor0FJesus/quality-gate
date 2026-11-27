@@ -14,7 +14,7 @@ declaration and evidence formats.
    the candidate. The canonical consumer template projects the product release.
    Register the candidate in `quality_gate/release_contract.py` and in the explicit supported-policy
    set in `quality_gate/edit_protocol.py`. Retain the previous published release in
-   `RELEASED_EDIT_POLICIES` in `tests/test_edit_check.py`. The policy matrix and candidate wheel tests
+   `RELEASED_EDIT_POLICIES` in `tests/edit_check_support78.py`. The policy matrix and candidate wheel tests
    verify old pins and the new release before activation.
 3. Replace `.release/notes.md` with Russian user-visible changes and any required adaptation for this
    candidate. Include only accumulated changes selected for the candidate; published release pages
@@ -80,7 +80,8 @@ the public CLI and the verified wheel on `PYTHONPATH`, without extraction. Compa
 and final bytes against the same selected release's ordinary checks; source imports or an
 extracted installation do not establish native-wheel parity. Keep selected-wheel comparisons
 valid with only the supplied candidate in the isolated cache, without a sibling historical
-release. The regression routes are `tests/test_edit_check.py`, `tests/test_edit_secrets.py`,
+release. The regression routes are `tests/test_edit_check_selection.py`,
+`tests/test_edit_check_phases.py`, `tests/test_edit_check_reuse.py`, `tests/test_edit_secrets.py`,
 `tests/test_edit_types.py`, `tests/test_edit_reuse.py` and `tests/test_edit_integrity.py`.
 
 Full Gate sanitizes the user environment, so `tests/test_edit_integrity_host.py` can skip

@@ -1,4 +1,4 @@
-"""Behavior at the executable working-tree edit-check boundary."""
+"""Shared fixtures and helpers for the executable edit-check boundary."""
 
 from __future__ import annotations
 
@@ -6,43 +6,26 @@ import hashlib
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
 import time
-import zipfile
 from collections.abc import Iterator
 from functools import lru_cache
-from importlib.metadata import Distribution
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
-from quality_gate import __version__
 from quality_gate.contracts import load_manifest
 from quality_gate.distribution import (
 	DistributionError,
 	ExternalTool,
-	PolicyCache,
-	ReleaseManifest,
 	default_cache_root,
 	verify_release,
 )
-from quality_gate.distribution import (
-	verify_release as verify_release_cache,
-)
-from quality_gate.edit_check import Invocation
-from quality_gate.edit_check import execute as execute_edit_check
-from quality_gate.edit_inputs import Configuration
-from quality_gate.edit_policy import ruff_artifact, tool_path
 from quality_gate.edit_protocol import (
 	SUPPORTED_POLICIES as EDIT_SUPPORTED_POLICIES,
-)
-from quality_gate.edit_protocol import (
-	EditError,
-	decode_request,
 )
 from quality_gate.release_contract import (
 	UNIFIED_RELEASE_DEPENDENCIES,
@@ -50,7 +33,7 @@ from quality_gate.release_contract import (
 	UNIFIED_RELEASE_POLICY_FILES,
 	UNIFIED_RELEASE_TOOLS,
 )
-from quality_gate.runtime import RuntimeManager, runtime_identity
+from quality_gate.runtime import RuntimeManager
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 EXIT_UNCHECKED = 2
@@ -78,6 +61,9 @@ RELEASED_EDIT_POLICIES = frozenset(
 		"v4.4.0",
 		"v4.5.0",
 		"v4.6.0",
+		"v4.7.0",
+		"v4.8.0",
+		"v4.9.0",
 	}
 )
 
@@ -255,7 +241,7 @@ def wheel_cache(tmp_path_factory: pytest.TempPathFactory) -> Path:
 	return cache
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def engine_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
 	"""Build immutable packaging infrastructure once; never extract it for execution."""
 	root = tmp_path_factory.mktemp("engine-wheel")
@@ -289,7 +275,9 @@ def engine_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
 		timeout=60,
 	)
 	assert result.returncode == 0, result.stdout + result.stderr
-	return next(root.glob("quality_gate-*.whl"))
+	wheels = list(root.glob("quality_gate-*.whl"))
+	assert len(wheels) == 1
+	return wheels[0]
 
 
 def request(root: Path, cache: Path, *paths: str) -> dict[str, Any]:

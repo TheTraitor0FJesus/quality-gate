@@ -11,8 +11,8 @@ from importlib.metadata import Distribution
 from pathlib import Path
 from typing import cast
 
+import edit_check_support78 as edit_check_support
 import pytest
-import test_edit_check as edit_check_support
 from test_edit_check import (
 	FRESH_PROCESSES,
 	RELEASED_EDIT_POLICIES,

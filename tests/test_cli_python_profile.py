@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from test_cli_python_contract import (
+from cli_feature_support72 import (
 	EXIT_UNCHECKED,
 	_coverage_release_manifest,
 	_disposable_repository,
