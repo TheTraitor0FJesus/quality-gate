@@ -205,12 +205,14 @@ def _prepare_native_fixture(
 	monkeypatch: pytest.MonkeyPatch,
 	*,
 	gate_timeout_seconds: int = _GATE_TIMEOUT_SECONDS,
+	release_version: str | None = None,
 ) -> tuple[Path, Path, Path, int]:
 	assert _NATIVE_DEFAULT_GATE_TIMEOUT_SECONDS == DEFAULT_GATE_TIMEOUT_SECONDS
 	assert _NATIVE_DEFAULT_QUEUE_TIMEOUT_SECONDS == admission.DEFAULT_QUEUE_TIMEOUT_SECONDS
 	assert _NATIVE_MAX_QUEUE_TIMEOUT_SECONDS == admission.MAX_QUEUE_TIMEOUT_SECONDS
-	provider_manifest = (project_root / "quality-gate.toml").read_bytes()
-	release_version = bridge._policy_release(provider_manifest)
+	if release_version is None:
+		provider_manifest = (project_root / "quality-gate.toml").read_bytes()
+		release_version = bridge._policy_release(provider_manifest)
 	staged_manifest = f"""[quality]
 schema = 2
 policy_release = "{release_version}"

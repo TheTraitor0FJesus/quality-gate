@@ -59,6 +59,22 @@ def test_full_suite_reports_actual_pytest_outcomes(tmp_path: Path, source: str, 
 		assert result["components"][0]["totals"] == {"tests": 1, "failures": 0, "errors": 0, "skipped": 0}
 
 
+def test_full_suite_ignores_inherited_test_selection(
+	tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	from quality_gate.pytest_ci import run_tests
+
+	prepared, sha = _candidate(
+		tmp_path, "def test_pass(): pass\ndef test_fail(): assert False\n"
+	)
+	monkeypatch.setenv("PYTEST_ADDOPTS", "-k test_pass")
+	result = run_tests(prepared, tmp_path / "evidence", source_sha=sha)
+	assert result["status"] == "failed", result
+	assert result["components"][0]["totals"] == {
+		"tests": 2, "failures": 1, "errors": 0, "skipped": 0,
+	}
+
+
 def test_missing_runtime_is_an_error(tmp_path: Path) -> None:
 	from quality_gate.pytest_ci import run_tests
 

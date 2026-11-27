@@ -177,6 +177,7 @@ def _run_component(
 		"PYTHONHOME",
 		"PYTHONPATH",
 		"VIRTUAL_ENV",
+		"PYTEST_ADDOPTS",
 		"GITHUB_EVENT_PATH",
 		"GITHUB_BASE_REF",
 		"GITHUB_SHA",
