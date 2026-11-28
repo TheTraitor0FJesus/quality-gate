@@ -38,8 +38,10 @@ Content and transport verification have separate evidence requirements.
 
 After the installed-artifact audit, `quality_gate.release` invokes the installed candidate wheel's
 `quality_gate.pytest_ci` module independently. It uses the candidate policy and its bundled
-tools, a prepared component runtime, and the clean source snapshot whose Python component declares
-`test_paths = ["tests"]`. The verifier binds evidence to the exact Git HEAD and rejects source changes during testing.
+tools, a prepared component runtime, and a temporary Git worktree at the exact source HEAD whose
+Python component declares `test_paths = ["tests"]`. Local ignored files cannot affect imports; the
+runtime and output evidence stay outside the test worktree. The verifier rejects source changes
+during testing.
 Pytest's `pythonpath = ["."]` selects that snapshot's source. A successful
 PR check does not replace this merged-source verification. The build rejects a manifest without
 the Python domain or an applicable component covering the complete `tests` directory before it

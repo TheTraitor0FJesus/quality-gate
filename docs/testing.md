@@ -26,6 +26,11 @@ inconsistent JUnit evidence prevent success. Explicit `tests_applicable = false`
 `not_applicable` with their declared reason. Supplemental non-pytest runners retain their separate
 execution ownership.
 
+The verifier checks out the requested HEAD into a temporary Git worktree before starting pytest. This
+keeps ignored or other local-only files out of test imports while leaving prepared runtimes and
+published evidence in their separate cache and output locations. The original checkout and the test
+worktree are both checked against the requested source SHA.
+
 CI uploads `result.json`, per-component logs and JUnit reports. The result records source SHA,
 engine version, policy release, manifest digest, component arguments, exit codes and totals. Source
 changes during testing invalidate the result. These records explain the test job; they do not replace

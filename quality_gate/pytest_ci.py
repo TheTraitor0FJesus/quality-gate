@@ -12,6 +12,8 @@ import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +93,46 @@ def _exact_source(root: Path, sha: str, output: Path) -> bool:
 	)
 
 
+@contextmanager
+def _source_worktree(root: Path, sha: str) -> Iterator[Path]:
+	"""Run tests in a clean checkout while reusing the prepared runtime and evidence paths."""
+	with tempfile.TemporaryDirectory(prefix="qg-pytest-source-") as directory:
+		source = Path(directory) / "source"
+		try:
+			created = subprocess.run(
+				["git", "worktree", "add", "--quiet", "--detach", str(source), sha],
+				cwd=root,
+				capture_output=True,
+				text=True,
+				encoding="utf-8",
+				errors="replace",
+				timeout=30,
+				check=False,
+			)
+		except (OSError, subprocess.SubprocessError) as error:
+			raise RuntimeUnavailable("exact test source is unavailable") from error
+		if created.returncode:
+			raise RuntimeUnavailable("exact test source is unavailable")
+		try:
+			yield source
+		finally:
+			try:
+				removed = subprocess.run(
+					["git", "worktree", "remove", "--force", str(source)],
+					cwd=root,
+					capture_output=True,
+					text=True,
+					encoding="utf-8",
+					errors="replace",
+					timeout=30,
+					check=False,
+				)
+			except (OSError, subprocess.SubprocessError) as error:
+				raise RuntimeUnavailable("exact test source cleanup failed") from error
+			if removed.returncode:
+				raise RuntimeUnavailable("exact test source cleanup failed")
+
+
 def _totals(root: ET.Element) -> dict[str, int]:
 	if root.tag not in {"testsuite", "testsuites"}:
 		raise ValueError("unexpected JUnit document")
@@ -141,8 +183,9 @@ def _run_component(
 	index: int,
 	output: Path,
 	deadline: float,
+	source_root: Path,
 ) -> dict[str, Any]:
-	root = prepared.root.resolve()
+	root = source_root.resolve()
 	component = prepared.manifest.python[index]
 	item: dict[str, Any] = {"name": component.name, "test_paths": list(component.test_paths)}
 	if not component.tests_applicable:
@@ -220,7 +263,7 @@ def run_tests(
 	source_sha: str,
 	timeout_seconds: int = 2400,
 ) -> dict[str, Any]:
-	"""Run every applicable declared Python test path; never prepare an environment."""
+	"""Run declared tests in an exact-source worktree; never prepare an environment."""
 	root = prepared.root.resolve()
 	output = output.resolve()
 	output.mkdir(parents=True, exist_ok=True)
@@ -238,20 +281,35 @@ def run_tests(
 	if not _exact_source(root, source_sha, output):
 		result["reason"] = "source_changed"
 	else:
-		result["components"] = [
-			_run_component(prepared, index, output, deadline)
-			for index in range(len(prepared.manifest.python))
-		]
-		statuses = {item["status"] for item in result["components"]}
-		result["status"] = (
-			"error"
-			if "error" in statuses
-			else "failed"
-			if "failed" in statuses
-			else "passed"
-			if "passed" in statuses
-			else "not_applicable"
-		)
+		try:
+			if any(component.tests_applicable for component in prepared.manifest.python):
+				with _source_worktree(root, source_sha) as source_root:
+					result["components"] = [
+						_run_component(prepared, index, output, deadline, source_root)
+						for index in range(len(prepared.manifest.python))
+					]
+					if not _exact_source(source_root, source_sha, output):
+						result.update(status="error", reason="source_changed")
+			else:
+				result["components"] = [
+					_run_component(prepared, index, output, deadline, root)
+					for index in range(len(prepared.manifest.python))
+				]
+		except RuntimeUnavailable as error:
+			result.update(
+				status="error", reason="source_snapshot_unavailable", detail=redact(str(error))
+			)
+		if result.get("reason") not in {"source_changed", "source_snapshot_unavailable"}:
+			statuses = {item["status"] for item in result["components"]}
+			result["status"] = (
+				"error"
+				if "error" in statuses
+				else "failed"
+				if "failed" in statuses
+				else "passed"
+				if "passed" in statuses
+				else "not_applicable"
+			)
 		if not _exact_source(root, source_sha, output):
 			result.update(status="error", reason="source_changed")
 	(output / "result.json").write_text(
