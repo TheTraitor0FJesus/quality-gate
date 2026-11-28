@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -462,6 +464,53 @@ def test_release_controller_rejects_a_failed_artifact_stage(
 
 	assert marker.read_text(encoding="utf-8").splitlines() == expected_calls
 	assert ("release artifact audit diagnostic" in capfd.readouterr().out) == (stage != "setup")
+
+
+def test_release_controller_preserves_redacted_pytest_failure_diagnostics(
+	tmp_path: Path,
+) -> None:
+	test_file = tmp_path / "test_failure.py"
+	secret = "ghp_exampleCredential123456789"
+	test_file.write_text(
+		f'def test_release_failure():\n    print("x" * 20000)\n    assert False, "{secret}"\n',
+		encoding="utf-8",
+	)
+	evidence = tmp_path / "pytest-evidence"
+	script = "\n".join(
+		(
+			"import json, subprocess, sys",
+			"from pathlib import Path",
+			"test_file, evidence = map(Path, sys.argv[1:])",
+			"evidence.mkdir()",
+			"result = subprocess.run([sys.executable, '-m', 'pytest', '-q', '--', str(test_file)],",
+			"    cwd=test_file.parent, capture_output=True, text=True, check=False)",
+			"(evidence / 'component-1.log').write_text(result.stdout + result.stderr)",
+			"(evidence / 'result.json').write_text(json.dumps({",
+			"    'status': 'failed', 'components': [{",
+			"        'name': 'quality-gate', 'status': 'failed',",
+			"        'totals': {'tests': 1, 'failures': 1, 'errors': 0, 'skipped': 0},",
+			"        'log': 'component-1.log'}]}))",
+			"raise SystemExit(result.returncode)",
+		)
+	)
+
+	with pytest.raises(ReleaseControllerError) as error:
+		release._run_release_command(
+			[sys.executable, "-c", script, str(test_file), str(evidence)],
+			cwd=tmp_path,
+			environment=os.environ.copy(),
+			deadline=time.monotonic() + 30,
+			stage="full pytest",
+			failure_evidence=evidence,
+		)
+
+	assert "test_release_failure" in str(error.value)
+	assert "AssertionError" in str(error.value)
+	assert "short test summary info" in str(error.value)
+	assert "FAILED test_failure.py::test_release_failure" in str(error.value)
+	assert "tests=1, failures=1" in str(error.value)
+	assert "<REDACTED>" in str(error.value)
+	assert secret not in str(error.value)
 
 
 def test_release_controller_rejects_an_unlearned_lesson(tmp_path: Path) -> None:

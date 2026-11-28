@@ -50,7 +50,11 @@ def test_native_bridge_keeps_quality_checks_independent_of_tests(
 	bridge, _ = _load_native_bridge()
 	project_root = Path(__file__).resolve().parents[1]
 	repository, staged_path, queue_root, _ = _prepare_native_fixture(
-		native_hook_root, project_root, bridge, monkeypatch, release_version="v4.9.0"
+		native_hook_root,
+		project_root,
+		bridge,
+		monkeypatch,
+		release_version="v4.9.0" if released_engine else None,
 	)
 	version = f"{sys.version_info.major}.{sys.version_info.minor}"
 	timeout = 45
