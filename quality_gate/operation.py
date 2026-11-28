@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, TypeVar
@@ -36,7 +36,7 @@ from .operation_support import (
 from .operation_support import (
 	_is_system_workspace_temp as _is_system_workspace_temp,
 )
-from .operation_support import cleanup_inventory
+from .operation_support import _StageObservation, cleanup_inventory
 from .operation_support import (
 	observe_check as observe_check,
 )
@@ -49,7 +49,6 @@ from .operation_support import (
 
 if TYPE_CHECKING:
 	from .native_cache import NativeToolCacheSelection
-	from .runner_pytest import PytestObservation
 
 OPERATION_CLEANUP_SECONDS = 120
 MAX_CLEANUP_INVENTORY_BYTES = 64 * 1024
@@ -62,15 +61,6 @@ _SYSTEM_WORKSPACE_REPOSITORY_HASH_LENGTH = 20
 _LOWERCASE_HEX = frozenset("0123456789abcdef")
 _active: ContextVar[GateOperation | None] = ContextVar("quality_gate_operation", default=None)
 _Result = TypeVar("_Result", bound=CheckResult)
-
-
-@dataclass(slots=True)
-class _StageObservation:
-	process_required: bool
-	process_started: bool
-	check: bool = False
-	cache_selection: NativeToolCacheSelection | None = None
-	command_ms: int | None = None
 
 
 class OperationTimeoutError(RuntimeError):
@@ -112,7 +102,6 @@ class GateOperation:
 		self.results: list[CheckResult] = []
 		self.stages: list[StageTiming] = []
 		self.check_timings: dict[str, StageTiming] = {}
-		self.pytest_observations: dict[str, PytestObservation] = {}
 		self.complete = True
 		self.timed_out = False
 		self.current_stage: str | None = None

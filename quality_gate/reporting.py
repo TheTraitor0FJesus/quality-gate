@@ -36,19 +36,12 @@ def _telemetry_text(value: str, secrets: tuple[str, ...] = ()) -> str:
 	return redact(value, secrets).replace("\r", "\\r").replace("\n", "\\n")[:MAX_TELEMETRY_TEXT]
 
 
-def _pytest_totals(result: CheckResult) -> str | None:
-	if result.check_id.endswith(".pytest") and result.summary.startswith("pytest totals:"):
-		return result.summary.partition(":")[2].strip()
-	return None
-
-
 def _timing_line(
 	label: str,
 	timing: StageTiming,
 	secrets: tuple[str, ...] = (),
 	*,
 	outcome: str | None = None,
-	test_totals: str | None = None,
 	profile: bool = False,
 ) -> str:
 	values = [
@@ -60,8 +53,6 @@ def _timing_line(
 	]
 	if outcome is not None:
 		values.append(f"outcome={outcome}")
-	if test_totals is not None:
-		values.append(f"test_totals={_telemetry_text(test_totals, secrets)}")
 	for name, value in (
 		("lookup_ms", timing.lookup_ms),
 		("validation_ms", timing.validation_ms),
@@ -134,15 +125,9 @@ def _render_telemetry(verdict: Verdict, *, profile: bool) -> list[str]:
 						if profile and result.profile_outcome
 						else result.status
 					).value,
-					test_totals=_pytest_totals(result),
 					profile=profile,
 				)
 			)
-			if profile and result.check_id.endswith(".pytest"):
-				lines.extend(
-					f"    {_telemetry_text(detail, result._secrets)}"
-					for detail in result.profile_details or ("pytest durations unavailable",)
-				)
 	return lines
 
 
@@ -161,11 +146,6 @@ def _render_compact(verdict: Verdict) -> str:
 		results
 	)
 	lines.append(_render_summary(results, report_only))
-	lines.extend(
-		f"{result.check_id}: {result.status.value} - {redact(result.summary, result._secrets)}"
-		for result in results
-		if result.status is Status.PASSED and _pytest_totals(result) is not None
-	)
 	lines.extend(_render_blocker_summaries(blockers))
 	diagnostics, omitted_total, checks_with_omissions = _render_diagnostics(blockers)
 	if diagnostics:
@@ -300,12 +280,9 @@ def _render_verbose(verdict: Verdict) -> str:
 
 
 def _is_report_only(result: CheckResult) -> bool:
-	return result.status is Status.PASSED and (
-		result.check_id.endswith(".coverage_report")
-		or any(
-			"report-only" in value.casefold()
-			for value in (result.summary, result.recovery_action or "")
-		)
+	return result.status is Status.PASSED and any(
+		"report-only" in value.casefold()
+		for value in (result.summary, result.recovery_action or "")
 	)
 
 

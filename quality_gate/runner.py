@@ -207,9 +207,6 @@ from .runner_process import (
 	_error_result as _error_result,
 )
 from .runner_process import (
-	_has_pinned_coverage as _has_pinned_coverage,
-)
-from .runner_process import (
 	_remaining as _remaining,
 )
 from .runner_process import (
@@ -594,7 +591,6 @@ class _PythonCheckContext:
 	component_index: int
 	report_path: Path
 	deadline: float
-	deferred_tests: list[tuple[str, list[str], int]] | None = None
 
 	def dependency_result(self, python_executable: Path | None = None) -> CheckResult:
 		return _dependency_hygiene_result(

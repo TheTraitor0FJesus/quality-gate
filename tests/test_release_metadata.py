@@ -158,3 +158,23 @@ def test_artifact_names_are_safe_upload_identifiers() -> None:
 				"sha256": "0" * 64,
 			}
 		)
+
+
+@pytest.mark.parametrize("mode", ["valid", "missing", "incomplete"])
+def test_policy_projection_follows_the_invoked_preparation_action(tmp_path: Path, mode: str) -> None:
+	_root(tmp_path)
+	(tmp_path / ".github/workflows/quality.yml").write_text(
+		"uses: ./.quality-gate-ci/.github/actions/prepare\n", encoding="utf-8"
+	)
+	if mode != "missing":
+		action = tmp_path / ".github/actions/prepare/action.yml"
+		action.parent.mkdir(parents=True)
+		action.write_text(
+			"quality-gate sync --version $QUALITY_GATE_RELEASE\n" if mode == "valid" else "name: incomplete\n",
+			encoding="utf-8",
+		)
+	if mode == "valid":
+		assert validate_version_projections(tmp_path).version == "2.0.6"
+	else:
+		with pytest.raises(ReleaseError, match="preparation action|project the policy"):
+			validate_version_projections(tmp_path)

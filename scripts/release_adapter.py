@@ -497,12 +497,12 @@ def _parser() -> argparse.ArgumentParser:
 def main(arguments: Sequence[str] | None = None) -> int:
 	options = _parser().parse_args(arguments)
 	try:
+		if options.command == "bootstrap-check":
+			return bootstrap_check(options.policy_release, base=options.base, head=options.head)
 		with temporary_workspace(_root()):
 			if options.command == "bootstrap-setup":
 				bootstrap_setup(options.policy_release)
 				return 0
-			if options.command == "bootstrap-check":
-				return bootstrap_check(options.policy_release, base=options.base, head=options.head)
 			if options.command == "build":
 				if options.output is None:
 					raise ReleaseError("build requires --output")

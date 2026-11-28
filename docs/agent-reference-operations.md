@@ -90,7 +90,9 @@ Never treat an `unchecked` result as a pass.
 ## Test verification
 
 Resolve `CODEX_HOME` from the environment, or use `.codex` under the OS user profile when it is
-unset. From a checked Git root, run full verification with:
+unset. Select focused, expanded or full behavior tests under the global Test execution rules.
+The staged Gate checks quality and does not execute tests with a v5 engine. From a checked Git root,
+the full test command is:
 
 ```text
 python <CODEX_HOME>/tools/test_runner/cli.py run --repo <repo> --scope full --json
@@ -151,8 +153,9 @@ Then change the policy pin and all active caller references in one feature-branc
    release record; do not use a tag or branch in a caller.
 
 Run `validate`, `setup`, and `doctor`, then stage the manifest and workflow together. If an
-authorized commit is next, rely on its hook for the staged Gate. Before pushing, run full tests with
-the command above, or verify that a separate required CI status runs declared supplemental tests.
+authorized commit is next, rely on its hook for the staged Gate. Run development tests under the
+global selection rules. The v5 shared CI requires independent full pytest on the proposed merge
+for default-target PRs. Verify that a separate required CI status runs declared supplemental tests.
 The `Quality Gate` status alone does not execute or verify supplemental tests. Push the feature
 branch, require the `Quality Gate` pull-request status and any separate required supplemental-test
 status, and leave approval and merge to a human. Use a narrower test scope for focused checks.

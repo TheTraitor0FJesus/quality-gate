@@ -260,6 +260,10 @@ def validate_version_projections(root: Path | str) -> VersionProjection:
 	workflow = _read_text(
 		actual_root / ".github" / "workflows" / "quality.yml", "reusable workflow"
 	)
+	if "uses: ./.quality-gate-ci/.github/actions/prepare" in workflow:
+		workflow += _read_text(
+			actual_root / ".github/actions/prepare/action.yml", "policy preparation action"
+		)
 	if "QUALITY_GATE_RELEASE" not in workflow or "quality-gate sync" not in workflow:
 		raise ReleaseError("reusable workflow does not project the policy release dynamically")
 	from quality_gate.release_contract import supports_unified_inventory

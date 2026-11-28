@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -168,6 +170,19 @@ def _artifact(root: Path, version: str = "2.0.0", *, valid_wheel: bool = True) -
 				"def bootstrap_product_audit(root, *, policy_release):\n"
 				'    record("product-audit", policy_release, root)\n'
 				"    return SimpleNamespace(exit_code=0)\n",
+			)
+			archive.writestr(
+				"quality_gate/pytest_ci.py",
+				"import argparse\n"
+				"from ._probe import record\n"
+				"parser = argparse.ArgumentParser()\n"
+				"parser.add_argument('--root')\n"
+				"parser.add_argument('--source-sha')\n"
+				"parser.add_argument('--policy-release')\n"
+				"parser.add_argument('--output')\n"
+				"args = parser.parse_args()\n"
+				"if len(args.source_sha) != 40: raise SystemExit(2)\n"
+				"record('pytest', args.policy_release, args.root)\n",
 			)
 			archive.writestr(
 				f"{package}/METADATA",
@@ -384,6 +399,7 @@ def test_release_controller_executes_the_verified_wheel(
 	assert marker.read_text(encoding="utf-8").splitlines() == [
 		"setup v2.0.0",
 		"audit v2.0.0",
+		"pytest v2.0.0",
 	]
 
 
@@ -404,6 +420,7 @@ def test_release_controller_audits_with_candidate_policy_when_source_pin_is_prev
 	assert marker.read_text(encoding="utf-8").splitlines() == [
 		"setup v2.2.0",
 		"audit v2.2.0",
+		"pytest v2.2.0",
 	]
 
 
@@ -425,6 +442,7 @@ def test_release_controller_binds_candidate_to_product_version_not_policy_pin(
 	[
 		("setup", ["setup v2.0.0"], "runtime setup failed"),
 		("audit", ["setup v2.0.0", "audit v2.0.0"], "audit failed"),
+		("pytest", ["setup v2.0.0", "audit v2.0.0", "pytest v2.0.0"], "full pytest failed"),
 	],
 )
 def test_release_controller_rejects_a_failed_artifact_stage(
@@ -445,7 +463,54 @@ def test_release_controller_rejects_a_failed_artifact_stage(
 		verify_release_candidate(tmp_path, _artifact(tmp_path))
 
 	assert marker.read_text(encoding="utf-8").splitlines() == expected_calls
-	assert ("release artifact audit diagnostic" in capfd.readouterr().out) == (stage == "audit")
+	assert ("release artifact audit diagnostic" in capfd.readouterr().out) == (stage != "setup")
+
+
+def test_release_controller_preserves_redacted_pytest_failure_diagnostics(
+	tmp_path: Path,
+) -> None:
+	test_file = tmp_path / "test_failure.py"
+	secret = "ghp_exampleCredential123456789"
+	test_file.write_text(
+		f'def test_release_failure():\n    print("x" * 20000)\n    assert False, "{secret}"\n',
+		encoding="utf-8",
+	)
+	evidence = tmp_path / "pytest-evidence"
+	script = "\n".join(
+		(
+			"import json, subprocess, sys",
+			"from pathlib import Path",
+			"test_file, evidence = map(Path, sys.argv[1:])",
+			"evidence.mkdir()",
+			"result = subprocess.run([sys.executable, '-m', 'pytest', '-q', '--', str(test_file)],",
+			"    cwd=test_file.parent, capture_output=True, text=True, check=False)",
+			"(evidence / 'component-1.log').write_text(result.stdout + result.stderr)",
+			"(evidence / 'result.json').write_text(json.dumps({",
+			"    'status': 'failed', 'components': [{",
+			"        'name': 'quality-gate', 'status': 'failed',",
+			"        'totals': {'tests': 1, 'failures': 1, 'errors': 0, 'skipped': 0},",
+			"        'log': 'component-1.log'}]}))",
+			"raise SystemExit(result.returncode)",
+		)
+	)
+
+	with pytest.raises(ReleaseControllerError) as error:
+		release._run_release_command(
+			[sys.executable, "-c", script, str(test_file), str(evidence)],
+			cwd=tmp_path,
+			environment=os.environ.copy(),
+			deadline=time.monotonic() + 30,
+			stage="full pytest",
+			failure_evidence=evidence,
+		)
+
+	assert "test_release_failure" in str(error.value)
+	assert "AssertionError" in str(error.value)
+	assert "short test summary info" in str(error.value)
+	assert "FAILED test_failure.py::test_release_failure" in str(error.value)
+	assert "tests=1, failures=1" in str(error.value)
+	assert "<REDACTED>" in str(error.value)
+	assert secret not in str(error.value)
 
 
 def test_release_controller_rejects_an_unlearned_lesson(tmp_path: Path) -> None:

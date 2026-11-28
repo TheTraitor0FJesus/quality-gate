@@ -16,7 +16,7 @@ EXPECTED_CI_CHECK_INVOCATIONS = 2
 def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -> None:
 	"""Verify CI bootstraps the manifest release and delegates to the public gate CLI."""
 
-	workflow = WORKFLOW.read_text(encoding="utf-8")
+	workflow = WORKFLOW.read_text(encoding="utf-8") + "\n" + (REPOSITORY / ".github/actions/prepare/action.yml").read_text(encoding="utf-8")
 	references = re.findall(r"^ +uses: +([^ ]+)", workflow, re.MULTILINE)
 	manifest = tomllib.loads((REPOSITORY / "quality-gate.toml").read_text(encoding="utf-8"))
 	template = tomllib.loads(
@@ -33,7 +33,7 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 
 	assert references
 	assert all(
-		"@" in reference and FULL_SHA.fullmatch(reference.rsplit("@", 1)[1])
+		reference.startswith("./") or ("@" in reference and FULL_SHA.fullmatch(reference.rsplit("@", 1)[1]))
 		for reference in references
 	)
 	assert "@main" not in workflow
@@ -44,7 +44,7 @@ def test_reusable_workflow_runs_the_pinned_release_and_complete_cli_contract() -
 	assert '["bootstrap"]["policy_release"]' in workflow
 	assert "scripts/release_adapter.py bootstrap-setup" in workflow
 	assert "scripts/release_adapter.py bootstrap-check" in workflow
-	assert "quality_gate/release_contract.py" in workflow
+	assert "quality_gate" in workflow
 	assert "curl --fail --location" in workflow
 	assert "github.workflow_sha" not in workflow
 	assert "repository: ${{ job.workflow_repository }}" in workflow
@@ -95,7 +95,7 @@ python_version = "3.12"
 	)
 	manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
 	versions = sorted({item["python_version"] for item in manifest["python"]})
-	workflow = WORKFLOW.read_text(encoding="utf-8")
+	workflow = WORKFLOW.read_text(encoding="utf-8") + "\n" + (REPOSITORY / ".github/actions/prepare/action.yml").read_text(encoding="utf-8")
 	bootstrap = workflow.index('python-version: "3.12"')
 	read_manifest = workflow.index("Read declared Python versions")
 	prepare_declared = workflow.index("manifest_python.outputs.versions")
@@ -113,7 +113,7 @@ python_version = "3.12"
 def test_reusable_workflow_has_one_stable_job_and_detects_private_push_bypass() -> None:
 	"""Verify CI triggers, bounds, and reports the private default-branch limitation."""
 
-	workflow = WORKFLOW.read_text(encoding="utf-8")
+	workflow = WORKFLOW.read_text(encoding="utf-8") + "\n" + (REPOSITORY / ".github/actions/prepare/action.yml").read_text(encoding="utf-8")
 
 	assert "workflow_call:" in workflow
 	assert "pull_request:" in workflow
@@ -136,7 +136,7 @@ def test_provider_verification_budgets_fit_the_ci_job() -> None:
 	"""Keep component and Gate deadlines nested below the CI job deadline."""
 	manifest = tomllib.loads((REPOSITORY / "quality-gate.toml").read_text(encoding="utf-8"))
 	defaults = manifest["repository"]["defaults"]
-	workflow = WORKFLOW.read_text(encoding="utf-8")
+	workflow = WORKFLOW.read_text(encoding="utf-8") + "\n" + (REPOSITORY / ".github/actions/prepare/action.yml").read_text(encoding="utf-8")
 	job_timeout_minutes = int(
 		next(
 			line.strip().split(":", maxsplit=1)[1]
@@ -177,7 +177,7 @@ def test_dependabot_groups_monthly_version_updates_separately_from_security() ->
 def test_ci_and_local_parity_uses_one_cli_verdict_contract() -> None:
 	"""Verify both CI event paths invoke the same complete CLI contract."""
 
-	workflow = WORKFLOW.read_text(encoding="utf-8")
+	workflow = WORKFLOW.read_text(encoding="utf-8") + "\n" + (REPOSITORY / ".github/actions/prepare/action.yml").read_text(encoding="utf-8")
 
 	assert workflow.count("quality-gate check") == EXPECTED_CI_CHECK_INVOCATIONS
 	assert "quality-gate audit" not in workflow

@@ -56,48 +56,6 @@ def _component_commands(
 				manifest.repository.command_timeout_seconds,
 			)
 		)
-	if component.test_paths:
-		test_arguments = [
-			*(str(test_path.relative_to(actual_root)) for test_path in component.test_paths),
-			"-q",
-			"-p",
-			"no:cacheprovider",
-		]
-		commands.append(
-			(
-				f"{prefix}.pytest",
-				[
-					*_runner._tool_command(prepared, python_executable, "pytest"),
-					*test_arguments,
-				],
-				manifest.repository.test_timeout_seconds,
-			)
-		)
-		if _runner._has_pinned_coverage(prepared):
-			commands.extend(
-				(
-					(
-						f"{prefix}.coverage",
-						[
-							*_runner._tool_command(prepared, python_executable, "coverage"),
-							"run",
-							"-m",
-							"pytest",
-							*test_arguments,
-						],
-						manifest.repository.test_timeout_seconds,
-					),
-					(
-						f"{prefix}.coverage_report",
-						[
-							*_runner._tool_command(prepared, python_executable, "coverage"),
-							"report",
-							"--show-missing",
-						],
-						manifest.repository.command_timeout_seconds,
-					),
-				)
-			)
 	return commands
 
 
@@ -362,7 +320,7 @@ def _execute_commands(
 								and tool_configuration[0] == "ruff"
 								else command_base_environment
 							)
-							output = _runner.run(
+							_runner.run(
 								command,
 								command_root,
 								command_environment,
@@ -370,8 +328,6 @@ def _execute_commands(
 									deadline, min(timeout, component_timeout)
 								),
 							)
-					if output and check_id.endswith(".coverage_report"):
-						run_outputs[check_id] = output
 				except (_runner.NativeToolCacheError, _runner.QualityGateError) as error:
 					run_errors.append(_runner._command_error(check_id, error))
 		except _runner.OperationTimeoutError as error:
@@ -399,59 +355,29 @@ def _execute_commands(
 def _command_results(
 	executed: list[str],
 	run_errors: list[_runner.QualityGateError],
-	run_outputs: dict[str, str],
+	_run_outputs: dict[str, str],
 ) -> list[_runner.CheckResult]:
 	results: list[_runner.CheckResult] = []
-	operation = _runner.current_operation()
 	for check_id in executed:
 		errors = [error for error in run_errors if error.check_id == check_id]
-		is_coverage_collection = check_id.endswith(".coverage")
-		is_coverage_report = check_id.endswith(".coverage_report")
-		is_coverage = is_coverage_collection or is_coverage_report
-		command_outcome = _runner.Status.PASSED
+		status = _runner.Status.PASSED
 		if errors:
-			command_outcome = (
+			status = (
 				_runner.Status.UNCHECKED
 				if any(error.exit_code == _runner.EXIT_UNCHECKED for error in errors)
 				else _runner.Status.FAILED
 			)
-		status = _runner.Status.PASSED if is_coverage else command_outcome
-		command_output = run_outputs.get(check_id, "")
-		summary = "check passed" if status is _runner.Status.PASSED else "check requires attention"
-		recovery_action = "restore verification and fix the reported finding, then retry"
-		profile_details: tuple[str, ...] = ()
-		messages = tuple(str(error) for error in errors)
-		if check_id.endswith(".pytest") and operation is not None:
-			observation = operation.pytest_observations.get(check_id)
-			if observation is not None:
-				if observation.totals is not None:
-					summary = f"pytest totals: {observation.totals}"
-				profile_details = observation.durations
-		if is_coverage_collection:
-			summary = "coverage collection completed"
-		if is_coverage_report:
-			report_lines = [line.strip() for line in command_output.splitlines() if line.strip()]
-			report_line = next(
-				(line for line in reversed(report_lines) if line.startswith("TOTAL")),
-				report_lines[-1] if report_lines else "coverage report generated",
-			)
-			summary = f"coverage report: {_runner.redact(report_line)}"
-			recovery_action = "coverage is report-only and does not affect the quality verdict"
-		if errors and is_coverage:
-			summary = "coverage report unavailable; report-only: " + _runner.redact(str(errors[0]))
 		results.append(
 			_runner.CheckResult(
 				check_id=check_id,
 				status=status,
-				summary=summary,
-				profile_details=profile_details,
-				profile_outcome=command_outcome if errors and is_coverage else None,
-				findings=()
-				if is_coverage
-				else tuple(
-					_runner.Finding(message=_runner.redact(message)) for message in messages
+				summary="check requires attention" if errors else "check passed",
+				findings=tuple(
+					_runner.Finding(message=_runner.redact(str(error))) for error in errors
 				),
-				recovery_action=None if is_coverage else recovery_action if errors else None,
+				recovery_action="restore verification and fix the reported finding, then retry"
+				if errors
+				else None,
 			)
 		)
 	return results
@@ -470,13 +396,3 @@ def _mark_component_checks_not_run(
 		results.append_not_run(f"{prefix}.{suffix}", component_scope, reason)
 	if component.typecheck:
 		results.append_not_run(f"{prefix}.mypy", component_scope, reason)
-	if component.tests is not None:
-		test_paths = tuple(
-			path.relative_to(results.root).as_posix()
-			for path in (*component.test_paths, *component.missing_test_paths)
-		)
-		test_scope = f"{component_scope}; tests={','.join(test_paths)}"
-		results.append_not_run(f"{prefix}.pytest", test_scope, reason)
-		if _runner._has_pinned_coverage(prepared):
-			results.append_not_run(f"{prefix}.coverage", test_scope, reason)
-			results.append_not_run(f"{prefix}.coverage_report", test_scope, reason)

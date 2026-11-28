@@ -23,7 +23,10 @@ Update [the architecture map](docs/architecture.md) when code changes make its n
 Before changing the runner, a shared tool policy, the manifest contract, or the reusable CI workflow, read [the quality policy change guide](docs/quality-policy-changes.md). Consumers select an immutable policy release and a pinned reusable-workflow SHA; activation requires an explicit consumer update, as described in [consumer setup](docs/consumer-setup.md).
 
 For commit-hook recovery or verification, read [operations guidance](docs/operations.md).
-The hook runs the pinned released Quality Gate against staged changes.
+The hook runs the pinned released Quality Gate against staged changes. The v5 engine checks code
+quality without executing pytest or Coverage. Behavioral verification uses the independent test
+runner under the global test-selection rules. Shared CI and product test routes are documented in
+[testing guidance](docs/testing.md).
 
 ## Release and public contract changes
 

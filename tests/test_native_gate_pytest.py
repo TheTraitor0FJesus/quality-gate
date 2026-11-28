@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import sysconfig
-import zipfile
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import test_native_gate_queue
 from test_native_gate_queue import (
 	_GATE_TIMEOUT_SECONDS,
 	_SUCCESS_EXIT,
@@ -22,64 +25,36 @@ from quality_gate.hooks import commit_gate_timeout_seconds
 from quality_gate.runtime import RuntimeManager
 
 
-def test_required_pytest_works_with_gate_imported_from_wheel(tmp_path: Path) -> None:
-	project = Path(__file__).resolve().parents[1]
-	wheel = tmp_path / "quality_gate-4.9.0-py3-none-any.whl"
-	with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-		for path in (project / "quality_gate").glob("*.py"):
-			archive.write(path, path.relative_to(project).as_posix())
-	(tmp_path / "test_probe.py").write_text(
-		"import os\nimport subprocess\nimport sys\nfrom pathlib import Path\n\n"
-		"def test_probe(tmp_path):\n"
-		"    nested = tmp_path / 'test_nested.py'\n"
-		"    nested.write_text('def test_nested(): pass\\n', encoding='utf-8')\n"
-		"    for env in (dict(os.environ, PYTHONPATH=str(Path.cwd())), os.environ.copy()):\n"
-		"        result = subprocess.run([sys.executable, '-m', 'pytest', '-q', str(nested)],\n"
-		"                                env=env, cwd=tmp_path, capture_output=True, timeout=15)\n"
-		"        assert result.returncode == 0, result.stdout + result.stderr\n"
-		"        assert not Path(os.environ['QUALITY_GATE_PYTEST_OBSERVATION']).exists()\n",
-		encoding="utf-8",
-	)
-	code = """\
-import os
-import sys
-import zipimport
-from pathlib import Path
-from quality_gate import runner, runner_pytest
-from quality_gate.operation import GateOperation
-from quality_gate.temp_workspace import temporary_workspace
-
-assert isinstance(runner_pytest.__loader__, zipimport.zipimporter)
-root = Path.cwd()
-with GateOperation(root, "check") as operation:
-    with temporary_workspace(root, workspace_registered=operation.register_workspace,
-                             cleanup_owner=operation.handoff_workspace):
-        with operation.stage("python.component_1.pytest", "test_probe.py"):
-            runner.run([sys.executable, "-m", "pytest", "-q", "test_probe.py"],
-                       root, os.environ.copy(), timeout=30)
-    print(operation.pytest_observations["python.component_1.pytest"].totals)
-"""
-	result = subprocess.run(
-		[sys.executable, "-B", "-c", code],
-		cwd=tmp_path,
-		env={**os.environ, "PYTHONPATH": str(wheel)},
-		capture_output=True,
-		text=True,
-		encoding="utf-8",
-		check=False,
-		timeout=45,
-	)
-	assert result.returncode == _SUCCESS_EXIT, result.stdout + result.stderr
-	assert "1 passed" in result.stdout
+@pytest.fixture
+def native_hook_root() -> Iterator[Path]:
+	# Native venv launchers need a short physical path; keep ownership repository-local.
+	temp = Path(__file__).resolve().parents[1] / "temp"
+	temp.mkdir(exist_ok=True)
+	with tempfile.TemporaryDirectory(prefix="nh", dir=temp) as directory:
+		yield Path(directory)
 
 
-def test_native_bridge_runs_pytest_from_candidate_wheel(
-	tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("lint_failure", [False, True])
+@pytest.mark.parametrize("released_engine", [False, True], ids=["candidate-v5", "released-v4"])
+def test_native_bridge_keeps_quality_checks_independent_of_tests(
+	native_hook_root: Path, monkeypatch: pytest.MonkeyPatch, lint_failure: bool,
+	released_engine: bool,
 ) -> None:
+	if released_engine:
+		def use_released_wheel(
+			_project: Path, wheel: Path, target: Path, _version: str,
+		) -> Path:
+			shutil.copytree(wheel.parent, target)
+			return target / wheel.name
+		monkeypatch.setattr(test_native_gate_queue, "_write_candidate_wheel", use_released_wheel)
 	bridge, _ = _load_native_bridge()
 	project_root = Path(__file__).resolve().parents[1]
 	repository, staged_path, queue_root, _ = _prepare_native_fixture(
-		tmp_path, project_root, bridge, monkeypatch
+		native_hook_root,
+		project_root,
+		bridge,
+		monkeypatch,
+		release_version="v4.9.0" if released_engine else None,
 	)
 	version = f"{sys.version_info.major}.{sys.version_info.minor}"
 	timeout = 45
@@ -102,12 +77,14 @@ tests_applicable = true
 		encoding="utf-8",
 	)
 	(repository / "app").mkdir()
-	(repository / "app" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+	(repository / "app" / "app.py").write_text(("import os\n" if lint_failure else "VALUE = 1\n"), encoding="utf-8")
 	(repository / "tests").mkdir()
 	(repository / "tests" / "test_app.py").write_text(
-		"def test_app():\n    assert True\n", encoding="utf-8"
+		"def test_app():\n    assert False\n", encoding="utf-8"
 	)
 	subprocess.run(["git", "add", "--", "."], cwd=repository, check=True, capture_output=True)
+	# The hook must inspect the staged lint finding, not this repaired working file.
+	(repository / "app" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
 	manifest = load_manifest(repository)
 
 	def reuse_test_tools(python: Path, _root: Path, _inputs: tuple[str, ...]) -> None:
@@ -138,5 +115,11 @@ tests_applicable = true
 		manifest=staged,
 		capture_output=True,
 	)
-	assert result.returncode == _SUCCESS_EXIT, result.stdout + result.stderr
-	assert "python.component_1.pytest: passed - pytest totals: 1 passed" in result.stdout
+	assert result.returncode == (1 if lint_failure or released_engine else _SUCCESS_EXIT), result.stdout + result.stderr
+	if released_engine:
+		assert "python.component_1.pytest: failed" in result.stdout
+		assert "python.component_1.coverage:" in result.stdout
+	else:
+		assert "python.component_1.pytest" not in result.stdout
+		assert "python.component_1.coverage" not in result.stdout
+	assert f"python.component_1.ruff: {'failed' if lint_failure else 'passed'}" in result.stdout

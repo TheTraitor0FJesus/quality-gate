@@ -2,33 +2,7 @@
 
 from __future__ import annotations
 
-import re
-
 from . import runner as _runner
-from .runner_pytest import (
-	PytestObservation,
-	prepare_observation,
-	read_collection_failure,
-	read_exception,
-	read_failure_details,
-	read_observation,
-	read_warning_details,
-	startup_exception,
-)
-
-# Pytest's public exit codes used to interpret failures.
-_PYTEST_INTERNAL_ERROR = 3
-_PYTEST_USAGE_ERROR = 4
-_PYTEST_MAX_WARNINGS_ERROR = 6
-_PYTEST_INTERRUPTED = 2
-_PYTEST_NO_TESTS = 5
-
-
-_PYTEST_COLLECTION_ERROR = re.compile(r"^_+ ERROR collecting .+ _+$", re.MULTILINE)
-
-
-def _is_pytest_command(command: list[str]) -> bool:
-	return command[1:3] == ["-m", "pytest"] or _runner.Path(command[0]).stem.casefold() == "pytest"
 
 
 def _run_python_snapshot_checks(
@@ -134,16 +108,6 @@ def _run_bounded_subprocess(
 			if str(error) == "deadline":
 				raise _runner.subprocess.TimeoutExpired(command, timeout or 0) from error
 			raise _runner.OutputReadError("owned process output could not be collected") from error
-		if code in {1, _PYTEST_USAGE_ERROR} and _is_pytest_command(command):
-			# Early pytest failures can occur before the observer is registered.
-			# Preserve only complete lines from the known prefix if the pipe was clipped.
-			limit = _runner.MAX_COMMAND_OUTPUT_BYTES
-			if len(diagnostics) >= limit:
-				prefix = diagnostics[: limit // 2].rpartition(b"\n")[0]
-				# Drop the partial first line of the retained tail before redaction.
-				tail = diagnostics[limit // 2 :].partition(b"\n")[2] if code == 1 else b""
-				diagnostics = prefix + b"\n[pytest stderr truncated]\n" + tail
-			return code, _runner.decode_subprocess_output(diagnostics)
 		return code, _runner.decode_subprocess_output(output + diagnostics)
 	return _runner._run_legacy_subprocess(command, root, environment, timeout)
 
@@ -197,42 +161,6 @@ def _run_legacy_subprocess(
 	return returncode, _runner.decode_subprocess_output(bytes(retained))
 
 
-def _run_observed_pytest(
-	command: list[str],
-	root: _runner.Path,
-	environment: dict[str, str],
-	timeout: float | None,
-	*,
-	profile: bool,
-) -> tuple[int, str, PytestObservation | None, str, str, bool]:
-	with _runner.temporary_directory(root) as directory:
-		report, pytest_environment, plugin_args = prepare_observation(
-			_runner.Path(directory), environment, profile=profile
-		)
-		argument_start = 3 if command[1:3] == ["-m", "pytest"] else 1
-		returncode, output = _runner._run_bounded_subprocess(
-			[*command[:argument_start], *plugin_args, *command[argument_start:]],
-			root,
-			pytest_environment,
-			timeout,
-		)
-		observation = read_observation(report)
-		if not returncode:
-			return returncode, output, observation, "", "", False
-		exception = read_exception(report)
-		diagnostics = (
-			read_failure_details(report) if observation is None else observation.diagnostics
-		)
-		if returncode == _PYTEST_MAX_WARNINGS_ERROR:
-			diagnostics = "\n\n".join(filter(None, (diagnostics, read_warning_details(report))))
-		collection_failed = (
-			read_collection_failure(report)
-			if observation is None
-			else observation.collection_failed
-		)
-		return returncode, output, observation, exception, diagnostics, collection_failed
-
-
 def run(
 	command: list[str],
 	root: _runner.Path,
@@ -241,29 +169,8 @@ def run(
 	timeout: float | None = None,
 ) -> str:
 	"""Run one quality command and return its decoded standard output."""
-	operation = _runner.current_operation()
-	is_pytest = _is_pytest_command(command)
-	observe_pytest = is_pytest and operation is not None
-	observation: PytestObservation | None = None
-	pytest_exception = ""
-	pytest_failure = ""
-	observed_collection_failure = False
 	try:
-		if is_pytest and operation is not None:
-			(
-				returncode,
-				output,
-				observation,
-				pytest_exception,
-				pytest_failure,
-				observed_collection_failure,
-			) = _run_observed_pytest(command, root, environment, timeout, profile=operation.profile)
-			if observation is not None and operation.current_stage:
-				operation.pytest_observations[operation.current_stage] = observation
-		else:
-			returncode, output = _runner._run_bounded_subprocess(
-				command, root, environment, timeout
-			)
+		returncode, output = _runner._run_bounded_subprocess(command, root, environment, timeout)
 	except OSError as error:
 		raise _runner.QualityGateError(
 			f"{' '.join(command)} could not be executed: {error}",
@@ -288,84 +195,24 @@ def run(
 	if returncode:
 		lower_detail = _runner._bounded_output(output.strip()).casefold()
 		detail = output
-		if is_pytest:
-			no_pytest_report = observation is None and not (
-				pytest_exception or pytest_failure or observed_collection_failure
-			)
-			missing_tool = (
-				no_pytest_report
-				and returncode == 1
-				and lower_detail.partition("\n")[0].rstrip().endswith(": no module named pytest")
-			)
-			collection_failed = (
-				observation.collection_failed
-				if observation is not None
-				else observed_collection_failure
-				or (not observe_pytest and _PYTEST_COLLECTION_ERROR.search(output) is not None)
-			)
-			pytest_collection_error = returncode == _PYTEST_NO_TESTS or collection_failed
-			if observe_pytest:
-				detail = _pytest_failure_detail(
-					returncode,
-					output,
-					pytest_failure,
-					pytest_exception,
-					missing_tool=missing_tool,
-				)
-		else:
-			missing_tool = any(
-				f"no module named {tool_name}" in lower_detail
-				for tool_name in ("ruff", "mypy", "pytest", "biome")
-			)
-			pytest_collection_error = "pytest" in " ".join(command).casefold() and any(
-				marker in lower_detail
-				for marker in ("error collecting", "no tests collected", "no tests ran")
-			)
+		missing_tool = any(
+			f"no module named {tool_name}" in lower_detail
+			for tool_name in ("ruff", "mypy", "biome")
+		)
 		detail = _runner._bounded_output(_runner.redact(detail.strip())) or (
 			f"Command exited with {returncode}."
 		)
 		raise _runner.QualityGateError(
 			f"{' '.join(command)}\n\n{detail}",
 			check_id="runtime.command",
-			exit_code=_runner.EXIT_UNCHECKED if missing_tool or pytest_collection_error else 1,
+			exit_code=_runner.EXIT_UNCHECKED if missing_tool else 1,
 			recovery_action=(
-				(
-					"restore the required tool in the verification runtime "
-					"and retry the quality gate"
-					if missing_tool
-					else "restore a collectable pytest suite and retry the quality gate"
-				)
-				if missing_tool or pytest_collection_error
+				"restore the required tool in the verification runtime and retry the quality gate"
+				if missing_tool
 				else "fix the reported quality finding and retry the quality gate"
 			),
 		)
 	return _runner._bounded_output(output).strip()
-
-
-def _pytest_failure_detail(
-	returncode: int,
-	output: str,
-	diagnostics: str,
-	exception: str,
-	*,
-	missing_tool: bool,
-) -> str:
-	if not exception:
-		if returncode == _PYTEST_USAGE_ERROR:
-			exception = output
-		elif returncode == _PYTEST_MAX_WARNINGS_ERROR:
-			exception = "Pytest: maximum allowed warnings exceeded. Review --max-warnings."
-	if exception or diagnostics:
-		return "\n\n".join(detail for detail in (exception, diagnostics) if detail)
-	if missing_tool:
-		return "No module named pytest in the verification runtime."
-	if returncode == 1:
-		error = startup_exception(output)
-		if error:
-			return error
-	if returncode in {1, _PYTEST_INTERRUPTED, _PYTEST_INTERNAL_ERROR, _PYTEST_NO_TESTS}:
-		return "Pytest did not provide a verified failure report."
-	return output
 
 
 def _bounded_output(value: str) -> str:
@@ -513,7 +360,6 @@ def _safe_environment(temporary_path: str) -> dict[str, str]:
 			"PYTHONDONTWRITEBYTECODE": "1",
 			"RUFF_CACHE_DIR": temporary_path,
 			"MYPY_CACHE_DIR": temporary_path,
-			"COVERAGE_FILE": str(_runner.Path(temporary_path) / ".coverage"),
 		}
 	)
 	if _runner.os.name == "nt":
@@ -577,11 +423,3 @@ def _tool_command(
 					return [str(python), "-m", name]
 				return [str(prepared.policy_root / tool.path)]
 	return [str(python), "-m", name]
-
-
-def _has_pinned_coverage(prepared: _runner.PreparedEnvironment) -> bool:
-	"""Return whether the selected policy release pins a coverage provider."""
-	release_manifest = getattr(prepared, "release_manifest", None)
-	return release_manifest is not None and any(
-		tool.name.casefold() == "coverage" for tool in release_manifest.tools
-	)

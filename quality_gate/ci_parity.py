@@ -17,6 +17,7 @@ from typing import Any
 
 from .contracts import load_manifest
 from .distribution import PolicyCache, ReleaseManifest, load_release_manifest
+from .release_contract import QUALITY_ONLY_ENGINE_MAJOR
 from .temp_workspace import temporary_workspace
 
 RESULT_LINE = re.compile(
@@ -28,11 +29,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PARITY_STATUSES = {
 	"lessons.learning": "passed",
 	"manifest.documents": "passed",
-	"python.component_1.coverage": "not_applicable",
 	"python.component_1.deptry": "passed",
 	"python.component_1.format": "passed",
 	"python.component_1.mypy": "passed",
-	"python.component_1.pytest": "passed",
 	"python.component_1.ruff": "passed",
 	"repository.documentation.components": "passed",
 	"repository.documentation.links": "passed",
@@ -49,6 +48,37 @@ EXPECTED_PARITY_STATUSES = {
 	"web.component_1.css_budget": "passed",
 	"web.component_1.javascript_budget": "passed",
 }
+
+
+def expected_statuses(engine_version: str) -> dict[str, str]:
+	"""Keep historical engine expectations separate from the v5 quality contract."""
+	if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", engine_version) is None:
+		raise RuntimeError("parity engine version is unavailable")
+	statuses = dict(EXPECTED_PARITY_STATUSES)
+	if int(engine_version.split(".")[0]) < QUALITY_ONLY_ENGINE_MAJOR:
+		statuses.update(
+			{"python.component_1.pytest": "passed", "python.component_1.coverage": "not_applicable"}
+		)
+	return statuses
+
+
+def _installed_version(environment: dict[str, str], root: Path) -> str:
+	executable = shutil.which("quality-gate", path=environment.get("PATH"))
+	if executable is None:
+		raise RuntimeError("the installed quality-gate executable is unavailable")
+	result = subprocess.run(
+		[executable, "version"],
+		cwd=root,
+		env=environment,
+		capture_output=True,
+		text=True,
+		check=True,
+		timeout=30,
+	)
+	match = re.fullmatch(r"quality-gate ([0-9]+\.[0-9]+\.[0-9]+)\s*", result.stdout)
+	if match is None:
+		raise RuntimeError("parity engine version is unavailable")
+	return match[1]
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -211,12 +241,14 @@ def build_result() -> dict[str, Any]:
 		fixture, base, credential = _fixture(temporary_root)
 		fixture_manifest = load_manifest(fixture)
 		environment = _environment(PolicyCache().root.parent)
+		engine_version = _installed_version(environment, fixture)
+		expected = expected_statuses(engine_version)
 		_setup(environment, fixture)
 		pr = _gate(environment, fixture, "--base", base, "--head", "HEAD")
 		combined_output = pr.stdout + pr.stderr
 		pr_surface = _surface(pr.stdout)
-		missing_checks = EXPECTED_PARITY_STATUSES.keys() - pr_surface.keys()
-		extra_checks = pr_surface.keys() - EXPECTED_PARITY_STATUSES.keys()
+		missing_checks = expected.keys() - pr_surface.keys()
+		extra_checks = pr_surface.keys() - expected.keys()
 		if missing_checks or extra_checks:
 			raise RuntimeError(
 				"parity fixture check surface mismatch: "
@@ -225,7 +257,7 @@ def build_result() -> dict[str, Any]:
 		unexpected_statuses = {
 			check_id: status
 			for check_id, status in pr_surface.items()
-			if EXPECTED_PARITY_STATUSES[check_id] != status
+			if expected[check_id] != status
 		}
 		if unexpected_statuses:
 			raise RuntimeError(f"parity fixture has unexpected verdicts: {unexpected_statuses}")
@@ -237,6 +269,7 @@ def build_result() -> dict[str, Any]:
 		_setup(broken_environment, fixture)
 		unavailable = _gate(broken_environment, fixture, "--base", "HEAD", "--head", "HEAD")
 		return {
+			"engine_version": engine_version,
 			"policy_release": release.version,
 			"tool_names_versions": [[tool.name, tool.version] for tool in release.tools],
 			"supplemental_tests": [
@@ -268,6 +301,7 @@ def compare_results(left_path: Path, right_path: Path) -> None:
 	left = json.loads(left_path.read_text(encoding="utf-8"))
 	right = json.loads(right_path.read_text(encoding="utf-8"))
 	keys = (
+		"engine_version",
 		"policy_release",
 		"tool_names_versions",
 		"supplemental_tests",

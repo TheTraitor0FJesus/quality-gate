@@ -216,7 +216,7 @@ def test_workspace_failure_reports_only_the_unavailable_workspace(
 	assert verdict.results[0].status is runner.Status.UNCHECKED
 
 
-def test_not_applicable_component_tests_are_reported(
+def test_test_free_component_has_no_gate_test_result(
 	tmp_path: Path,
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -237,60 +237,9 @@ def test_not_applicable_component_tests_are_reported(
 
 	verdict = runner.check(root)
 
-	tests = next(
-		result for result in verdict.results if result.check_id == "python.component_1.pytest"
-	)
-	assert tests.status is runner.Status.NOT_APPLICABLE
+	assert not any(result.check_id.endswith(".pytest") for result in verdict.results)
 
 
-def test_profile_keeps_pytest_collection_unchecked_after_prerequisite_failures(
-	tmp_path: Path,
-	monkeypatch: pytest.MonkeyPatch,
-) -> None:
-	root = shutil.copytree(FIXTURES / "python-tests", tmp_path / "repository")
-	monkeypatch.setattr(runner, "candidate_snapshot", _fake_candidate_snapshot)
-	monkeypatch.setattr(
-		runner,
-		"prepare",
-		lambda *args, **kwargs: SimpleNamespace(
-			policy_root=runner.POLICY_DIR.parent.parent,
-			runtimes=(SimpleNamespace(python=Path(sys.executable), current=True),),
-		),
-	)
-	monkeypatch.setattr(
-		runner,
-		"temporary_directory",
-		lambda root: nullcontext("test-temporary-directory"),
-	)
-	seen_commands: list[list[str]] = []
-
-	def fail_collection(
-		command: list[str], root: Path, environment: dict[str, str], *, timeout: float
-	) -> None:
-		seen_commands.append(command)
-		if "pytest" in command:
-			raise runner.QualityGateError(
-				"ERROR collecting tests/test_app.py",
-				exit_code=runner.EXIT_UNCHECKED,
-				recovery_action="fix collection",
-			)
-
-	monkeypatch.setattr(runner, "run", fail_collection)
-
-	verdict = runner.check(root, profile=True)
-
-	pytest_result = next(
-		result for result in verdict.results if result.check_id == "python.component_1.pytest"
-	)
-	assert pytest_result.status is runner.Status.UNCHECKED
-	assert [
-		result.check_id
-		for result in verdict.results
-		if result.check_id == "python.component_1.pytest"
-	] == ["python.component_1.pytest"]
-	pytest_command = next(command for command in seen_commands if "pytest" in command)
-	assert "tests" in pytest_command
-	assert any(path.replace("\\", "/") == "tests/extra" for path in pytest_command)
 
 
 def test_missing_test_path_is_unchecked_without_hiding_other_checks(

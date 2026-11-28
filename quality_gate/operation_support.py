@@ -7,10 +7,24 @@ import math
 import os
 import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from .contracts import CheckResult, Status
+
+if TYPE_CHECKING:
+	from .native_cache import NativeToolCacheSelection
+
+
+@dataclass(slots=True)
+class _StageObservation:
+	process_required: bool
+	process_started: bool
+	check: bool = False
+	cache_selection: NativeToolCacheSelection | None = None
+	command_ms: int | None = None
+
 
 _Result = TypeVar("_Result", bound=CheckResult)
 

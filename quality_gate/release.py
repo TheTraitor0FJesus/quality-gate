@@ -20,6 +20,7 @@ from pathlib import Path
 from .contracts import Manifest, Status, ValidationError, load_manifest
 from .distribution import DistributionError, PolicyCache, ReleaseManifest
 from .lessons import ReleaseBlockedError, ensure_release_ready
+from .release_diagnostics import pytest_failure_diagnostic
 from .runner import required_documents_result
 from .temp_workspace import TemporaryWorkspaceError, temporary_workspace
 
@@ -309,6 +310,7 @@ def _run_release_command(
 	environment: dict[str, str],
 	deadline: float,
 	stage: str,
+	failure_evidence: Path | None = None,
 ) -> None:
 	_LOGGER.debug("run release self-host stage=%s executable=%s", stage, command[0])
 	timeout = max(deadline - time.monotonic(), 0.1)
@@ -334,7 +336,14 @@ def _run_release_command(
 		_LOGGER.warning(
 			"release self-host stage=%s failed with return code %s", stage, result.returncode
 		)
-		raise ReleaseControllerError(f"release artifact self-host {stage} failed")
+		message = f"release artifact self-host {stage} failed"
+		if stage == "full pytest":
+			diagnostic = pytest_failure_diagnostic(
+				failure_evidence, result.stdout or "", result.stderr or ""
+			)
+			if diagnostic:
+				message += f":\n{diagnostic}"
+		raise ReleaseControllerError(message)
 	_LOGGER.debug("release self-host stage=%s completed", stage)
 
 
@@ -362,6 +371,7 @@ def _execute_artifact_gate(
 		environment["LOCALAPPDATA"] = str(workspace)
 	else:
 		environment["XDG_CACHE_HOME"] = str(workspace)
+	pytest_evidence = workspace / "pytest-evidence"
 	_run_release_command(
 		[sys.executable, "-m", "venv", "--without-pip", str(venv_root)],
 		cwd=gate_root,
@@ -447,6 +457,35 @@ def _execute_artifact_gate(
 		environment=environment,
 		deadline=deadline,
 		stage="audit",
+	)
+	try:
+		source_sha = subprocess.check_output(
+			["git", "rev-parse", "HEAD"],
+			cwd=root,
+			text=True,
+			timeout=max(deadline - time.monotonic(), 0.1),
+		).strip()
+	except (OSError, subprocess.SubprocessError) as error:
+		raise ReleaseControllerError("release test source identity is unavailable") from error
+	_run_release_command(
+		[
+			str(python),
+			"-m",
+			"quality_gate.pytest_ci",
+			"--root",
+			str(root),
+			"--policy-release",
+			release_manifest.version,
+			"--source-sha",
+			source_sha,
+			"--output",
+			str(pytest_evidence),
+		],
+		cwd=gate_root,
+		environment=environment,
+		deadline=deadline,
+		stage="full pytest",
+		failure_evidence=pytest_evidence,
 	)
 
 

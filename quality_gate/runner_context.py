@@ -179,7 +179,6 @@ def _safe_environment(temporary_path: str) -> dict[str, str]:
 			"PYTHONDONTWRITEBYTECODE": "1",
 			"RUFF_CACHE_DIR": temporary_path,
 			"MYPY_CACHE_DIR": temporary_path,
-			"COVERAGE_FILE": str(Path(temporary_path) / ".coverage"),
 		}
 	)
 	if os.name == "nt":

@@ -123,24 +123,15 @@ def run(
 		lower_detail = detail.casefold()
 		missing_tool = any(
 			f"no module named {tool_name}" in lower_detail
-			for tool_name in ("ruff", "mypy", "pytest", "biome")
-		)
-		pytest_collection_error = "pytest" in " ".join(command).casefold() and any(
-			marker in lower_detail
-			for marker in ("error collecting", "no tests collected", "no tests ran")
+			for tool_name in ("ruff", "mypy", "biome")
 		)
 		raise QualityGateError(
 			f"{' '.join(command)}\n\n{redact(detail)}",
 			check_id="runtime.command",
-			exit_code=EXIT_UNCHECKED if missing_tool or pytest_collection_error else 1,
+			exit_code=EXIT_UNCHECKED if missing_tool else 1,
 			recovery_action=(
-				(
-					"restore the required tool in the verification runtime "
-					"and retry the quality gate"
-					if missing_tool
-					else "restore a collectable pytest suite and retry the quality gate"
-				)
-				if missing_tool or pytest_collection_error
+				"restore the required tool in the verification runtime and retry the quality gate"
+				if missing_tool
 				else "fix the reported quality finding and retry the quality gate"
 			),
 		)

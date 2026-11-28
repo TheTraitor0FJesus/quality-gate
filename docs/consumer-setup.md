@@ -48,6 +48,23 @@ new consumer change. Run `validate`, `setup`, and `doctor`, then verify the resu
 The local `sync --rollback` command changes cache selection only; it does not change either
 repository pin.
 
+## Adopt the v5 testing split
+
+Update the policy and workflow pins together to the published v5 pair. The new reusable workflow
+rejects a pre-v5 consumer engine. Published older workflow/policy pairs retain their behavior.
+Keep the caller's `pull_request` trigger reachable for `opened`, `synchronize`, `reopened` and
+`edited`, including PR retargets. Without `types`, GitHub uses only opened, synchronize and reopened.
+The rollout adds the required activity list or extends an existing inline list. Unsupported caller
+syntax stops rollout for an explicit repair instead of silently omitting retarget checks.
+
+The shared workflow runs separate `Quality checks` and `Full pytest` jobs with independent setup.
+The existing required `Quality Gate` aggregate includes full pytest for PRs targeting the default
+branch. Keep that aggregate required with strict up-to-date protection where available. On hosts
+without enforcement, review both execution results and current base/head identity before merging.
+See [independent testing](testing.md) for events, evidence and failure behavior. No per-consumer
+pytest workflow or test-path list is needed. Preserve any required runner selection, including
+Windows for the skills repository.
+
 ## Migrate a schema 1 manifest
 
 `quality-gate migrate` prints a schema 2 proposal without editing files. Review the proposal and

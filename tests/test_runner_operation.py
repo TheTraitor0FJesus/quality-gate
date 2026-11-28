@@ -552,7 +552,6 @@ def test_missing_component_path_marks_dependent_checks_not_run(
 		"prepare",
 		lambda *_args, **_kwargs: SimpleNamespace(policy_root=policy_root, runtimes=()),
 	)
-	monkeypatch.setattr(runner, "_has_pinned_coverage", lambda _prepared: False)
 	monkeypatch.setattr(
 		runner,
 		"temporary_directory",
@@ -566,7 +565,7 @@ def test_missing_component_path_marks_dependent_checks_not_run(
 	assert missing_component.status is runner.Status.UNCHECKED
 	assert missing_component.telemetry is not None
 	assert missing_component.telemetry.scope == "missing-app"
-	for suffix in ("mypy", "pytest"):
+	for suffix in ("mypy",):
 		result = results[f"python.component_1.{suffix}"]
 		assert result.status is runner.Status.UNCHECKED
 		assert result.telemetry is not None

@@ -23,7 +23,7 @@ on:
         default: ""
         type: string
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
   push:
     branches:
       - main
@@ -36,8 +36,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality-gate:
-    name: Quality Gate
+  quality-checks:
+    name: Quality checks
     if: github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ inputs['runner-os'] || 'ubuntu-latest' }}
     timeout-minutes: 50
@@ -47,44 +47,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Install the fixed bootstrap Python
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v6.0.0
-        with:
-          python-version: "3.12"
-
-      - name: Read declared Python versions
-        id: manifest_python
-        shell: python
-        run: |
-          import os
-          import re
-          import tomllib
-
-          with open("quality-gate.toml", "rb") as manifest_file:
-              manifest = tomllib.load(manifest_file)
-          versions = sorted({item["python_version"] for item in manifest.get("python", [])})
-          invalid = [
-              version
-              for version in versions
-              if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", version)
-          ]
-          if invalid:
-              raise SystemExit(f"invalid Python version: {invalid[0]}")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write("versions<<QUALITY_GATE_VERSIONS\n")
-              output.write("\n".join(versions) + "\n")
-              output.write("QUALITY_GATE_VERSIONS\n")
-
-      - name: Prepare all declared Python versions
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v6.0.0
-        with:
-          python-version: ${{ inputs['python-version'] || steps.manifest_python.outputs.versions || '3.12' }}
-
-      - name: Prepare the provider's wheel-test build backend
-        if: github.repository == 'TheTraitor0FJesus/quality-gate'
-        run: |
-          python -m pip install --require-hashes --only-binary=:all: -r .release/build-requirements.txt
+          persist-credentials: false
 
       - name: Check out the verifier from the pinned reusable workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -92,81 +55,16 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .quality-gate-ci
+          persist-credentials: false
           sparse-checkout: |
-            quality_gate/ci_release.py
-            quality_gate/release_contract.py
-          sparse-checkout-cone-mode: false
+            quality_gate
+            .github/actions/prepare
 
-      - name: Sync the manifest's immutable Quality Gate release
+      - name: Prepare the exact policy and component environments
         id: policy_release
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          QUALITY_GATE_RELEASE="$(python -c 'import tomllib; print(tomllib.load(open("quality-gate.toml", "rb"))["quality"]["policy_release"])')"
-          export QUALITY_GATE_RELEASE
-          if [[ ! "$QUALITY_GATE_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "invalid policy release: $QUALITY_GATE_RELEASE" >&2
-            exit 2
-          fi
-          QUALITY_GATE_RELEASE_URL="https://github.com/TheTraitor0FJesus/quality-gate/releases/download/${QUALITY_GATE_RELEASE}"
-          QUALITY_GATE_RELEASE_API="https://api.github.com/repos/TheTraitor0FJesus/quality-gate/releases/tags/${QUALITY_GATE_RELEASE}"
-          policy_bootstrap=false
-          export QUALITY_GATE_ASSET_NAME="quality-gate-${QUALITY_GATE_RELEASE}-${RUNNER_OS}.zip"
-          export QUALITY_GATE_RELEASE_DIR="$RUNNER_TEMP/quality-gate-release"
-          export QUALITY_GATE_ARCHIVE="$RUNNER_TEMP/quality-gate-release.zip"
-          export QUALITY_GATE_RELEASE_METADATA="$RUNNER_TEMP/quality-gate-release.json"
-          mkdir -p "$QUALITY_GATE_RELEASE_DIR"
-          api_status="$(curl --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 --max-filesize 1048576 \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-            --header "X-GitHub-Api-Version: 2026-03-10" \
-            "$QUALITY_GATE_RELEASE_API" \
-            --output "$QUALITY_GATE_RELEASE_METADATA" \
-            --write-out '%{http_code}')"
-          if [[ "$api_status" == "404" && "$GITHUB_REPOSITORY" == "TheTraitor0FJesus/quality-gate" ]]; then
-            QUALITY_GATE_RELEASE="$(python -c 'import tomllib; print(tomllib.load(open(".release/release-tools.toml", "rb"))["bootstrap"]["policy_release"])')"
-            if [[ ! "$QUALITY_GATE_RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "invalid bootstrap policy release: $QUALITY_GATE_RELEASE" >&2
-              exit 2
-            fi
-            policy_bootstrap=true
-            export QUALITY_GATE_RELEASE
-            QUALITY_GATE_RELEASE_URL="https://github.com/TheTraitor0FJesus/quality-gate/releases/download/${QUALITY_GATE_RELEASE}"
-            QUALITY_GATE_RELEASE_API="https://api.github.com/repos/TheTraitor0FJesus/quality-gate/releases/tags/${QUALITY_GATE_RELEASE}"
-            export QUALITY_GATE_ASSET_NAME="quality-gate-${QUALITY_GATE_RELEASE}-${RUNNER_OS}.zip"
-            api_status="$(curl --silent --show-error --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 --max-filesize 1048576 \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-              --header "X-GitHub-Api-Version: 2026-03-10" \
-              "$QUALITY_GATE_RELEASE_API" \
-              --output "$QUALITY_GATE_RELEASE_METADATA" \
-              --write-out '%{http_code}')"
-          fi
-          if [[ "$api_status" != "200" ]]; then
-            echo "Quality Gate release metadata request returned HTTP $api_status" >&2
-            exit 2
-          fi
-          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 --max-filesize 104857600 \
-            "${QUALITY_GATE_RELEASE_URL}/${QUALITY_GATE_ASSET_NAME}" \
-            --output "$QUALITY_GATE_ARCHIVE"
-          QUALITY_GATE_WHEEL="$(python .quality-gate-ci/quality_gate/ci_release.py \
-            --metadata "$QUALITY_GATE_RELEASE_METADATA" \
-            --archive "$QUALITY_GATE_ARCHIVE" \
-            --target "$QUALITY_GATE_RELEASE_DIR" \
-            --release "$QUALITY_GATE_RELEASE" \
-            --asset-name "$QUALITY_GATE_ASSET_NAME")"
-          test -f "$QUALITY_GATE_WHEEL"
-          python -m pip install --no-deps "$QUALITY_GATE_WHEEL"
-          quality-gate sync --source "$QUALITY_GATE_RELEASE_DIR" --version "$QUALITY_GATE_RELEASE"
-          echo "release=$QUALITY_GATE_RELEASE" >> "$GITHUB_OUTPUT"
-          echo "bootstrap=$policy_bootstrap" >> "$GITHUB_OUTPUT"
-          if [[ "$policy_bootstrap" == "true" ]]; then
-            python scripts/release_adapter.py bootstrap-setup --policy-release "$QUALITY_GATE_RELEASE"
-          else
-            quality-gate setup
-          fi
+        uses: ./.quality-gate-ci/.github/actions/prepare
+        with:
+          python-version: ${{ inputs['python-version'] }}
 
       - name: Run the complete Quality Gate for a pull request range
         if: github.event_name == 'pull_request'
@@ -210,3 +108,128 @@ jobs:
           name: quality-gate-parity-${{ inputs['parity-result-name'] || runner.os }}
           path: parity-result.json
           if-no-files-found: error
+
+  pytest:
+    name: Full pytest
+    if: github.event_name == 'pull_request' && github.event.pull_request.base.ref == github.event.repository.default_branch
+    runs-on: ${{ inputs['runner-os'] || 'ubuntu-latest' }}
+    timeout-minutes: 50
+    steps:
+      - name: Check out the proposed merge candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check out the verifier from the pinned reusable workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .quality-gate-ci
+          persist-credentials: false
+          sparse-checkout: |
+            quality_gate
+            .github/actions/prepare
+
+      - name: Prepare the exact policy and component environments
+        id: policy_release
+        uses: ./.quality-gate-ci/.github/actions/prepare
+        with:
+          python-version: ${{ inputs['python-version'] }}
+
+      - name: Verify merge parents
+        shell: python
+        env:
+          EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_MERGE: ${{ github.sha }}
+        run: |
+          import os
+          import subprocess
+          expected = [os.environ[key] for key in ('EXPECTED_MERGE', 'EXPECTED_BASE', 'EXPECTED_HEAD')]
+          actual = subprocess.check_output(['git', 'rev-list', '--parents', '-n', '1', 'HEAD'], text=True).split()
+          if actual != expected:
+              raise SystemExit('The checkout is not the requested base/head merge candidate.')
+
+      - name: Run independent full pytest
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          POLICY_RELEASE: ${{ steps.policy_release.outputs.release }}
+          POLICY_BOOTSTRAP: ${{ steps.policy_release.outputs.bootstrap }}
+        run: |
+          set -euo pipefail
+          if [[ "$POLICY_BOOTSTRAP" == "true" ]]; then
+            python -m quality_gate.pytest_ci --root . --source-sha "$SOURCE_SHA" --output "$RUNNER_TEMP/pytest-evidence" --policy-release "$POLICY_RELEASE"
+          else
+            PYTHONPATH="$GITHUB_WORKSPACE/.quality-gate-ci" python -m quality_gate.pytest_ci --root . --source-sha "$SOURCE_SHA" --output "$RUNNER_TEMP/pytest-evidence"
+          fi
+
+      - name: Recheck current PR identity
+        if: always() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python .quality-gate-ci/quality_gate/ci_candidate.py --repository "$GH_REPO" --number "$PR_NUMBER" --base-ref "$EXPECTED_BASE_REF" --base-sha "$EXPECTED_BASE" --head-sha "$EXPECTED_HEAD"
+
+      - name: Publish pytest evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4.6.2
+        with:
+          name: full-pytest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pytest-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  quality-gate:
+    name: Quality Gate
+    needs: [quality-checks, pytest]
+    if: always() && (github.event_name != 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ${{ inputs['runner-os'] || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - name: Check out the identity verifier at the workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .quality-gate-ci
+          persist-credentials: false
+          sparse-checkout: quality_gate/ci_candidate.py
+          sparse-checkout-cone-mode: false
+
+      - name: Recheck current PR identity
+        if: always() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python .quality-gate-ci/quality_gate/ci_candidate.py --repository "$GH_REPO" --number "$PR_NUMBER" --base-ref "$EXPECTED_BASE_REF" --base-sha "$EXPECTED_BASE" --head-sha "$EXPECTED_HEAD"
+
+      - name: Require complete quality and applicable test results
+        shell: python
+        env:
+          QUALITY_RESULT: ${{ needs.quality-checks.result }}
+          TEST_RESULT: ${{ needs.pytest.result }}
+          TESTS_REQUIRED: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == github.event.repository.default_branch }}
+        run: |
+          import os
+          if os.environ['QUALITY_RESULT'] != 'success':
+              raise SystemExit('Quality checks did not complete successfully.')
+          if os.environ['TESTS_REQUIRED'] == 'true' and os.environ['TEST_RESULT'] != 'success':
+              raise SystemExit('Full pytest for the current merge candidate is mandatory.')
